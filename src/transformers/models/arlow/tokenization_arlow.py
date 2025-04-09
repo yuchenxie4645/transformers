@@ -16,11 +16,41 @@ VOCAB_FILES_NAMES = {
 }
 
 
-class ArlowTokenizer(PreTrainedTokenizer):
-    """ArlowTokenizer is a custom BPE tokenizer used for the ArlowGPT model.
+def bytes_to_unicode() -> Dict[int, str]:
+    """
+    GPT-2 / ByteLevel BPE uses a list of utf-8 bytes and a corresponding list of unicode strings.
+    The reversible bpe codes work on unicode strings. This function and the reversible bpe codes
+    allow us to simulate 'byte-level' subwords in purely unicode space.
+    """
+    # All the printable characters from ASCII plus some more, as used in GPT-2:
+    bs = (
+        list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    )
+    cs = bs[:]
+    n = 0
+    for b in range(2**8):
+        if b not in bs:
+            bs.append(b)
+            cs.append(2**8 + n)
+            n += 1
+    cs = [chr(n) for n in cs]
+    return dict(zip(bs, cs))
 
-    This is the slow (Python-based) implementation that provides subword tokenization,
-    padding, truncation, and special token handling.
+
+def get_pairs(word: List[str]) -> set:
+    """Return set of symbol pairs in a word."""
+    pairs = set()
+    prev_char = word[0]
+    for char in word[1:]:
+        pairs.add((prev_char, char))
+        prev_char = char
+    return pairs
+
+
+class ArlowTokenizer(PreTrainedTokenizer):
+    """
+    ArlowTokenizer is a custom slow BPE tokenizer for the ArlowGPT model,
+    implementing a GPT-2/ByteLevel-like approach in pure Python.
 
     Example:
         >>> from transformers.models.arlow.tokenization_arlow import ArlowTokenizer
@@ -29,18 +59,21 @@ class ArlowTokenizer(PreTrainedTokenizer):
         >>> print(tokens)
 
     Attributes:
-        vocab_file (str): Path to the vocabulary file.
+        vocab_file (str): Path to the vocabulary file (JSON).
         merges_file (str): Path to the merges file.
-        bos_token (`str`, *optional*, defaults to `"<|startoftext|>"`): The beginning-of-sequence token that marks the start of a text.
-        eos_token (`str`, *optional*, defaults to `"<|endoftext|>"`): The end-of-sequence token that indicates the end of a text.
-        unk_token (`str`, *optional*, defaults to `"<|unk|>"`): The token used to represent unknown words.
-        pad_token (`str`, *optional*, defaults to `"<|pad|>"`): The token used for padding sequences to a uniform length.
-        mask_token (`str`, *optional*, defaults to `"<|mask|>"`): The token used for masking parts of the input (if applicable).
-        additional_special_tokens (`Optional[List[str]]`, *optional*): Additional special tokens that should be preserved during tokenization.
+        bos_token (`str`, *optional*, defaults to `"<|startoftext|>"`): The beginning of sequence token that was used during pretraining.
+            Can be used as a sequence classifier token.
+        eos_token (`str`, *optional*, defaults to `"<|endoftext|>"`): The end of sequence token.
+        unk_token (`str`, *optional*, defaults to `"<|unk|>"`): The unknown token. A token that is not in the vocabulary
+            cannot be converted to an ID and is set to be this token instead.
+        pad_token (`str`, *optional*, defaults to `"<|pad|>"`): The token used for padding, for example when batching sequences of different lengths.
+        mask_token (`str`, *optional*, defaults to `"<|mask|>"`): The token used for masking values. This is the token used when training
+            this model with masked language modeling. This is the token which the model will try to predict.
+        additional_special_tokens (`List[str]`, *optional*): Additional special tokens used by the tokenizer.
     """
 
     vocab_files_names = VOCAB_FILES_NAMES
-    fast_tokenizer_class = "ArlowTokenizerFast"  # (Not used during conversion)
+    fast_tokenizer_class = "ArlowTokenizerFast"
     model_input_names = ["input_ids", "attention_mask"]
 
     def __init__(
@@ -55,30 +88,40 @@ class ArlowTokenizer(PreTrainedTokenizer):
         additional_special_tokens: Optional[List[str]] = None,
         **kwargs,
     ):
-        # Save file paths so they can be accessed during conversion.
+        # Store file paths for saving/conversion
         self.vocab_file = vocab_file
         self.merges_file = merges_file
 
-        # (Optional) You could convert tokens via AddedToken here as in Qwen, if desired.
-        default_special_tokens = ["<|im_start|>", "<|im_end|>"]
-        if additional_special_tokens is not None and isinstance(additional_special_tokens, list):
-            default_special_tokens.extend([t for t in additional_special_tokens if t not in default_special_tokens])
+        # Convert or extend any additional special tokens
+        default_special_tokens = []
+        if additional_special_tokens and isinstance(additional_special_tokens, list):
+            default_special_tokens.extend(additional_special_tokens)
 
-        # Load vocabulary.
+        # Load vocabulary
         with open(vocab_file, encoding="utf-8") as vocab_handle:
             self.encoder = json.load(vocab_handle)
         self.decoder = {v: k for k, v in self.encoder.items()}
 
-        # Load merges and create BPE ranks.
+        # Load merges (BPE ranks)
         with open(merges_file, encoding="utf-8") as merges_handle:
             merges = merges_handle.read().split("\n")
             merges = [m for m in merges if m and not m.startswith("#")]
             self.bpe_ranks = {tuple(merge.split()): i for i, merge in enumerate(merges)}
 
-        # Cache for BPE.
+        # Byte-level mapping (GPT-2 style)
+        self.byte_encoder = bytes_to_unicode()
+        self.byte_decoder = {v: k for k, v in self.byte_encoder.items()}
+
+        # Cache for subwords
         self.cache = {}
 
-        # Compile regex pattern.
+        # A regex matching GPT-2/ByteLevel style word boundaries
+        # This will match:
+        #   - English contractions ('s, 't, etc.)
+        #   - Letters and digits
+        #   - Symbols
+        #   - Whitespace blocks
+        # You can adjust as needed for more or less aggressive splitting
         self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
 
         super().__init__(
@@ -99,15 +142,20 @@ class ArlowTokenizer(PreTrainedTokenizer):
         return dict(self.encoder)
 
     def bpe(self, token: str) -> str:
+        """
+        Given a 'word' in the ByteLevel space, perform BPE merges according to self.bpe_ranks.
+        """
         if token in self.cache:
             return self.cache[token]
 
         word = list(token)
         pairs = get_pairs(word)
         if not pairs:
+            self.cache[token] = token
             return token
 
         while True:
+            # Find the highest-ranked (lowest index) bigram
             bigram = min(pairs, key=lambda pair: self.bpe_ranks.get(pair, float("inf")))
             if bigram not in self.bpe_ranks:
                 break
@@ -116,12 +164,12 @@ class ArlowTokenizer(PreTrainedTokenizer):
             new_word = []
             i = 0
             while i < len(word):
+                j = -1
                 try:
                     j = word.index(first, i)
                 except ValueError:
                     new_word.extend(word[i:])
                     break
-
                 new_word.extend(word[i:j])
                 i = j
                 if i < len(word) - 1 and word[i] == first and word[i + 1] == second:
@@ -135,71 +183,68 @@ class ArlowTokenizer(PreTrainedTokenizer):
                 break
             pairs = get_pairs(word)
 
-        subwords = " ".join(word)
-        self.cache[token] = subwords
-        return subwords
+        subword = " ".join(word)
+        self.cache[token] = subword
+        return subword
 
     def _tokenize(self, text: str) -> List[str]:
+        """
+        Tokenize the text into ByteLevel subwords, then apply BPE merges.
+        """
         bpe_tokens = []
         for token in re.findall(self.pat, text):
-            # Simulate byte-level encoding.
-            token = "".join(self.byte_encoder[b] for b in token.encode("utf-8"))
-            bpe_tokens.extend(bpe_token for bpe_token in self.bpe(token).split(" "))
+            # 1. Encode each character into a 'safe' unicode
+            token_bytes = token.encode("utf-8")
+            chars = "".join(self.byte_encoder[b] for b in token_bytes)
+            # 2. Apply BPE merges
+            for sub in self.bpe(chars).split(" "):
+                bpe_tokens.append(sub)
         return bpe_tokens
 
     def _convert_token_to_id(self, token: str) -> int:
+        # Return the ID if found, else the <unk> token ID
         return self.encoder.get(token, self.encoder.get(self.unk_token))
 
     def _convert_id_to_token(self, index: int) -> str:
-        return self.decoder.get(index)
+        return self.decoder.get(index, self.unk_token)
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
+        """
+        Reconstructs the text by reversing the ByteLevel encoding. We map each subword
+        back to original bytes, then decode to UTF-8.
+        """
         text = "".join(tokens)
-        text = bytearray([self.byte_decoder[c] for c in text]).decode("utf-8", errors="replace")
-        return text
+        # Convert each character in the text back to its original byte
+        byte_array = bytearray([self.byte_decoder[c] for c in text])
+        return byte_array.decode("utf-8", errors="replace")
 
     def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str, str]:
         if not os.path.isdir(save_directory):
             logger.error(f"Vocabulary path ({save_directory}) should be a directory")
-            return
+            return (None, None)
 
         vocab_file = os.path.join(
             save_directory, (filename_prefix + "-" if filename_prefix else "") + VOCAB_FILES_NAMES["vocab_file"]
         )
-        merge_file = os.path.join(
+        merges_file = os.path.join(
             save_directory, (filename_prefix + "-" if filename_prefix else "") + VOCAB_FILES_NAMES["merges_file"]
         )
 
+        # Save the vocab.json
         with open(vocab_file, "w", encoding="utf-8") as f:
-            f.write(json.dumps(self.encoder, ensure_ascii=False))
+            json.dump(self.encoder, f, ensure_ascii=False, indent=2)
 
-        index = 0
-        with open(merge_file, "w", encoding="utf-8") as writer:
+        # Save the merges.txt
+        with open(merges_file, "w", encoding="utf-8") as writer:
             writer.write("#version: 0.2\n")
-            for bpe_tokens, _ in sorted(self.bpe_ranks.items(), key=lambda kv: kv[1]):
-                if index != 0:
+            # Sort merges by their BPE rank
+            merges_sorted = sorted(self.bpe_ranks.items(), key=lambda kv: kv[1])
+            for i, ((first, second), rank) in enumerate(merges_sorted):
+                if i > 0:
                     writer.write("\n")
-                writer.write(" ".join(bpe_tokens))
-                index += 1
+                writer.write(f"{first} {second}")
 
-        return vocab_file, merge_file
+        return vocab_file, merges_file
 
-
-def get_pairs(word: List[str]) -> set:
-    """Return set of symbol pairs in a word."""
-    pairs = set()
-    prev_char = word[0]
-    for char in word[1:]:
-        pairs.add((prev_char, char))
-        prev_char = char
-    return pairs
-
-
-# Helper dictionaries for byte encoding/decoding.
-_base_byte_encoder = {i: chr(i) for i in range(256)}
-_base_byte_decoder = {v: k for k, v in _base_byte_encoder.items()}
-
-ArlowTokenizer.byte_encoder = _base_byte_encoder
-ArlowTokenizer.byte_decoder = _base_byte_decoder
 
 __all__ = ["ArlowTokenizer"]

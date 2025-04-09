@@ -1,13 +1,12 @@
-# src/transformers/models/arlow/__init__.py
+# __init__.py
 
 from typing import TYPE_CHECKING
 
 from ...utils import _LazyModule
 
 
-########################################################################
-# 1) Build _import_structure
-########################################################################
+# Build _import_structure
+
 _import_structure = {
     "configuration_arlow": ["ArlowConfig"],
     "modeling_arlow": [
@@ -19,9 +18,8 @@ _import_structure = {
     "tokenization_arlow_fast": ["ArlowTokenizerFast"],
 }
 
-########################################################################
-# 2) TYPE_CHECKING => EXACT MATCH EAGER IMPORT
-########################################################################
+# TYPE_CHECKING => EXACT MATCH EAGER IMPORT
+
 if TYPE_CHECKING:
     from .configuration_arlow import ArlowConfig
     from .modeling_arlow import (
@@ -32,9 +30,8 @@ if TYPE_CHECKING:
     from .tokenization_arlow import ArlowTokenizer
     from .tokenization_arlow_fast import ArlowTokenizerFast
 
-########################################################################
-# 3) ELSE => LAZY LOADING
-########################################################################
+# ELSE => LAZY LOADING
+
 else:
     import sys
 

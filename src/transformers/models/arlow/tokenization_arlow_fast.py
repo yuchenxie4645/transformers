@@ -1,5 +1,10 @@
 from typing import Optional, Tuple
 
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+
+# NEW: Import ByteLevel pre-tokenizer & decoder for fallback initialization
+from tokenizers.pre_tokenizers import ByteLevel
+
 from transformers.models.arlow.tokenization_arlow import ArlowTokenizer
 from transformers.tokenization_utils import AddedToken
 from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
@@ -29,7 +34,6 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
     """
 
     vocab_files_names = VOCAB_FILES_NAMES
-    # Set slow_tokenizer_class to the actual slow class.
     slow_tokenizer_class = ArlowTokenizer
     model_input_names = ["input_ids", "attention_mask"]
 
@@ -46,7 +50,8 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
         additional_special_tokens: Optional[list] = None,
         **kwargs,
     ):
-        # Similar to Qwen2TokenizerFast, convert tokens to AddedToken with proper flags.
+        # Convert str tokens to AddedToken objects with no normalization,
+        # which is typical for ByteLevel-based GPT-2 style tokenizers.
         bos_token = (
             AddedToken(bos_token, lstrip=False, rstrip=False, special=True, normalized=False)
             if isinstance(bos_token, str)
@@ -73,7 +78,8 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
             else mask_token
         )
 
-        # Call the parent class initializer.
+        # Initialize via the parent class. This will load tokenizer.json if provided
+        # or else build from vocab_file + merges_file.
         super().__init__(
             vocab_file=vocab_file,
             merges_file=merges_file,
@@ -87,7 +93,21 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
             **kwargs,
         )
 
+        # If there's NO tokenizer_file, we're building from vocab/merges. Ensure ByteLevel is set:
+        if tokenizer_file is None:
+            # Force ByteLevel pre-tokenizer + decoder for GPT-2 style byte handling
+            if self._tokenizer.pre_tokenizer is None:
+                self._tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
+            if self._tokenizer.decoder is None:
+                self._tokenizer.decoder = ByteLevelDecoder()
+
     def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:
+        """
+        Save the vocabulary files (vocab.json, merges.txt) from the underlying tokenizers library.
+        This is used if you want the 'slow' version of the tokenizer, but it works even if
+        you're using a fast tokenizer. It extracts the BPE merges and vocab from the
+        Rust tokenizer.
+        """
         files = self._tokenizer.model.save(save_directory, name=filename_prefix)
         return tuple(files)
 
