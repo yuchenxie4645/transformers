@@ -278,3 +278,12 @@ With the provided scripts and tests, you can:
 
 ## ArlowModel
 [[autodoc]] ArlowModel
+
+## ArlowRMSNorm
+[[autodoc]] ArlowRMSNorm
+
+## ArlowRotaryEmbedding
+[[autodoc]] ArlowRotaryEmbedding
+
+## apply_rotary_pos_emb
+[[autodoc]] apply_rotary_pos_emb

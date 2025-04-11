@@ -24,12 +24,12 @@ class ArlowConfig(PretrainedConfig):
             Dimensionality of the MLP (feed-forward) layers.
         max_position_embeddings (`int`, *optional*, defaults to 2048):
             The maximum sequence length (in tokens) that this model might ever be used with.
-        num_attention_heads (`int`, *optional*, defaults to 12):
+        num_attention_heads (`int`, *optional*, defaults to 24):
             Number of attention heads for each attention layer in the Transformer.
-        num_key_value_heads (`int`, *optional*, defaults to 12):
+        num_key_value_heads (`int`, *optional*, defaults to 4):
             Number of key-value heads for attention (e.g., for Grouped Query Attention). If `num_key_value_heads`
             equals `num_attention_heads`, it behaves like standard multi-head attention.
-        num_hidden_layers (`int`, *optional*, defaults to 28):
+        num_hidden_layers (`int`, *optional*, defaults to 32):
             Number of hidden layers in the Transformer decoder.
         attention_dropout (`float`, *optional*, defaults to 0.1):
             The dropout ratio for the attention probabilities.

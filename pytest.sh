@@ -5,12 +5,14 @@ conda activate transformers
 
 # Place file inside transformers repo.
 
+make fix-copies
+make fixup
 python utils/check_docstrings.py --check_all
 python utils/check_doc_toc.py
 python utils/sort_auto_mappings.py
 python utils/custom_init_isort.py
 ruff format examples tests src utils
-ruff check examples tests src utils
+ruff check examples tests src utils --fix --unsafe-fixes
 python utils/check_copies.py
 python utils/check_modular_conversion.py
 python utils/check_dummies.py

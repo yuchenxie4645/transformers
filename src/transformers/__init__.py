@@ -159,7 +159,6 @@ _import_structure = {
         "load_tf2_weights_in_pytorch_model",
     ],
     # Models
-
     "models": [],
     "models.albert": ["AlbertConfig"],
     "models.align": [
@@ -939,7 +938,6 @@ _import_structure = {
     "models.zamba": ["ZambaConfig"],
     "models.zamba2": ["Zamba2Config"],
     "models.zoedepth": ["ZoeDepthConfig"],
-
     "onnx": [],
     "pipelines": [
         "AudioClassificationPipeline",
@@ -1088,7 +1086,6 @@ except OptionalDependencyNotAvailable:
     ]
 else:
     # Fast tokenizers structure
-<<<<<<< HEAD
     _import_structure["models.albert"].append("AlbertTokenizerFast")
     _import_structure["models.arlow"].append("ArlowTokenizerFast")
     _import_structure["models.bart"].append("BartTokenizerFast")
@@ -1158,8 +1155,6 @@ else:
     _import_structure["models.xglm"].append("XGLMTokenizerFast")
     _import_structure["models.xlm_roberta"].append("XLMRobertaTokenizerFast")
     _import_structure["models.xlnet"].append("XLNetTokenizerFast")
-=======
->>>>>>> upstream/main
     _import_structure["tokenization_utils_fast"] = ["PreTrainedTokenizerFast"]
 
 
@@ -1313,7 +1308,6 @@ else:
     _import_structure["modeling_outputs"] = []
     _import_structure["modeling_rope_utils"] = ["ROPE_INIT_FUNCTIONS", "dynamic_rope_update"]
     _import_structure["modeling_utils"] = ["PreTrainedModel", "AttentionInterface"]
-<<<<<<< HEAD
 
     # PyTorch models structure
 
@@ -4022,8 +4016,6 @@ else:
             "ZoeDepthPreTrainedModel",
         ]
     )
-=======
->>>>>>> upstream/main
     _import_structure["optimization"] = [
         "Adafactor",
         "get_constant_schedule",
@@ -4229,7 +4221,7 @@ if TYPE_CHECKING:
         load_tf2_model_in_pytorch_model,
         load_tf2_weights_in_pytorch_model,
     )
-<<<<<<< HEAD
+    from .models import *
     from .models.albert import AlbertConfig
     from .models.align import (
         AlignConfig,
@@ -5094,9 +5086,6 @@ if TYPE_CHECKING:
     from .models.zamba import ZambaConfig
     from .models.zamba2 import Zamba2Config
     from .models.zoedepth import ZoeDepthConfig
-=======
-    from .models import *
->>>>>>> upstream/main
 
     # Pipelines
     from .pipelines import (
@@ -5245,7 +5234,6 @@ if TYPE_CHECKING:
     except OptionalDependencyNotAvailable:
         from .utils.dummy_tokenizers_objects import *
     else:
-<<<<<<< HEAD
         # Fast tokenizers imports
         from .models.albert import AlbertTokenizerFast
         from .models.arlow import ArlowTokenizerFast
@@ -5314,8 +5302,6 @@ if TYPE_CHECKING:
         from .models.xglm import XGLMTokenizerFast
         from .models.xlm_roberta import XLMRobertaTokenizerFast
         from .models.xlnet import XLNetTokenizerFast
-=======
->>>>>>> upstream/main
         from .tokenization_utils_fast import PreTrainedTokenizerFast
 
     try:
@@ -5454,7 +5440,6 @@ if TYPE_CHECKING:
         )
         from .modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
         from .modeling_utils import AttentionInterface, PreTrainedModel
-<<<<<<< HEAD
         from .models.albert import (
             AlbertForMaskedLM,
             AlbertForMultipleChoice,
@@ -7588,8 +7573,6 @@ if TYPE_CHECKING:
             ZoeDepthForDepthEstimation,
             ZoeDepthPreTrainedModel,
         )
-=======
->>>>>>> upstream/main
 
         # Optimization
         from .optimization import (

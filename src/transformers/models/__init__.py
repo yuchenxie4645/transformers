@@ -13,6 +13,8 @@
 # limitations under the License.
 from typing import TYPE_CHECKING
 
+from ..utils import _LazyModule
+from ..utils.import_utils import define_import_structure
 from . import (
     albert,
     align,
@@ -326,9 +328,6 @@ from . import (
     zoedepth,
 )
 
-from ..utils import _LazyModule
-from ..utils.import_utils import define_import_structure
-
 
 if TYPE_CHECKING:
     from .albert import *
@@ -641,4 +640,3 @@ else:
 
     _file = globals()["__file__"]
     sys.modules[__name__] = _LazyModule(__name__, _file, define_import_structure(_file), module_spec=__spec__)
->>>>>>> upstream/main
