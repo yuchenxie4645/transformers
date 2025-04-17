@@ -76,8 +76,10 @@ class ArlowGroupedQueryAttention(nn.Module):
         self.rope_theta = config.rope_theta
         self.max_pos    = config.max_position_embeddings
 
-        with torch.no_grad():
-            self.out_proj.weight.mul_(1 / math.sqrt(2.0))
+        w = self.out_proj.weight
+        if not getattr(w, "is_meta", False):
+            with torch.no_grad():
+                w.mul_(1 / math.sqrt(2.0))
 
     # internal ----------------------------------------------------------------
     def _maybe_build_rope(self, seq_len: int, dtype: torch.dtype, device):
