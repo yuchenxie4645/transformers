@@ -282,8 +282,11 @@ With the provided scripts and tests, you can:
 ## ArlowRMSNorm
 [[autodoc]] ArlowRMSNorm
 
-## ArlowRotaryEmbedding
-[[autodoc]] ArlowRotaryEmbedding
+## ArlowPreTrainedModel
+[[autodoc]] ArlowPreTrainedModel
 
-## apply_rotary_pos_emb
-[[autodoc]] apply_rotary_pos_emb
+## ArlowGroupedQueryAttention
+[[autodoc]] ArlowGroupedQueryAttention
+
+## ArlowFlashTransformerLayer
+[[autodoc]] ArlowFlashTransformerLayer
