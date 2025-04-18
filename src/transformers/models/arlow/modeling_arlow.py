@@ -223,6 +223,10 @@ class ArlowPreTrainedModel(PreTrainedModel):
     config_class = ArlowConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
+    _no_split_modules = ["ArlowFlashTransformerLayer"]
+    _skip_keys_device_placement = ["rope_sin", "rope_cos"]  # Skip RoPE buffers in device placement
+    _supports_flash_attn_2 = True
+    _supports_sdpa = True
 
     def _init_weights(self, module: nn.Module):
         std = self.config.initializer_range
@@ -234,8 +238,9 @@ class ArlowPreTrainedModel(PreTrainedModel):
             nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.padding_idx is not None:
                 nn.init.zeros_(module.weight[module.padding_idx])
+        elif isinstance(module, ArlowRMSNorm):
+            nn.init.ones_(module.weight)
 
-    # Trainer uses this to toggle layer flags
     def _set_gradient_checkpointing(self, module, value=False):
         if isinstance(module, ArlowFlashTransformerLayer):
             module.gradient_checkpointing = value
