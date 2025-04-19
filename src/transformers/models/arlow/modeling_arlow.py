@@ -1,11 +1,11 @@
 import math
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
-from flash_attn.flash_attn_interface import flash_attn_func
+from flash_attn.bert_padding import pad_input, unpad_input
 from flash_attn.flash_attn_interface import flash_attn_varlen_kvpacked_func
-from flash_attn.bert_padding        import unpad_input, pad_input
+
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
@@ -13,7 +13,9 @@ from transformers.utils import logging
 
 from .configuration_arlow import ArlowConfig
 
+
 logger = logging.get_logger(__name__)
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # RoPE helpers
@@ -25,20 +27,22 @@ def build_rope_cache(
     dtype: torch.dtype = torch.float32,
     device: torch.device | str | None = None,
 ):
-    theta  = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=dtype, device=device) / head_dim))
-    seq    = torch.arange(max_seq_len, dtype=dtype, device=device)[:, None]
-    freqs  = seq * theta[None, :]                 # [S, D/2]
-    sin, cos = freqs.sin(), freqs.cos()           # [S, D/2]
-    sin = sin[None, :, None, :]                  # [1, S, 1, D/2]
+    theta = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=dtype, device=device) / head_dim))
+    seq = torch.arange(max_seq_len, dtype=dtype, device=device)[:, None]
+    freqs = seq * theta[None, :]  # [S, D/2]
+    sin, cos = freqs.sin(), freqs.cos()  # [S, D/2]
+    sin = sin[None, :, None, :]  # [1, S, 1, D/2]
     cos = cos[None, :, None, :]
     return sin, cos
 
+
 def apply_rotary(x: torch.Tensor, sin: torch.Tensor, cos: torch.Tensor) -> torch.Tensor:
     # x : [B, S, H, D]
-    x1, x2  = x[..., 0::2], x[..., 1::2]
+    x1, x2 = x[..., 0::2], x[..., 1::2]
     x[..., 0::2] = x1 * cos - x2 * sin
     x[..., 1::2] = x1 * sin + x2 * cos
     return x
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # Normalisation
@@ -53,28 +57,29 @@ class ArlowRMSNorm(nn.Module):
         scale = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
         return (x * scale) * self.weight
 
+
 # ──────────────────────────────────────────────────────────────────────────
 # Grouped‑Query Flash‑Attention block
 # ──────────────────────────────────────────────────────────────────────────
 class ArlowGroupedQueryAttention(nn.Module):
     def __init__(self, config: ArlowConfig, is_cross_attn: bool = False):
         super().__init__()
-        self.hidden_size   = config.hidden_size
-        self.num_heads     = config.num_attention_heads
-        self.num_kv_heads  = config.num_key_value_heads if not is_cross_attn else config.num_attention_heads
-        self.head_dim      = self.hidden_size // self.num_heads
-        self.dropout_p     = config.attention_dropout
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_key_value_heads if not is_cross_attn else config.num_attention_heads
+        self.head_dim = self.hidden_size // self.num_heads
+        self.dropout_p = config.attention_dropout
 
-        self.q_proj  = nn.Linear(self.hidden_size, self.num_heads    * self.head_dim, bias=True)
-        self.k_proj  = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=True)
-        self.v_proj  = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=True)
-        self.out_proj= nn.Linear(self.hidden_size, self.hidden_size, bias=True)
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=True)
+        self.k_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=True)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=True)
+        self.out_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
 
         # RoPE cache
         self.register_buffer("rope_sin", None, persistent=False)
         self.register_buffer("rope_cos", None, persistent=False)
         self.rope_theta = config.rope_theta
-        self.max_pos    = config.max_position_embeddings
+        self.max_pos = config.max_position_embeddings
 
         w = self.out_proj.weight
         if not getattr(w, "is_meta", False):
@@ -95,64 +100,95 @@ class ArlowGroupedQueryAttention(nn.Module):
     # forward -----------------------------------------------------------------
     def forward(
         self,
-        hidden_states: torch.Tensor,                   # [B, S_q, D]
+        hidden_states: torch.Tensor,  # [B, S_q, D]
         attention_mask: Optional[torch.Tensor] = None,  # [B, S_q]
         encoder_hidden_states: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[torch.Tensor] = None,  # ignored in varlen path
     ) -> torch.Tensor:
+        use_flash = hidden_states.dtype in [torch.bfloat16, torch.float16]
+
         bsz, seqlen_q, _ = hidden_states.size()
         # pick KV source
         kv_input = encoder_hidden_states if encoder_hidden_states is not None else hidden_states
         seqlen_kv = kv_input.size(1)
 
         # 1) Q/K/V projections
-        q = self.q_proj(hidden_states) \
-            .view(bsz, seqlen_q,   self.num_heads,    self.head_dim)
-        k = self.k_proj(kv_input)   \
-            .view(bsz, seqlen_kv, self.num_kv_heads, self.head_dim)
-        v = self.v_proj(kv_input)   \
-            .view(bsz, seqlen_kv, self.num_kv_heads, self.head_dim)
+        q = self.q_proj(hidden_states).view(bsz, seqlen_q, self.num_heads, self.head_dim)
+        k = self.k_proj(kv_input).view(bsz, seqlen_kv, self.num_kv_heads, self.head_dim)
+        v = self.v_proj(kv_input).view(bsz, seqlen_kv, self.num_kv_heads, self.head_dim)
 
         # 2) RoPE
         self._maybe_build_rope(max(seqlen_q, seqlen_kv), q.dtype, q.device)
-        q = apply_rotary(q, self.rope_sin[:, :seqlen_q],  self.rope_cos[:, :seqlen_q])
+        q = apply_rotary(q, self.rope_sin[:, :seqlen_q], self.rope_cos[:, :seqlen_q])
         k = apply_rotary(k, self.rope_sin[:, :seqlen_kv], self.rope_cos[:, :seqlen_kv])
 
         # 3) Build masks for unpadding
         if encoder_hidden_states is None:
-            mask_q  = attention_mask
+            mask_q = attention_mask
             mask_kv = attention_mask
         else:
-            mask_q  = torch.ones(bsz, seqlen_q,  dtype=torch.bool, device=q.device)
+            mask_q = torch.ones(bsz, seqlen_q, dtype=torch.bool, device=q.device)
             mask_kv = attention_mask
 
         # 4) Unpad Q, K, V
-        q_unpad, q_idx,   q_cu,   q_max,   _ = unpad_input(q,  mask_q)   # strips pads from Q 
-        k_unpad, _,       k_cu,   k_max,   _ = unpad_input(k,  mask_kv)
-        v_unpad, _,       _,      _,       _ = unpad_input(v,  mask_kv)
+        if use_flash:
+            # 🚀 FlashAttention (varlen packed path)
+            q_unpad, q_idx, q_cu, q_max, _ = unpad_input(q, mask_q)
+            k_unpad, _, k_cu, k_max, _ = unpad_input(k, mask_kv)
+            v_unpad, _, _, _, _ = unpad_input(v, mask_kv)
 
-        # 5) Pack KV into shape [total_tokens, 2, num_kv_heads, head_dim]
-        kv_unpad = torch.stack([k_unpad, v_unpad], dim=1)
+            kv_unpad = torch.stack([k_unpad, v_unpad], dim=1)
 
-        # 6) Call varlen‑KV‑packed FlashAttention
-        #    args: q_unpad, kv_unpad, cu_q, cu_kv, max_q, max_kv, dropout, scale, causal
-        attn_unpad = flash_attn_varlen_kvpacked_func(
-            q_unpad,    # [T, num_heads, head_dim]
-            kv_unpad,   # [T, 2, num_kv_heads, head_dim]
-            q_cu, k_cu, # cum. seq‑lengths for Q and KV
-            q_max, k_max,
-            self.dropout_p if self.training else 0.0,
-            1.0 / math.sqrt(self.head_dim),
-            causal=(encoder_hidden_states is None),
-        )  # returns [T, num_heads, head_dim] 
+            attn_unpad = flash_attn_varlen_kvpacked_func(
+                q_unpad,
+                kv_unpad,
+                q_cu,
+                k_cu,
+                q_max,
+                k_max,
+                self.dropout_p if self.training else 0.0,
+                1.0 / math.sqrt(self.head_dim),
+                causal=(encoder_hidden_states is None),
+            )
 
-        # 7) Pad the outputs back to [B * S_q, num_heads, head_dim]
-        attn_padded = pad_input(attn_unpad, q_idx, bsz, seqlen_q)
+            attn_padded = pad_input(attn_unpad, q_idx, bsz, seqlen_q)
 
-        # 8) Reshape & project
+        else:
+            # 🧠 PyTorch standard scaled dot-product attention (fallback)
+            q_ = q.permute(0, 2, 1, 3)  # [B, H, S_q, D]
+            k_ = k.permute(0, 2, 1, 3)  # [B, H_kv, S_kv, D]
+            v_ = v.permute(0, 2, 1, 3)  # [B, H_kv, S_kv, D]
+
+            # If grouped-query attention, repeat kv to match num_heads
+            if self.num_kv_heads != self.num_heads:
+                repeat_factor = self.num_heads // self.num_kv_heads
+                k_ = k_.repeat_interleave(repeat_factor, dim=1)
+                v_ = v_.repeat_interleave(repeat_factor, dim=1)
+
+            attn_scores = torch.matmul(q_, k_.transpose(-2, -1)) / math.sqrt(self.head_dim)
+
+            if mask_q is not None:
+                # Turn [B, S] -> [B, 1, 1, S] and apply additive mask
+                attn_mask = (1.0 - mask_kv.unsqueeze(1).unsqueeze(2)) * -1e9
+                attn_scores = attn_scores + attn_mask
+
+            attn_probs = torch.nn.functional.softmax(attn_scores, dim=-1)
+            attn_probs = torch.nn.functional.dropout(attn_probs, p=self.dropout_p, training=self.training)
+
+            attn_padded = torch.matmul(attn_probs, v_)  # [B, H, S, D]
+            attn_padded = attn_padded.permute(0, 2, 1, 3).contiguous()  # [B, S, H, D]
+
+        # shared reshape & projection
         attn_out = attn_padded.view(bsz, seqlen_q, self.num_heads, self.head_dim)
         attn_out = attn_out.reshape(bsz, seqlen_q, self.hidden_size)
+
+        #       if not use_flash:
+        #           print(f"[Fallback] Using regular attention – dtype: {hidden_states.dtype}")
+        #       else:
+        #           print(f"[Flash] Using FlashAttention – dtype: {hidden_states.dtype}")
+
         return self.out_proj(attn_out)
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # Transformer layer (with checkpoint hooks)
@@ -162,7 +198,7 @@ class ArlowFlashTransformerLayer(nn.Module):
         super().__init__()
         self.gradient_checkpointing = False
 
-        self.self_attn  = ArlowGroupedQueryAttention(config)
+        self.self_attn = ArlowGroupedQueryAttention(config)
         self.cross_attn = (
             ArlowGroupedQueryAttention(config, is_cross_attn=True) if config.use_cross_attention else None
         )
@@ -191,7 +227,6 @@ class ArlowFlashTransformerLayer(nn.Module):
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
         # self‑attention
         sa_out = (
             torch.utils.checkpoint.checkpoint(self._sa_block, hidden_states, attention_mask)
@@ -215,6 +250,7 @@ class ArlowFlashTransformerLayer(nn.Module):
         mlp_out = self.mlp(self.norm2(hidden_states))
         hidden_states = hidden_states + self.dropout(mlp_out)
         return hidden_states
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # Pre‑trained base
@@ -245,6 +281,10 @@ class ArlowPreTrainedModel(PreTrainedModel):
         if isinstance(module, ArlowFlashTransformerLayer):
             module.gradient_checkpointing = value
 
+    is_loaded_in_8bit = False
+    is_loaded_in_4bit = False
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Encoder stack
 # ──────────────────────────────────────────────────────────────────────────
@@ -274,6 +314,7 @@ class ArlowModel(ArlowPreTrainedModel):
             )
         return self.norm(hidden_states)
 
+
 # ──────────────────────────────────────────────────────────────────────────
 # Causal‑LM wrapper
 # ──────────────────────────────────────────────────────────────────────────
@@ -282,10 +323,11 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
         super().__init__(config)
         self.model = ArlowModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        if config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
-            self._keys_to_ignore_on_load_missing = ["lm_head.weight"]
         self.post_init()
+
+    def tie_weights(self):
+        if self.config.tie_word_embeddings:
+            self._tie_or_clone_weights(self.lm_head, self.model.embed_tokens)
 
     # manual toggle remains for user convenience
     def gradient_checkpointing_enable(self, **_):
@@ -333,6 +375,7 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
         if self.config.tie_word_embeddings and f"{prefix}lm_head.weight" not in sd:
             sd[f"{prefix}lm_head.weight"] = sd[f"{prefix}model.embed_tokens.weight"]
         super()._load_from_state_dict(sd, prefix, local_md, strict, missing, unexp, errs)
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # Public API

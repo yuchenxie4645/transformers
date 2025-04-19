@@ -48,10 +48,6 @@ class ArlowConfig(PretrainedConfig):
             Whether to tie input word embeddings and output embeddings.
         pad_token_id (`int`, *optional*):
             The padding token id. Must be set if padding is used, e.g., during batched training or generation.
-        cross_attention (`bool`, *optional*, defaults to `True`):
-            Whether cross-attention layers are included in the model. If `True`, the model can attend to encoder
-            states in a text-to-text setup or a multi-turn conversational scenario where an external context is
-            provided.
         use_cross_attention (`bool`, *optional*, defaults to `True`):
             Higher-level toggle for enabling cross-attention. If set to `False`, cross-attention will be skipped
             even if the layers are present.
@@ -85,7 +81,6 @@ class ArlowConfig(PretrainedConfig):
     ...     rope_theta=100000.0,
     ...     tie_word_embeddings=True,
     ...     pad_token_id=tokenizer.pad_token_id,
-    ...     cross_attention=True,
     ...     use_cross_attention=True,
     ...     bos_token_id=1,
     ...     eos_token_id=2
@@ -118,7 +113,6 @@ class ArlowConfig(PretrainedConfig):
         rope_theta=100000.0,
         tie_word_embeddings=True,
         pad_token_id=None,
-        cross_attention=True,
         use_cross_attention=True,
         bos_token_id=1,
         eos_token_id=2,
@@ -146,7 +140,6 @@ class ArlowConfig(PretrainedConfig):
         self.rms_norm_eps = rms_norm_eps
         self.rope_theta = rope_theta
         self.tie_word_embeddings = tie_word_embeddings
-        self.cross_attention = cross_attention
         self.use_cross_attention = use_cross_attention
 
 
