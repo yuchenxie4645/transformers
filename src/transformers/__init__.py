@@ -1038,6 +1038,7 @@ _import_structure = {
     ],
     "utils.quantization_config": [
         "AqlmConfig",
+        "AutoRoundConfig",
         "AwqConfig",
         "BitNetConfig",
         "BitsAndBytesConfig",
@@ -1286,6 +1287,7 @@ else:
     ]
 
     _import_structure["modeling_flash_attention_utils"] = []
+    _import_structure["modeling_layers"] = ["GradientCheckpointingLayer"]
     _import_structure["modeling_outputs"] = []
     _import_structure["modeling_rope_utils"] = ["ROPE_INIT_FUNCTIONS", "dynamic_rope_update"]
     _import_structure["modeling_utils"] = ["PreTrainedModel", "AttentionInterface"]
@@ -5173,6 +5175,7 @@ if TYPE_CHECKING:
     # bitsandbytes config
     from .utils.quantization_config import (
         AqlmConfig,
+        AutoRoundConfig,
         AwqConfig,
         BitNetConfig,
         BitsAndBytesConfig,
@@ -5399,6 +5402,7 @@ if TYPE_CHECKING:
         from .model_debugging_utils import (
             model_addition_debugger_context,
         )
+        from .modeling_layers import GradientCheckpointingLayer
         from .modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
         from .modeling_utils import AttentionInterface, PreTrainedModel
         from .models.albert import (

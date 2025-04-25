@@ -125,6 +125,9 @@ class InternVLVisionAttention(nn.Module):
         proj_dropout = config.projection_dropout
         qk_norm = config.use_qk_norm
 
+        # Needed for flash attention
+        self.is_causal = False
+
         self.q_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=config.attention_bias)
         self.k_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=config.attention_bias)
         self.v_proj = nn.Linear(self.embed_dim, self.num_heads * self.head_dim, bias=config.attention_bias)
@@ -133,9 +136,6 @@ class InternVLVisionAttention(nn.Module):
 
         self.q_norm = InternVLVisionRMSNorm(self.embed_dim) if qk_norm else nn.Identity()
         self.k_norm = InternVLVisionRMSNorm(self.embed_dim) if qk_norm else nn.Identity()
-
-        # Needed for flash attention
-        self.is_causal = False
 
     def forward(
         self,
@@ -150,10 +150,7 @@ class InternVLVisionAttention(nn.Module):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.reshape(-1, self.num_heads, self.head_dim)
         query_states = self.q_norm(query_states)
-
-        key_states = key_states.reshape(-1, self.num_heads, self.head_dim)
         key_states = self.k_norm(key_states)
 
         query_states = query_states.reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
@@ -860,13 +857,13 @@ class InternVLForConditionalGeneration(InternVLPreTrainedModel, GenerationMixin)
     @replace_return_docstrings(output_type=InternVLCausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
-        pixel_values: torch.FloatTensor = None,
+        input_ids: Optional[torch.LongTensor] = None,
+        pixel_values: Optional[torch.FloatTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
-        vision_feature_layer: Optional[int] = None,
+        vision_feature_layer: Optional[Union[int, List[int]]] = None,
         vision_feature_select_strategy: Optional[str] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
