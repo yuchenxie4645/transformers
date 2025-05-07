@@ -1,4 +1,6 @@
-# Copyright 2024 The HuggingFace Team. All rights reserved.
+# coding=utf-8
+# Copyright 2025 IBM and the HuggingFace Inc. team. All rights reserved.
+#
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,12 +20,8 @@ from ...utils.import_utils import define_import_structure
 
 
 if TYPE_CHECKING:
-    from .configuration_beit import *
-    from .feature_extraction_beit import *
-    from .image_processing_beit import *
-    from .image_processing_beit_fast import *
-    from .modeling_beit import *
-    from .modeling_flax_beit import *
+    from .configuration_granitemoehybrid import *
+    from .modeling_granitemoehybrid import *
 else:
     import sys
 
