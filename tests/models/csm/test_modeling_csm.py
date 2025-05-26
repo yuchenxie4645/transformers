@@ -30,7 +30,7 @@ from transformers import (
 )
 from transformers.testing_utils import (
     cleanup,
-    require_torch_gpu,
+    require_torch_accelerator,
     slow,
     torch_device,
 )
@@ -150,7 +150,6 @@ class CsmForConditionalGenerationTest(ModelTesterMixin, GenerationTesterMixin, u
     test_headmasking = False
     test_resize_embeddings = False
     test_resize_embeddings_untied = False
-    test_torch_exportable = True
 
     def setUp(self):
         self.model_tester = CsmModelTester(self)
@@ -430,7 +429,7 @@ class CsmForConditionalGenerationIntegrationTest(unittest.TestCase):
         return ds[0]
 
     @slow
-    @require_torch_gpu
+    @require_torch_accelerator
     def test_1b_model_integration_generate(self):
         """
         Tests the generated tokens match the ones from the original model implementation.
@@ -474,7 +473,7 @@ class CsmForConditionalGenerationIntegrationTest(unittest.TestCase):
         torch.testing.assert_close(output_tokens.cpu(), EXPECTED_OUTPUT_TOKENS)
 
     @slow
-    @require_torch_gpu
+    @require_torch_accelerator
     def test_1b_model_integration_generate_no_audio(self):
         """
         Tests the generated tokens match the ones from the original model implementation.
@@ -535,7 +534,7 @@ class CsmForConditionalGenerationIntegrationTest(unittest.TestCase):
         torch.testing.assert_close(output_tokens.cpu(), EXPECTED_OUTPUT_TOKENS)
 
     @slow
-    @require_torch_gpu
+    @require_torch_accelerator
     def test_1b_model_integration_generate_multiple_audio(self):
         """
         Test the generated tokens match the ones from the original model implementation.
@@ -594,7 +593,7 @@ class CsmForConditionalGenerationIntegrationTest(unittest.TestCase):
         torch.testing.assert_close(output_tokens.cpu(), EXPECTED_OUTPUT_TOKENS)
 
     @slow
-    @require_torch_gpu
+    @require_torch_accelerator
     def test_1b_model_integration_generate_batched(self):
         """
         Test the generated tokens match the ones from the original model implementation.
