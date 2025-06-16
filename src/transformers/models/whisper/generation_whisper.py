@@ -16,7 +16,8 @@ import copy
 import math
 import warnings
 import zlib
-from typing import Callable, Iterator, List, Optional, Tuple, Union
+from collections.abc import Iterator
+from typing import Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -413,7 +414,7 @@ class WhisperGenerationMixin(GenerationMixin):
                 `input_ids`. It has to return a list with the allowed tokens for the next generation step conditioned
                 on the batch ID `batch_id` and the previously generated tokens `inputs_ids`. This argument is useful
                 for constrained generation conditioned on the prefix, as described in [Autoregressive Entity
-                Retrieval](https://arxiv.org/abs/2010.00904).
+                Retrieval](https://huggingface.co/papers/2010.00904).
             synced_gpus (`bool`, *optional*, defaults to `False`):
                 Whether to continue running the while loop until max_length (needed to avoid deadlocking with
                 `FullyShardedDataParallel` and DeepSpeed ZeRO Stage 3).
@@ -636,6 +637,10 @@ class WhisperGenerationMixin(GenerationMixin):
         # passing `decoder_input_ids` is deprecated - the only exception is for assisted generation
         # where the input ids are handled explicitly by the generate method
         self._check_decoder_input_ids(kwargs=kwargs)
+        # `output_attentions` is deprecated - we force eager attention if this feature is
+        # indirectly requested, e.g. through return_token_timestamps
+        if return_token_timestamps:
+            self.model.config._attn_implementation = "eager"
 
         # 3. Retrieve logits processors
         device = kwargs["encoder_outputs"][0].device if "encoder_outputs" in kwargs else input_features.device
