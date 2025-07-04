@@ -333,6 +333,7 @@ if TYPE_CHECKING:
     from .albert import *
     from .align import *
     from .altclip import *
+    from .arcee import *
     from .aria import *
     from .arlow import *
     from .audio_spectrogram_transformer import *
@@ -400,6 +401,7 @@ if TYPE_CHECKING:
     from .depth_anything import *
     from .depth_pro import *
     from .detr import *
+    from .dia import *
     from .dialogpt import *
     from .diffllama import *
     from .dinat import *
@@ -408,6 +410,7 @@ if TYPE_CHECKING:
     from .distilbert import *
     from .dit import *
     from .donut import *
+    from .dots1 import *
     from .dpr import *
     from .dpt import *
     from .efficientnet import *
@@ -469,6 +472,7 @@ if TYPE_CHECKING:
     from .janus import *
     from .jetmoe import *
     from .kosmos2 import *
+    from .kyutai_speech_to_text import *
     from .layoutlm import *
     from .layoutlmv2 import *
     from .layoutlmv3 import *
@@ -605,6 +609,7 @@ if TYPE_CHECKING:
     from .swinv2 import *
     from .switch_transformers import *
     from .t5 import *
+    from .t5gemma import *
     from .table_transformer import *
     from .tapas import *
     from .textnet import *
