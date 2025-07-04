@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 import regex as re
 
@@ -16,7 +16,7 @@ VOCAB_FILES_NAMES = {
 }
 
 
-def bytes_to_unicode() -> Dict[int, str]:
+def bytes_to_unicode() -> dict[int, str]:
     """
     GPT-2 / ByteLevel BPE uses a list of utf-8 bytes and a corresponding list of unicode strings.
     The reversible bpe codes work on unicode strings. This function and the reversible bpe codes
@@ -37,7 +37,7 @@ def bytes_to_unicode() -> Dict[int, str]:
     return dict(zip(bs, cs))
 
 
-def get_pairs(word: List[str]) -> set:
+def get_pairs(word: list[str]) -> set:
     """Return set of symbol pairs in a word."""
     pairs = set()
     prev_char = word[0]
@@ -85,7 +85,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
         unk_token: str = "<|unk|>",
         pad_token: str = "<|pad|>",
         mask_token: str = "<|mask|>",
-        additional_special_tokens: Optional[List[str]] = None,
+        additional_special_tokens: Optional[list[str]] = None,
         **kwargs,
     ):
         # Store file paths for saving/conversion
@@ -138,7 +138,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
     def vocab_size(self) -> int:
         return len(self.encoder)
 
-    def get_vocab(self) -> Dict[str, int]:
+    def get_vocab(self) -> dict[str, int]:
         return dict(self.encoder)
 
     def bpe(self, token: str) -> str:
@@ -187,7 +187,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
         self.cache[token] = subword
         return subword
 
-    def _tokenize(self, text: str) -> List[str]:
+    def _tokenize(self, text: str) -> list[str]:
         """
         Tokenize the text into ByteLevel subwords, then apply BPE merges.
         """
@@ -208,7 +208,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
     def _convert_id_to_token(self, index: int) -> str:
         return self.decoder.get(index, self.unk_token)
 
-    def convert_tokens_to_string(self, tokens: List[str]) -> str:
+    def convert_tokens_to_string(self, tokens: list[str]) -> str:
         """
         Reconstructs the text by reversing the ByteLevel encoding. We map each subword
         back to original bytes, then decode to UTF-8.
@@ -218,7 +218,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
         byte_array = bytearray([self.byte_decoder[c] for c in text])
         return byte_array.decode("utf-8", errors="replace")
 
-    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str, str]:
+    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> tuple[str, str]:
         if not os.path.isdir(save_directory):
             logger.error(f"Vocabulary path ({save_directory}) should be a directory")
             return (None, None)

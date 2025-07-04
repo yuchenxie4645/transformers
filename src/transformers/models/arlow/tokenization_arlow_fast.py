@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 
@@ -101,7 +101,7 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
             if self._tokenizer.decoder is None:
                 self._tokenizer.decoder = ByteLevelDecoder()
 
-    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:
+    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> tuple[str]:
         """
         Save the vocabulary files (vocab.json, merges.txt) from the underlying tokenizers library.
         This is used if you want the 'slow' version of the tokenizer, but it works even if
