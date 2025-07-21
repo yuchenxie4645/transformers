@@ -520,6 +520,7 @@ if TYPE_CHECKING:
     from .mobilevit import *
     from .mobilevitv2 import *
     from .modernbert import *
+    from .modernbert_decoder import *
     from .moonshine import *
     from .moshi import *
     from .mpnet import *
@@ -647,6 +648,7 @@ if TYPE_CHECKING:
     from .vits import *
     from .vivit import *
     from .vjepa2 import *
+    from .voxtral import *
     from .wav2vec2 import *
     from .wav2vec2_bert import *
     from .wav2vec2_conformer import *

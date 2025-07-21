@@ -4121,7 +4121,28 @@ else:
 # Direct imports for type-checking
 if TYPE_CHECKING:
     # All modeling imports
+    from .cache_utils import (
+        Cache,
+        CacheConfig,
+        DynamicCache,
+        EncoderDecoderCache,
+        HQQQuantizedCache,
+        HybridCache,
+        MambaCache,
+        OffloadedCache,
+        OffloadedStaticCache,
+        QuantizedCache,
+        QuantizedCacheConfig,
+        QuantoQuantizedCache,
+        SinkCache,
+        SlidingWindowCache,
+        StaticCache,
+    )
     from .configuration_utils import PretrainedConfig
+    from .convert_slow_tokenizer import (
+        SLOW_TO_FAST_CONVERTERS,
+        convert_slow_tokenizer,
+    )
 
     # Data
     from .data import (
@@ -4158,6 +4179,17 @@ if TYPE_CHECKING:
         DefaultDataCollator,
         default_data_collator,
     )
+    from .data.datasets import (
+        GlueDataset,
+        GlueDataTrainingArguments,
+        LineByLineTextDataset,
+        LineByLineWithRefDataset,
+        LineByLineWithSOPTextDataset,
+        SquadDataset,
+        SquadDataTrainingArguments,
+        TextDataset,
+        TextDatasetForNextSentencePrediction,
+    )
     from .feature_extraction_sequence_utils import SequenceFeatureExtractor
 
     # Feature Extractor
@@ -4165,14 +4197,99 @@ if TYPE_CHECKING:
 
     # Generation
     from .generation import (
+        AlternatingCodebooksLogitsProcessor,
         AsyncTextIteratorStreamer,
+        BayesianDetectorConfig,
+        BayesianDetectorModel,
+        BeamScorer,
+        BeamSearchScorer,
+        ClassifierFreeGuidanceLogitsProcessor,
         CompileConfig,
+        ConstrainedBeamSearchScorer,
+        Constraint,
+        ConstraintListState,
+        DisjunctiveConstraint,
+        EncoderNoRepeatNGramLogitsProcessor,
+        EncoderRepetitionPenaltyLogitsProcessor,
+        EosTokenCriteria,
+        EpsilonLogitsWarper,
+        EtaLogitsWarper,
+        ExponentialDecayLengthPenalty,
+        FlaxForcedBOSTokenLogitsProcessor,
+        FlaxForcedEOSTokenLogitsProcessor,
+        FlaxForceTokensLogitsProcessor,
+        FlaxGenerationMixin,
+        FlaxLogitsProcessor,
+        FlaxLogitsProcessorList,
+        FlaxLogitsWarper,
+        FlaxMinLengthLogitsProcessor,
+        FlaxSuppressTokensAtBeginLogitsProcessor,
+        FlaxSuppressTokensLogitsProcessor,
+        FlaxTemperatureLogitsWarper,
+        FlaxTopKLogitsWarper,
+        FlaxTopPLogitsWarper,
+        FlaxWhisperTimeStampLogitsProcessor,
+        ForcedBOSTokenLogitsProcessor,
+        ForcedEOSTokenLogitsProcessor,
         GenerationConfig,
+        GenerationMixin,
+        HammingDiversityLogitsProcessor,
+        InfNanRemoveLogitsProcessor,
+        LogitNormalization,
+        LogitsProcessor,
+        LogitsProcessorList,
+        MaxLengthCriteria,
+        MaxTimeCriteria,
+        MinLengthLogitsProcessor,
+        MinNewTokensLengthLogitsProcessor,
+        MinPLogitsWarper,
+        NoBadWordsLogitsProcessor,
+        NoRepeatNGramLogitsProcessor,
+        PhrasalConstraint,
+        PrefixConstrainedLogitsProcessor,
+        RepetitionPenaltyLogitsProcessor,
+        SequenceBiasLogitsProcessor,
+        StoppingCriteria,
+        StoppingCriteriaList,
+        StopStringCriteria,
+        SuppressTokensAtBeginLogitsProcessor,
+        SuppressTokensLogitsProcessor,
+        SynthIDTextWatermarkDetector,
+        SynthIDTextWatermarkingConfig,
+        SynthIDTextWatermarkLogitsProcessor,
+        TemperatureLogitsWarper,
         TextIteratorStreamer,
         TextStreamer,
+        TFForcedBOSTokenLogitsProcessor,
+        TFForcedEOSTokenLogitsProcessor,
+        TFForceTokensLogitsProcessor,
+        TFGenerationMixin,
+        TFLogitsProcessor,
+        TFLogitsProcessorList,
+        TFLogitsWarper,
+        TFMinLengthLogitsProcessor,
+        TFNoBadWordsLogitsProcessor,
+        TFNoRepeatNGramLogitsProcessor,
+        TFRepetitionPenaltyLogitsProcessor,
+        TFSuppressTokensAtBeginLogitsProcessor,
+        TFSuppressTokensLogitsProcessor,
+        TFTemperatureLogitsWarper,
+        TFTopKLogitsWarper,
+        TFTopPLogitsWarper,
+        TopKLogitsWarper,
+        TopPLogitsWarper,
+        TypicalLogitsWarper,
+        UnbatchedClassifierFreeGuidanceLogitsProcessor,
+        WatermarkDetector,
         WatermarkingConfig,
+        WatermarkLogitsProcessor,
+        WhisperTimeStampLogitsProcessor,
     )
     from .hf_argparser import HfArgumentParser
+    from .image_processing_base import ImageProcessingMixin
+    from .image_processing_utils import BaseImageProcessor
+    from .image_processing_utils_fast import BaseImageProcessorFast
+    from .image_utils import ImageFeatureExtractionMixin
 
     # Integrations
     from .integrations import (
@@ -4188,9 +4305,21 @@ if TYPE_CHECKING:
         is_tensorboard_available,
         is_wandb_available,
     )
+    from .integrations.executorch import (
+        TorchExportableModuleWithStaticCache,
+        convert_and_export_with_cache,
+    )
+    from .keras_callbacks import KerasMetricCallback, PushToHubCallback
+    from .masking_utils import AttentionMaskInterface
+    from .model_debugging_utils import (
+        model_addition_debugger_context,
+    )
 
     # Model Cards
     from .modelcard import ModelCard
+    from .modeling_flax_utils import FlaxPreTrainedModel
+    from .modeling_layers import GradientCheckpointingLayer
+    from .modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 
     # TF 2.0 <=> PyTorch conversion utilities
     from .modeling_tf_pytorch_utils import (
@@ -4202,6 +4331,13 @@ if TYPE_CHECKING:
         load_tf2_model_in_pytorch_model,
         load_tf2_weights_in_pytorch_model,
     )
+    from .modeling_tf_utils import (
+        TFPreTrainedModel,
+        TFSequenceSummary,
+        TFSharedEmbeddings,
+        shape_list,
+    )
+    from .modeling_utils import AttentionInterface, PreTrainedModel
     from .models import *
     from .models.albert import AlbertConfig
     from .models.align import (
@@ -5067,6 +5203,29 @@ if TYPE_CHECKING:
     from .models.zamba import ZambaConfig
     from .models.zamba2 import Zamba2Config
     from .models.zoedepth import ZoeDepthConfig
+    from .models.timm_wrapper import TimmWrapperImageProcessor
+
+    # Optimization
+    from .optimization import (
+        Adafactor,
+        get_constant_schedule,
+        get_constant_schedule_with_warmup,
+        get_cosine_schedule_with_warmup,
+        get_cosine_with_hard_restarts_schedule_with_warmup,
+        get_inverse_sqrt_schedule,
+        get_linear_schedule_with_warmup,
+        get_polynomial_decay_schedule_with_warmup,
+        get_scheduler,
+        get_wsd_schedule,
+    )
+
+    # Optimization
+    from .optimization_tf import (
+        AdamWeightDecay,
+        GradientAccumulator,
+        WarmUp,
+        create_optimizer,
+    )
 
     # Pipelines
     from .pipelines import (
@@ -5108,6 +5267,7 @@ if TYPE_CHECKING:
         pipeline,
     )
     from .processing_utils import ProcessorMixin
+    from .pytorch_utils import Conv1D, apply_chunking_to_forward, prune_layer
 
     # Tokenization
     from .tokenization_utils import PreTrainedTokenizer
@@ -5119,6 +5279,10 @@ if TYPE_CHECKING:
         SpecialTokensMixin,
         TokenSpan,
     )
+    from .tokenization_utils_fast import PreTrainedTokenizerFast
+
+    # Trainer
+    from .trainer import Trainer
 
     # Trainer
     from .trainer_callback import (
@@ -5130,6 +5294,8 @@ if TYPE_CHECKING:
         TrainerControl,
         TrainerState,
     )
+    from .trainer_pt_utils import torch_distributed_zero_first
+    from .trainer_seq2seq import Seq2SeqTrainer
     from .trainer_utils import (
         EvalPrediction,
         IntervalStrategy,
@@ -7647,6 +7813,7 @@ if TYPE_CHECKING:
             FlaxWhisperTimeStampLogitsProcessor,
         )
         from .modeling_flax_utils import FlaxPreTrainedModel
+    from .video_processing_utils import BaseVideoProcessor
 
 else:
     import sys
