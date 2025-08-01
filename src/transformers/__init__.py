@@ -18,7 +18,7 @@
 # to defer the actual importing for when the objects are requested. This way `import transformers` provides the names
 # in the namespace without actually importing anything (and especially none of the backends).
 
-__version__ = "4.54.0.dev0"
+__version__ = "4.55.0.dev0"
 
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1054,6 +1054,7 @@ _import_structure = {
         "HqqConfig",
         "QuantoConfig",
         "QuarkConfig",
+        "FPQuantConfig",
         "SpQRConfig",
         "TorchAoConfig",
         "VptqConfig",
@@ -5381,6 +5382,7 @@ if TYPE_CHECKING:
         EetqConfig,
         FbgemmFp8Config,
         FineGrainedFP8Config,
+        FPQuantConfig,
         GPTQConfig,
         HiggsConfig,
         HqqConfig,
