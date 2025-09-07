@@ -48,6 +48,7 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
         pad_token: str = "<|pad|>",
         mask_token: str = "<|mask|>",
         additional_special_tokens: Optional[list] = None,
+        add_bos_token: bool = True,
         **kwargs,
     ):
         # Convert str tokens to AddedToken objects with no normalization,
@@ -93,6 +94,9 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
             **kwargs,
         )
 
+        # Expose BOS behavior similarly to slow tokenizer
+        self.add_bos_token = add_bos_token
+
         # If there's NO tokenizer_file, we're building from vocab/merges. Ensure ByteLevel is set:
         if tokenizer_file is None:
             # Force ByteLevel pre-tokenizer + decoder for GPT-2 style byte handling
@@ -100,6 +104,11 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
                 self._tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
             if self._tokenizer.decoder is None:
                 self._tokenizer.decoder = ByteLevelDecoder()
+
+    def build_inputs_with_special_tokens(self, token_ids: list[int]) -> list[int]:
+        if getattr(self, "add_bos_token", False) and self.bos_token_id is not None:
+            return [self.bos_token_id] + token_ids
+        return token_ids
 
     def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> tuple[str]:
         """

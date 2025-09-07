@@ -19,7 +19,7 @@ import json
 import os
 import warnings
 from collections import OrderedDict
-from typing import Any, Optional, Union, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from transformers.utils.import_utils import is_mistral_common_available
 

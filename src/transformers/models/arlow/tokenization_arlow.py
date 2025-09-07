@@ -102,6 +102,12 @@ class ArlowTokenizer(PreTrainedTokenizer):
             self.encoder = json.load(vocab_handle)
         self.decoder = {v: k for k, v in self.encoder.items()}
 
+        # Ensure BOS/EOS are in vocab; if missing, add them to the end
+        for tok in [bos_token, eos_token, unk_token, pad_token, mask_token]:
+            if isinstance(tok, str) and tok not in self.encoder:
+                self.encoder[tok] = len(self.encoder)
+                self.decoder[self.encoder[tok]] = tok
+
         # Load merges (BPE ranks)
         with open(merges_file, encoding="utf-8") as merges_handle:
             merges = merges_handle.read().split("\n")
@@ -123,6 +129,9 @@ class ArlowTokenizer(PreTrainedTokenizer):
         #   - Whitespace blocks
         # You can adjust as needed for more or less aggressive splitting
         self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+
+        # Whether to automatically add BOS on encoding
+        self.add_bos_token = kwargs.pop("add_bos_token", True)
 
         super().__init__(
             bos_token=bos_token,
@@ -213,10 +222,22 @@ class ArlowTokenizer(PreTrainedTokenizer):
         Reconstructs the text by reversing the ByteLevel encoding. We map each subword
         back to original bytes, then decode to UTF-8.
         """
-        text = "".join(tokens)
-        # Convert each character in the text back to its original byte
-        byte_array = bytearray([self.byte_decoder[c] for c in text])
-        return byte_array.decode("utf-8", errors="replace")
+        decoded_bytes = bytearray()
+        for tok in tokens:
+            if tok in self.all_special_tokens:
+                # Do not treat specials as byte-encoded; insert as-is with spacing preserved
+                if decoded_bytes and not chr(decoded_bytes[-1]).isspace():
+                    decoded_bytes += b" "
+                decoded_bytes += tok.encode("utf-8")
+                continue
+            for ch in tok:
+                decoded_bytes.append(self.byte_decoder.get(ch, ord("?")))
+        return decoded_bytes.decode("utf-8", errors="replace")
+
+    def build_inputs_with_special_tokens(self, token_ids: list[int]) -> list[int]:
+        if getattr(self, "add_bos_token", False) and self.bos_token_id is not None:
+            return [self.bos_token_id] + token_ids
+        return token_ids
 
     def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> tuple[str, str]:
         if not os.path.isdir(save_directory):

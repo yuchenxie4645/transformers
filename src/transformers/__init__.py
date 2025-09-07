@@ -4816,6 +4816,7 @@ if TYPE_CHECKING:
     )
     from .models.m2m_100 import M2M100Config
     from .models.mamba import MambaConfig
+    from .models.mamba.modeling_mamba import MambaCache as MambaCache
     from .models.mamba2 import Mamba2Config
     from .models.marian import MarianConfig
     from .models.markuplm import (
@@ -5108,7 +5109,8 @@ if TYPE_CHECKING:
         TimesformerConfig,
     )
     from .models.timm_backbone import TimmBackboneConfig
-    from .models.timm_wrapper import TimmWrapperConfig
+    from .models.timm_wrapper import TimmWrapperConfig, TimmWrapperImageProcessor
+    from .models.timm_wrapper import TimmWrapperImageProcessor as TimmWrapperImageProcessor
     from .models.trocr import (
         TrOCRConfig,
         TrOCRProcessor,
@@ -5205,9 +5207,6 @@ if TYPE_CHECKING:
     from .models.zamba import ZambaConfig
     from .models.zamba2 import Zamba2Config
     from .models.zoedepth import ZoeDepthConfig
-    from .models.timm_wrapper import TimmWrapperImageProcessor
-    from .models.mamba.modeling_mamba import MambaCache as MambaCache
-    from .models.timm_wrapper import TimmWrapperImageProcessor as TimmWrapperImageProcessor
 
     # Optimization
     from .optimization import Adafactor as Adafactor
@@ -7796,7 +7795,6 @@ if TYPE_CHECKING:
             FlaxWhisperTimeStampLogitsProcessor,
         )
         from .modeling_flax_utils import FlaxPreTrainedModel
-    from .video_processing_utils import BaseVideoProcessor
     from .utils.quantization_config import AqlmConfig as AqlmConfig
     from .utils.quantization_config import AutoRoundConfig as AutoRoundConfig
     from .utils.quantization_config import AwqConfig as AwqConfig
@@ -7815,6 +7813,7 @@ if TYPE_CHECKING:
     from .utils.quantization_config import SpQRConfig as SpQRConfig
     from .utils.quantization_config import TorchAoConfig as TorchAoConfig
     from .utils.quantization_config import VptqConfig as VptqConfig
+    from .video_processing_utils import BaseVideoProcessor
     from .video_processing_utils import BaseVideoProcessor as BaseVideoProcessor
 
 else:

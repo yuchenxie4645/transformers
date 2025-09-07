@@ -114,6 +114,12 @@ class ArlowConfig(PretrainedConfig):
         tie_word_embeddings=True,
         pad_token_id=None,
         use_cross_attention=True,
+        attention_bias=False,
+        resid_dropout=0.0,
+        mlp_dropout=0.0,
+        rope_scaling=None,
+        use_varlen_flash=False,
+        head_dim=None,
         bos_token_id=1,
         eos_token_id=2,
         **kwargs,
@@ -141,6 +147,13 @@ class ArlowConfig(PretrainedConfig):
         self.rope_theta = rope_theta
         self.tie_word_embeddings = tie_word_embeddings
         self.use_cross_attention = use_cross_attention
+        # New fields
+        self.attention_bias = attention_bias
+        self.resid_dropout = resid_dropout
+        self.mlp_dropout = mlp_dropout
+        self.rope_scaling = rope_scaling
+        self.use_varlen_flash = use_varlen_flash
+        self.head_dim = head_dim
 
 
 __all__ = ["ArlowConfig"]
