@@ -1259,7 +1259,6 @@ else:
             "BayesianDetectorConfig",
             "BayesianDetectorModel",
             "BeamScorer",
-            "BeamSearchScorer",
             "ClassifierFreeGuidanceLogitsProcessor",
             "ConstrainedBeamSearchScorer",
             "Constraint",
@@ -1274,7 +1273,6 @@ else:
             "ForcedBOSTokenLogitsProcessor",
             "ForcedEOSTokenLogitsProcessor",
             "GenerationMixin",
-            "HammingDiversityLogitsProcessor",
             "InfNanRemoveLogitsProcessor",
             "LogitNormalization",
             "LogitsProcessor",
@@ -4143,7 +4141,6 @@ if TYPE_CHECKING:
     from .cache_utils import HQQQuantizedCache as HQQQuantizedCache
     from .cache_utils import HQQQuantizedLayer as HQQQuantizedLayer
     from .cache_utils import HybridCache as HybridCache
-    from .cache_utils import MambaCache as MambaCache
     from .cache_utils import OffloadedCache as OffloadedCache
     from .cache_utils import OffloadedStaticCache as OffloadedStaticCache
     from .cache_utils import QuantizedCache as QuantizedCache
@@ -4212,7 +4209,6 @@ if TYPE_CHECKING:
     from .generation import BayesianDetectorConfig as BayesianDetectorConfig
     from .generation import BayesianDetectorModel as BayesianDetectorModel
     from .generation import BeamScorer as BeamScorer
-    from .generation import BeamSearchScorer as BeamSearchScorer
     from .generation import ClassifierFreeGuidanceLogitsProcessor as ClassifierFreeGuidanceLogitsProcessor
     from .generation import CompileConfig as CompileConfig
     from .generation import ConstrainedBeamSearchScorer as ConstrainedBeamSearchScorer
@@ -4243,7 +4239,6 @@ if TYPE_CHECKING:
     from .generation import ForcedEOSTokenLogitsProcessor as ForcedEOSTokenLogitsProcessor
     from .generation import GenerationConfig as GenerationConfig
     from .generation import GenerationMixin as GenerationMixin
-    from .generation import HammingDiversityLogitsProcessor as HammingDiversityLogitsProcessor
     from .generation import InfNanRemoveLogitsProcessor as InfNanRemoveLogitsProcessor
     from .generation import LogitNormalization as LogitNormalization
     from .generation import LogitsProcessor as LogitsProcessor
@@ -5211,6 +5206,7 @@ if TYPE_CHECKING:
     from .models.zamba2 import Zamba2Config
     from .models.zoedepth import ZoeDepthConfig
     from .models.timm_wrapper import TimmWrapperImageProcessor
+    from .models.mamba.modeling_mamba import MambaCache as MambaCache
     from .models.timm_wrapper import TimmWrapperImageProcessor as TimmWrapperImageProcessor
 
     # Optimization
