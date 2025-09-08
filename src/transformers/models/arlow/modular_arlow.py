@@ -8,15 +8,17 @@ from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache
 from ...generation import GenerationMixin
 from ...masking_utils import create_causal_mask
+from ...modeling_flash_attention_utils import is_flash_attn_available
 from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
-from ...modeling_flash_attention_utils import is_flash_attn_available
 
 if is_flash_attn_available():
     from ...modeling_flash_attention_utils import _flash_attention_forward
+
 from ...processing_utils import Unpack
-from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
+from ...utils import (TransformersKwargs, auto_docstring, can_return_tuple,
+                      logging)
 from ...utils.generic import check_model_inputs
 from .configuration_arlow import ArlowConfig
 
@@ -41,12 +43,18 @@ class ArlowRotaryEmbedding(nn.Module):
     def __init__(self, config: ArlowConfig, device=None):
         super().__init__()
         # Validate rope_scaling
-        if getattr(config, "rope_scaling", None) is not None and not isinstance(config.rope_scaling, dict):
+        if getattr(config, "rope_scaling", None) is not None and not isinstance(
+            config.rope_scaling, dict
+        ):
             raise ValueError("rope_scaling must be a dict if provided")
         if isinstance(config.rope_scaling, dict):
-            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+            self.rope_type = config.rope_scaling.get(
+                "rope_type", config.rope_scaling.get("type")
+            )
             if self.rope_type is None:
-                logger.warning("rope_scaling provided without 'rope_type'/'type'; defaulting to 'default'.")
+                logger.warning(
+                    "rope_scaling provided without 'rope_type'/'type'; defaulting to 'default'."
+                )
                 self.rope_type = "default"
         else:
             self.rope_type = "default"
@@ -63,12 +71,23 @@ class ArlowRotaryEmbedding(nn.Module):
     @torch.no_grad()
     @dynamic_rope_update
     def forward(self, x: torch.Tensor, position_ids: torch.LongTensor):
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
+        inv_freq_expanded = (
+            self.inv_freq[None, :, None]
+            .float()
+            .expand(position_ids.shape[0], -1, 1)
+            .to(x.device)
+        )
         position_ids_expanded = position_ids[:, None, :].float()
 
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        device_type = (
+            x.device.type
+            if isinstance(x.device.type, str) and x.device.type != "mps"
+            else "cpu"
+        )
         with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            freqs = (
+                inv_freq_expanded.float() @ position_ids_expanded.float()
+            ).transpose(1, 2)
             # Even/odd interleaving: expand frequencies for interleaved dims
             cos = freqs.cos().repeat_interleave(2, dim=-1) * self.attention_scaling
             sin = freqs.sin().repeat_interleave(2, dim=-1) * self.attention_scaling
@@ -95,7 +114,9 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_key_value_heads, n_rep, slen, head_dim
+    )
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
@@ -107,16 +128,32 @@ class ArlowAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.head_dim = getattr(config, "head_dim", None) or (self.hidden_size // self.num_heads)
+        self.head_dim = getattr(config, "head_dim", None) or (
+            self.hidden_size // self.num_heads
+        )
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
 
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=self.config.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=self.config.attention_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=self.config.attention_bias)
+        self.q_proj = nn.Linear(
+            self.hidden_size,
+            self.num_heads * self.head_dim,
+            bias=self.config.attention_bias,
+        )
+        self.k_proj = nn.Linear(
+            self.hidden_size,
+            self.num_kv_heads * self.head_dim,
+            bias=self.config.attention_bias,
+        )
+        self.v_proj = nn.Linear(
+            self.hidden_size,
+            self.num_kv_heads * self.head_dim,
+            bias=self.config.attention_bias,
+        )
         # Always keep output projection bias disabled regardless of attention_bias.
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+        self.o_proj = nn.Linear(
+            self.num_heads * self.head_dim, self.hidden_size, bias=False
+        )
 
     def forward(
         self,
@@ -137,7 +174,9 @@ class ArlowAttention(nn.Module):
         value_states = self.v_proj(hidden_states).view(kv_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin
+        )
 
         use_flash = (
             is_flash_attn_available()
@@ -149,10 +188,14 @@ class ArlowAttention(nn.Module):
 
         if past_key_values is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_values.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
+
+        # Keep explicit batch and sequence length for safe reshapes
+        bsz, q_len = hidden_states.shape[:2]
 
         if use_flash:
-            bsz, q_len = hidden_states.shape[:2]
             # Use HF unified FA2 wrapper
             attn_unpad = _flash_attention_forward(
                 query_states.transpose(1, 2),  # [B,H,S,D] -> [B,S,H,D]
@@ -164,7 +207,8 @@ class ArlowAttention(nn.Module):
                 dropout=self.attention_dropout if self.training else 0.0,
                 position_ids=None,
             )
-            attn_output = attn_unpad.reshape(bsz, q_len, -1).contiguous()
+            # attn_unpad is [B, S, H, D]; fold heads using dynamic dims to avoid any mismatch
+            attn_output = attn_unpad.contiguous().view(bsz, q_len, -1)
             attn_weights = None
         else:
             # Fallback: SDPA with causal=True and padding via additive mask
@@ -183,7 +227,8 @@ class ArlowAttention(nn.Module):
                 # When providing an additive mask, do not enable causal path.
                 is_causal=attention_mask is None,
             )
-            attn_output = attn_output.transpose(1, 2).contiguous().reshape(*input_shape, -1)
+            # Ensure we restore [B, S, H*D] using dynamic dims; avoid flattening [S] into channels
+            attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, q_len, -1)
             attn_weights = None
 
         attn_output = self.o_proj(attn_output)
@@ -212,7 +257,9 @@ class ArlowDecoderLayer(nn.Module):
         self.self_attn = ArlowAttention(config=config, layer_idx=layer_idx)
         self.mlp = ArlowMLP(config)
         self.input_layernorm = ArlowRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = ArlowRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = ArlowRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
         self.resid_dropout = nn.Dropout(config.resid_dropout)
 
     def forward(
@@ -257,6 +304,7 @@ class ArlowPreTrainedModel(PreTrainedModel):
     is_loaded_in_4bit = False
     _supports_flash_attn = True
     _supports_sdpa = True
+    _can_record_outputs = {}
 
     def _init_weights(self, module: nn.Module):
         std = self.config.initializer_range
@@ -279,8 +327,15 @@ class ArlowModel(ArlowPreTrainedModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([ArlowDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.embed_tokens = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx
+        )
+        self.layers = nn.ModuleList(
+            [
+                ArlowDecoderLayer(config, layer_idx)
+                for layer_idx in range(config.num_hidden_layers)
+            ]
+        )
         self.norm = ArlowRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.rotary_emb = ArlowRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
@@ -309,7 +364,9 @@ class ArlowModel(ArlowPreTrainedModel):
     ) -> BaseModelOutputWithPast:
         # Raise when both are provided or both are missing
         if (input_ids is None) == (inputs_embeds is None):
-            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+            raise ValueError(
+                "You must specify exactly one of input_ids or inputs_embeds"
+            )
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -318,8 +375,14 @@ class ArlowModel(ArlowPreTrainedModel):
             past_key_values = DynamicCache(config=self.config)
 
         if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device)
+            past_seen_tokens = (
+                past_key_values.get_seq_length() if past_key_values is not None else 0
+            )
+            cache_position = torch.arange(
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
+            )
 
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
@@ -343,11 +406,18 @@ class ArlowModel(ArlowPreTrainedModel):
         # Gradient checkpointing support
         if self.gradient_checkpointing and self.training:
             if use_cache:
-                logger.warning_once("`use_cache=True` is incompatible with gradient checkpointing. Setting use_cache=False.")
+                logger.warning_once(
+                    "`use_cache=True` is incompatible with gradient checkpointing. Setting use_cache=False."
+                )
             use_cache = False
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
-            if self.gradient_checkpointing and self.training and past_key_values is None:
+            if (
+                self.gradient_checkpointing
+                and self.training
+                and past_key_values is None
+            ):
+
                 def create_custom_forward(module):
                     def custom_forward(hidden_states):
                         return module(
@@ -361,9 +431,14 @@ class ArlowModel(ArlowPreTrainedModel):
                             padding_mask_2d=padding_mask_2d,
                             **kwargs,
                         )
+
                     return custom_forward
 
-                hidden_states = torch.utils.checkpoint.checkpoint(create_custom_forward(decoder_layer), hidden_states, use_reentrant=False)
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(decoder_layer),
+                    hidden_states,
+                    use_reentrant=False,
+                )
             else:
                 hidden_states = decoder_layer(
                     hidden_states,
@@ -423,7 +498,11 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs.last_hidden_state
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        slice_indices = (
+            slice(-logits_to_keep, None)
+            if isinstance(logits_to_keep, int)
+            else logits_to_keep
+        )
         logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         loss = None
@@ -432,7 +511,11 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
             labels_window = labels[:, slice_indices]
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels_window[..., 1:].contiguous()
-            ignore_index = self.config.pad_token_id if self.config.pad_token_id is not None else -100
+            ignore_index = (
+                self.config.pad_token_id
+                if self.config.pad_token_id is not None
+                else -100
+            )
             loss = F.cross_entropy(
                 shift_logits.view(-1, self.config.vocab_size),
                 shift_labels.view(-1),

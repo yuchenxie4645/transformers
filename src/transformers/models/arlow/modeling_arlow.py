@@ -119,9 +119,21 @@ class ArlowAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
 
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=self.config.attention_bias)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=self.config.attention_bias)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=self.config.attention_bias)
+        self.q_proj = nn.Linear(
+            self.hidden_size,
+            self.num_heads * self.head_dim,
+            bias=self.config.attention_bias,
+        )
+        self.k_proj = nn.Linear(
+            self.hidden_size,
+            self.num_kv_heads * self.head_dim,
+            bias=self.config.attention_bias,
+        )
+        self.v_proj = nn.Linear(
+            self.hidden_size,
+            self.num_kv_heads * self.head_dim,
+            bias=self.config.attention_bias,
+        )
         # Always keep output projection bias disabled regardless of attention_bias.
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
@@ -158,8 +170,10 @@ class ArlowAttention(nn.Module):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
+        # Keep explicit batch and sequence length for safe reshapes
+        bsz, q_len = hidden_states.shape[:2]
+
         if use_flash:
-            bsz, q_len = hidden_states.shape[:2]
             # Use HF unified FA2 wrapper
             attn_unpad = _flash_attention_forward(
                 query_states.transpose(1, 2),  # [B,H,S,D] -> [B,S,H,D]
@@ -171,7 +185,8 @@ class ArlowAttention(nn.Module):
                 dropout=self.attention_dropout if self.training else 0.0,
                 position_ids=None,
             )
-            attn_output = attn_unpad.reshape(bsz, q_len, -1).contiguous()
+            # attn_unpad is [B, S, H, D]; fold heads using dynamic dims to avoid any mismatch
+            attn_output = attn_unpad.contiguous().view(bsz, q_len, -1)
             attn_weights = None
         else:
             # Fallback: SDPA with causal=True and padding via additive mask
@@ -190,7 +205,8 @@ class ArlowAttention(nn.Module):
                 # When providing an additive mask, do not enable causal path.
                 is_causal=attention_mask is None,
             )
-            attn_output = attn_output.transpose(1, 2).contiguous().reshape(*input_shape, -1)
+            # Ensure we restore [B, S, H*D] using dynamic dims; avoid flattening [S] into channels
+            attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, q_len, -1)
             attn_weights = None
 
         attn_output = self.o_proj(attn_output)
@@ -264,6 +280,7 @@ class ArlowPreTrainedModel(PreTrainedModel):
     is_loaded_in_4bit = False
     _supports_flash_attn = True
     _supports_sdpa = True
+    _can_record_outputs = {}
 
     def _init_weights(self, module: nn.Module):
         std = self.config.initializer_range
@@ -329,7 +346,9 @@ class ArlowModel(ArlowPreTrainedModel):
         if cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
             cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
             )
 
         if position_ids is None:
@@ -379,7 +398,9 @@ class ArlowModel(ArlowPreTrainedModel):
                     return custom_forward
 
                 hidden_states = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(decoder_layer), hidden_states, use_reentrant=False
+                    create_custom_forward(decoder_layer),
+                    hidden_states,
+                    use_reentrant=False,
                 )
             else:
                 hidden_states = decoder_layer(
