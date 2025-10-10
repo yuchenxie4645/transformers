@@ -19,7 +19,6 @@ from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
-from ...utils.generic import check_model_inputs
 from .configuration_arlow import ArlowConfig
 
 
@@ -341,7 +340,7 @@ class ArlowModel(ArlowPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
-    @check_model_inputs
+    @can_return_tuple
     @auto_docstring
     def forward(
         self,
