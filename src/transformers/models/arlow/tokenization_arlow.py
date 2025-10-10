@@ -22,7 +22,6 @@ def bytes_to_unicode() -> dict[int, str]:
     The reversible bpe codes work on unicode strings. This function and the reversible bpe codes
     allow us to simulate 'byte-level' subwords in purely unicode space.
     """
-    # All the printable characters from ASCII plus some more, as used in GPT-2:
     bs = (
         list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
     )
@@ -127,7 +126,6 @@ class ArlowTokenizer(PreTrainedTokenizer):
         #   - Letters and digits
         #   - Symbols
         #   - Whitespace blocks
-        # You can adjust as needed for more or less aggressive splitting
         self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
 
         # Whether to automatically add BOS on encoding

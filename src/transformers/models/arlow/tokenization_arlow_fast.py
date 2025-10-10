@@ -2,7 +2,6 @@ from typing import Optional
 
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 
-# NEW: Import ByteLevel pre-tokenizer & decoder for fallback initialization
 from tokenizers.pre_tokenizers import ByteLevel
 
 from transformers.models.arlow.tokenization_arlow import ArlowTokenizer
@@ -52,7 +51,6 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
         **kwargs,
     ):
         # Convert str tokens to AddedToken objects with no normalization,
-        # which is typical for ByteLevel-based GPT-2 style tokenizers.
         bos_token = (
             AddedToken(bos_token, lstrip=False, rstrip=False, special=True, normalized=False)
             if isinstance(bos_token, str)
@@ -80,7 +78,6 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
         )
 
         # Initialize via the parent class. This will load tokenizer.json if provided
-        # or else build from vocab_file + merges_file.
         super().__init__(
             vocab_file=vocab_file,
             merges_file=merges_file,

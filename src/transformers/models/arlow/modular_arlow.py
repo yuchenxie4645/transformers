@@ -195,7 +195,6 @@ class ArlowAttention(nn.Module):
             q_len = query_states.shape[-2]
             kv_len = key_states.shape[-2]
             # If the kv length is 1 (typical during decoding with cache) the 4D mask can create shape issues in SDPA.
-            # In that case, rely on `is_causal` path by dropping the mask.
             if kv_len == 1:
                 attention_mask = None
             else:
