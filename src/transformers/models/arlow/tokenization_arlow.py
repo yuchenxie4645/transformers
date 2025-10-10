@@ -234,10 +234,27 @@ class ArlowTokenizer(PreTrainedTokenizer):
                 decoded_bytes.append(self.byte_decoder.get(ch, ord("?")))
         return decoded_bytes.decode("utf-8", errors="replace")
 
-    def build_inputs_with_special_tokens(self, token_ids: list[int]) -> list[int]:
-        if getattr(self, "add_bos_token", False) and self.bos_token_id is not None:
-            return [self.bos_token_id] + token_ids
-        return token_ids
+    def build_inputs_with_special_tokens(
+        self, token_ids_0: list[int], token_ids_1: Optional[list[int]] = None
+    ) -> list[int]:
+        """
+        Build model inputs from a sequence or a pair of sequences for sequence classification tasks by concatenating and
+        adding special tokens.
+
+        Args:
+            token_ids_0 (`List[int]`): The first sequence to be encoded.
+            token_ids_1 (`List[int]`, *optional*): The second sequence to be encoded (for sequence pairs).
+
+        Returns:
+            `List[int]`: The encoded sequence(s) with special tokens.
+        """
+        bos = [self.bos_token_id] if getattr(self, "add_bos_token", False) and self.bos_token_id is not None else []
+
+        if token_ids_1 is None:
+            return bos + token_ids_0
+
+        # For pairs, add BOS to the first sequence only
+        return bos + token_ids_0 + token_ids_1
 
     def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> tuple[str, str]:
         if not os.path.isdir(save_directory):

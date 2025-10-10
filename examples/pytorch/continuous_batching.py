@@ -40,7 +40,8 @@ def generate_simple(
     attn_impl = {
         "sdpa_paged": "sdpa",
         "eager_paged": "eager",
-        "flash_paged": "flash_attention_2",
+        "paged_attention": "eager",  # TODO: this does not work on AMD docker
+        "flash_paged": "flash_attention_2",  # TODO: this does not work on AMD docker
     }[attn_impl]
 
     model = AutoModelForCausalLM.from_pretrained(MODEL_ID, dtype=torch.bfloat16, attn_implementation=attn_impl)
@@ -183,21 +184,21 @@ if __name__ == "__main__":
     parser.add_argument("--num-blocks", "-n", type=int, default=None)
     parser.add_argument("--max-batch-tokens", "-b", type=int, default=None)
 
-    parser.add_argument(
-        "--attn", type=str, default="paged_attention|kernels-community/flash-attn", help="Attention implementation"
-    )
+    parser.add_argument("--attn", type=str, default="kernels-community/flash-attn", help="Attention implementation")
     parser.add_argument("--matmul-precision", "-mp", type=str, default="high")  # set to "none" to disable
-    parser.add_argument("--slice-inputs", action="store_true", default=False)
-    parser.add_argument("--use-cuda-graph", action="store_true", default=False)
-    parser.add_argument("--compile", action="store_true", default=False)
+    parser.add_argument("--no-slice-inputs", action="store_true")  # slicing is enabled by default because much faster
+    parser.add_argument("--use-cuda-graph", "-cg", action="store_true")
+    parser.add_argument("--compile", action="store_true")
 
     parser.add_argument("--samples", type=int, default=500)
     parser.add_argument("--displayed", type=int, default=0, help="Number of samples to display")
     parser.add_argument("--output-file", type=str, default=None)
-    parser.add_argument("--compare", action="store_true", default=False)
-    parser.add_argument("--metrics", action="store_true", default=False)
+    parser.add_argument("--compare", action="store_true")
+    parser.add_argument("--metrics", action="store_true")
     parser.add_argument("--profile", type=str, default=None)
     args = parser.parse_args()
+
+    args.slice_inputs = not args.no_slice_inputs
 
     # If turned on, we setup metrics
     if args.metrics:

@@ -14,18 +14,14 @@ from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache
 from ...generation import GenerationMixin
 from ...masking_utils import create_causal_mask
-from ...modeling_flash_attention_utils import is_flash_attn_available
 from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
-from ...modeling_utils import PreTrainedModel
+from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
 from ...utils.generic import check_model_inputs
 from .configuration_arlow import ArlowConfig
 
-
-if is_flash_attn_available():
-    from ...modeling_flash_attention_utils import _flash_attention_forward
 
 logger = logging.get_logger(__name__)
 
@@ -106,6 +102,32 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
+def eager_attention_forward(
+    module: nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Optional[torch.Tensor],
+    scaling: float,
+    dropout: float = 0.0,
+    **kwargs: Unpack[TransformersKwargs],
+):
+    key_states = repeat_kv(key, module.num_key_value_groups)
+    value_states = repeat_kv(value, module.num_key_value_groups)
+
+    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * scaling
+    if attention_mask is not None:
+        causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+        attn_weights = attn_weights + causal_mask
+
+    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+    attn_weights = nn.functional.dropout(attn_weights, p=dropout, training=module.training)
+    attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, attn_weights
+
+
 class ArlowAttention(nn.Module):
     def __init__(self, config: ArlowConfig, layer_idx: int):
         super().__init__()
@@ -145,6 +167,7 @@ class ArlowAttention(nn.Module):
         past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         padding_mask_2d: Optional[torch.Tensor] = None,  # 2D bool mask for varlen path
+        is_incremental_decoding: Optional[bool] = False,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         input_shape = hidden_states.shape[:-1]
@@ -158,57 +181,48 @@ class ArlowAttention(nn.Module):
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-        use_flash = (
-            is_flash_attn_available()
-            and self.config.use_varlen_flash
-            and padding_mask_2d is not None
-            and past_key_values is None
-            and hidden_states.dtype in (torch.float16, torch.bfloat16)
-        )
-
         if past_key_values is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        # Keep explicit batch and sequence length for safe reshapes
-        bsz, q_len = hidden_states.shape[:2]
+        # Dispatch to proper attention implementation
+        attention_interface = eager_attention_forward
+        if getattr(self.config, "_attn_implementation", "eager") != "eager":
+            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
-        if use_flash:
-            # Use HF unified FA2 wrapper
-            attn_unpad = _flash_attention_forward(
-                query_states.transpose(1, 2),  # [B,H,S,D] -> [B,S,H,D]
-                key_states.transpose(1, 2),
-                value_states.transpose(1, 2),
-                attention_mask=padding_mask_2d,  # [B,S]
-                query_length=q_len,
-                is_causal=True,
-                dropout=self.attention_dropout if self.training else 0.0,
-                position_ids=None,
-            )
-            # attn_unpad is [B, S, H, D]; fold heads using dynamic dims to avoid any mismatch
-            attn_output = attn_unpad.contiguous().view(bsz, q_len, -1)
-            attn_weights = None
-        else:
-            # Fallback: SDPA with causal=True and padding via additive mask
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
+        # Ensure 4D mask matches query/key dimensions after cache update
+        if attention_mask is not None and attention_mask.ndim == 4:
+            q_len = query_states.shape[-2]
+            kv_len = key_states.shape[-2]
+            # If the kv length is 1 (typical during decoding with cache) the 4D mask can create shape issues in SDPA.
+            # In that case, rely on `is_causal` path by dropping the mask.
+            if kv_len == 1:
+                attention_mask = None
+            else:
+                if attention_mask.shape[-2] != q_len:
+                    attention_mask = attention_mask[:, :, -q_len:, :]
+                if attention_mask.shape[-1] != kv_len:
+                    attention_mask = attention_mask[:, :, :, :kv_len]
 
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(dtype=torch.float32)
+        # During incremental decoding with caches, we can rely on SDPA's `is_causal` path,
+        # but ONLY if we're actually in incremental decoding (adding tokens to existing cache).
+        # For the first forward pass (even if cache object exists), we must use the attention_mask for padding
+        if is_incremental_decoding and getattr(self.config, "_attn_implementation", "eager") != "eager":
+            attention_mask = None
 
-            attn_output = F.scaled_dot_product_attention(
-                query_states,
-                key_states,
-                value_states,
-                attn_mask=attention_mask,
-                dropout_p=self.attention_dropout if self.training else 0.0,
-                # When providing an additive mask, do not enable causal path.
-                is_causal=attention_mask is None,
-            )
-            # Ensure we restore [B, S, H*D] using dynamic dims; avoid flattening [S] into channels
-            attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, q_len, -1)
-            attn_weights = None
+        attn_output, attn_weights = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=self.attention_dropout if self.training else 0.0,
+            scaling=self.scaling,
+            **kwargs,
+        )
 
+        # Fold heads to last dim before output projection
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
@@ -248,17 +262,19 @@ class ArlowDecoderLayer(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         padding_mask_2d: Optional[torch.Tensor] = None,
+        is_incremental_decoding: Optional[bool] = False,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        attn_out, _ = self.self_attn(
+        attn_out, attn_weights = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
             past_key_values=past_key_values,
             cache_position=cache_position,
             padding_mask_2d=padding_mask_2d,
+            is_incremental_decoding=is_incremental_decoding,
             **kwargs,
         )
         hidden_states = residual + self.resid_dropout(attn_out)
@@ -267,7 +283,12 @@ class ArlowDecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         mlp_out = self.mlp(hidden_states)
         hidden_states = residual + self.resid_dropout(mlp_out)
-        return hidden_states
+
+        output_attentions = kwargs.get("output_attentions", False)
+        if output_attentions:
+            return (hidden_states, attn_weights)
+
+        return (hidden_states,)
 
 
 class ArlowPreTrainedModel(PreTrainedModel):
@@ -333,17 +354,26 @@ class ArlowModel(ArlowPreTrainedModel):
         use_cache: Optional[bool] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
-        # Raise when both are provided or both are missing
-        if (input_ids is None) == (inputs_embeds is None):
-            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+        # Handle input_ids vs inputs_embeds
+        if input_ids is None and inputs_embeds is None:
+            raise ValueError("You must specify either input_ids or inputs_embeds")
 
+        # When both are provided, prefer inputs_embeds (this is expected during generation)
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
 
-        if cache_position is None:
+        # Recompute cache_position if it doesn't match the input length
+        if cache_position is not None and cache_position.shape[0] != inputs_embeds.shape[1]:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens,
+                past_seen_tokens + inputs_embeds.shape[1],
+                device=inputs_embeds.device,
+            )
+        elif cache_position is None:
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
             cache_position = torch.arange(
                 past_seen_tokens,
@@ -367,8 +397,22 @@ class ArlowModel(ArlowPreTrainedModel):
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
+        # Check if we're in incremental decoding (adding to existing cache) vs first forward pass
+        # This determines whether we can drop the attention mask for SDPA's is_causal path
+        is_incremental_decoding = past_key_values is not None and past_key_values.get_seq_length() > 0
+
         # Preserve original 2D padding mask for varlen path
         padding_mask_2d = attention_mask
+
+        # Collect hidden states and attentions for output if requested
+        output_hidden_states = kwargs.get("output_hidden_states", self.config.output_hidden_states)
+        output_attentions = kwargs.get("output_attentions", self.config.output_attentions)
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+
+        # Ensure output flags are in kwargs for decoder layers
+        kwargs["output_hidden_states"] = output_hidden_states
+        kwargs["output_attentions"] = output_attentions
 
         # Gradient checkpointing support
         if self.gradient_checkpointing and self.training:
@@ -377,6 +421,9 @@ class ArlowModel(ArlowPreTrainedModel):
                     "`use_cache=True` is incompatible with gradient checkpointing. Setting use_cache=False."
                 )
             use_cache = False
+
+        if all_hidden_states is not None:
+            all_hidden_states += (hidden_states,)
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             if self.gradient_checkpointing and self.training and past_key_values is None:
@@ -392,18 +439,20 @@ class ArlowModel(ArlowPreTrainedModel):
                             cache_position=cache_position,
                             position_embeddings=position_embeddings,
                             padding_mask_2d=padding_mask_2d,
+                            is_incremental_decoding=is_incremental_decoding,
                             **kwargs,
                         )
 
                     return custom_forward
 
-                hidden_states = torch.utils.checkpoint.checkpoint(
+                layer_outputs = torch.utils.checkpoint.checkpoint(
                     create_custom_forward(decoder_layer),
                     hidden_states,
                     use_reentrant=False,
                 )
+                hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
             else:
-                hidden_states = decoder_layer(
+                layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=causal_mask,
                     position_ids=position_ids,
@@ -412,13 +461,24 @@ class ArlowModel(ArlowPreTrainedModel):
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
                     padding_mask_2d=padding_mask_2d,
+                    is_incremental_decoding=is_incremental_decoding,
                     **kwargs,
                 )
+
+                hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
+
+                if all_self_attns is not None and isinstance(layer_outputs, tuple) and len(layer_outputs) > 1:
+                    all_self_attns += (layer_outputs[1],)
+
+            if all_hidden_states is not None:
+                all_hidden_states += (hidden_states,)
 
         hidden_states = self.norm(hidden_states)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attns,
         )
 
 
@@ -491,15 +551,43 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
         past_key_values: Optional[Cache] = None,
         attention_mask: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ):
-        if past_key_values is not None:
-            input_ids = input_ids[:, -1:]
+        # Only use inputs_embeds for the first forward pass (when cache is empty)
+        # After that, we use input_ids for subsequent generation steps
+        # Check if cache has tokens, not just if cache object exists
+        cache_length = past_key_values.get_seq_length() if past_key_values is not None else 0
+
+        if cache_length > 0:
+            # We have cached tokens, so we're in a subsequent generation step
+            # Special case: if input_ids is empty but inputs_embeds is provided,
+            # we need to slice inputs_embeds to only the new tokens not in cache
+            if input_ids is not None and input_ids.shape[1] == 0 and inputs_embeds is not None:
+                # Slice inputs_embeds to only process tokens not yet in cache
+                if inputs_embeds.shape[1] > cache_length:
+                    inputs_embeds = inputs_embeds[:, cache_length:]
+                    input_ids = None
+            else:
+                # For assisted/speculative decoding, we may need to process multiple new tokens
+                # Use cache_position to determine how many tokens to keep
+                if cache_position is not None and len(cache_position) > 1:
+                    # Assisted generation: keep multiple tokens
+                    input_ids = input_ids[:, cache_position[0] :]
+                else:
+                    # Normal generation: just the last token
+                    input_ids = input_ids[:, -1:]
+                inputs_embeds = None
+        elif inputs_embeds is not None:
+            # First step with inputs_embeds (cache is empty or doesn't exist) - don't pass input_ids
+            input_ids = None
+
         return {
             "input_ids": input_ids,
             "past_key_values": past_key_values,
             "attention_mask": attention_mask,
             "inputs_embeds": inputs_embeds,
+            "cache_position": cache_position,
             **kwargs,
         }
 

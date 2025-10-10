@@ -90,14 +90,14 @@ class ArlowIntegrationTest(unittest.TestCase):
             max_position_embeddings=128,
         )
         model = ArlowForCausalLM(config).to(torch_device).eval()
-        
+
         # Test forward pass
         input_ids = torch.randint(0, config.vocab_size, (1, 10), device=torch_device)
         with torch.no_grad():
             outputs = model(input_ids)
-        
+
         self.assertEqual(outputs.logits.shape, (1, 10, config.vocab_size))
-        
+
         # Test generation
         generated = model.generate(input_ids, max_new_tokens=5, do_sample=False)
         self.assertEqual(generated.shape[1], 15)  # original 10 + 5 new tokens
@@ -116,14 +116,14 @@ class ArlowIntegrationTest(unittest.TestCase):
             pad_token_id=0,
         )
         model = ArlowForCausalLM(config).to(torch_device).eval()
-        
+
         # Create input with padding
         input_ids = torch.tensor([[1, 2, 3, 0, 0], [4, 5, 6, 7, 8]], device=torch_device)
         attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]], device=torch_device)
-        
+
         with torch.no_grad():
             outputs = model(input_ids, attention_mask=attention_mask)
-        
+
         self.assertEqual(outputs.logits.shape, (2, 5, config.vocab_size))
 
     @slow
@@ -140,13 +140,13 @@ class ArlowIntegrationTest(unittest.TestCase):
             rope_scaling={"type": "linear", "factor": 2.0},
         )
         model = ArlowModel(config).to(torch_device).eval()
-        
+
         # Test with sequence longer than original max_position_embeddings
         input_ids = torch.randint(0, config.vocab_size, (1, 80), device=torch_device)
-        
+
         with torch.no_grad():
             outputs = model(input_ids)
-        
+
         self.assertEqual(outputs.last_hidden_state.shape, (1, 80, config.hidden_size))
 
     @slow
@@ -162,18 +162,18 @@ class ArlowIntegrationTest(unittest.TestCase):
             max_position_embeddings=128,
         )
         model = ArlowForCausalLM(config).to(torch_device).train()
-        
+
         input_ids = torch.randint(0, config.vocab_size, (2, 10), device=torch_device)
         labels = input_ids.clone()
-        
+
         outputs = model(input_ids, labels=labels)
-        
+
         self.assertIsNotNone(outputs.loss)
         self.assertEqual(outputs.logits.shape, (2, 10, config.vocab_size))
-        
+
         # Test backward pass
         outputs.loss.backward()
-        
+
         # Check that gradients are computed
         for param in model.parameters():
             if param.requires_grad:
@@ -194,13 +194,13 @@ class ArlowIntegrationTest(unittest.TestCase):
         )
         model = ArlowForCausalLM(config).to(torch_device).train()
         model.gradient_checkpointing_enable()
-        
+
         input_ids = torch.randint(0, config.vocab_size, (1, 20), device=torch_device)
         labels = input_ids.clone()
-        
+
         outputs = model(input_ids, labels=labels)
         outputs.loss.backward()
-        
+
         # Check that gradients are computed despite gradient checkpointing
         for param in model.parameters():
             if param.requires_grad:

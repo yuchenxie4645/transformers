@@ -44,18 +44,22 @@ class ArlowConfig(PretrainedConfig):
             The epsilon used by RMS normalization layers.
         rope_theta (`float`, *optional*, defaults to 100000.0):
             The base period used by RoPE (rotary position embeddings).
-        tie_word_embeddings (`bool`, *optional*, defaults to `True`):
-            Whether to tie input word embeddings and output embeddings.
         pad_token_id (`int`, *optional*):
             The padding token id. Must be set if padding is used, e.g., during batched training or generation.
-        use_cross_attention (`bool`, *optional*, defaults to `True`):
-            Higher-level toggle for enabling cross-attention. If set to `False`, cross-attention will be skipped
-            even if the layers are present.
+        attention_bias (`bool`, *optional*, defaults to `False`):
+            Whether to use bias in attention layers.
+        resid_dropout (`float`, *optional*, defaults to 0.0):
+            The dropout ratio for residual connections.
+        mlp_dropout (`float`, *optional*, defaults to 0.0):
+            The dropout ratio for MLP layers.
+        rope_scaling (`dict`, *optional*):
+            Dictionary containing the scaling configuration for RoPE embeddings.
+        head_dim (`int`, *optional*):
+            The dimensionality of each attention head. If not set, defaults to `hidden_size // num_attention_heads`.
         bos_token_id (`int`, *optional*, defaults to 1):
             Token id of the beginning-of-sequence token.
         eos_token_id (`int`, *optional*, defaults to 2):
             Token id of the end-of-sequence token.
-            Additional key-value arguments passed to the base class `PretrainedConfig`.
 
     Example:
     ```python
@@ -79,9 +83,7 @@ class ArlowConfig(PretrainedConfig):
     ...     use_cache=True,
     ...     rms_norm_eps=1e-6,
     ...     rope_theta=100000.0,
-    ...     tie_word_embeddings=True,
     ...     pad_token_id=tokenizer.pad_token_id,
-    ...     use_cross_attention=True,
     ...     bos_token_id=1,
     ...     eos_token_id=2
     ... )
@@ -111,14 +113,11 @@ class ArlowConfig(PretrainedConfig):
         use_cache=True,
         rms_norm_eps=1e-6,
         rope_theta=100000.0,
-        tie_word_embeddings=True,
         pad_token_id=None,
-        use_cross_attention=True,
         attention_bias=False,
         resid_dropout=0.0,
         mlp_dropout=0.0,
         rope_scaling=None,
-        use_varlen_flash=False,
         head_dim=None,
         bos_token_id=1,
         eos_token_id=2,
@@ -128,7 +127,6 @@ class ArlowConfig(PretrainedConfig):
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
 
@@ -145,14 +143,11 @@ class ArlowConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.rms_norm_eps = rms_norm_eps
         self.rope_theta = rope_theta
-        self.tie_word_embeddings = tie_word_embeddings
-        self.use_cross_attention = use_cross_attention
         # New fields
         self.attention_bias = attention_bias
         self.resid_dropout = resid_dropout
         self.mlp_dropout = mlp_dropout
         self.rope_scaling = rope_scaling
-        self.use_varlen_flash = use_varlen_flash
         self.head_dim = head_dim
 
 
