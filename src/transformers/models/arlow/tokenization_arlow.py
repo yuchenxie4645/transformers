@@ -62,13 +62,15 @@ class ArlowTokenizer(PreTrainedTokenizer):
         merges_file (str): Path to the merges file.
         bos_token (`str`, *optional*, defaults to `"<|startoftext|>"`): The beginning of sequence token that was used during pretraining.
             Can be used as a sequence classifier token.
-        eos_token (`str`, *optional*, defaults to `"<|endoftext|>"`): The end of sequence token.
+        eos_token (`str`, *optional*, defaults to `"<|im_end|>"`): The end of sequence token. Serves as turn boundary in chat.
         unk_token (`str`, *optional*, defaults to `"<|unk|>"`): The unknown token. A token that is not in the vocabulary
             cannot be converted to an ID and is set to be this token instead.
         pad_token (`str`, *optional*, defaults to `"<|pad|>"`): The token used for padding, for example when batching sequences of different lengths.
         mask_token (`str`, *optional*, defaults to `"<|mask|>"`): The token used for masking values. This is the token used when training
             this model with masked language modeling. This is the token which the model will try to predict.
         additional_special_tokens (`List[str]`, *optional*): Additional special tokens used by the tokenizer.
+        add_bos_token (`bool`, *optional*, defaults to `False`): Whether to add BOS token at the start of sequences.
+        add_eos_token (`bool`, *optional*, defaults to `False`): Whether to add EOS token at the end of sequences.
     """
 
     vocab_files_names = VOCAB_FILES_NAMES
@@ -80,11 +82,13 @@ class ArlowTokenizer(PreTrainedTokenizer):
         vocab_file: str,
         merges_file: str,
         bos_token: str = "<|startoftext|>",
-        eos_token: str = "<|endoftext|>",
+        eos_token: str = "<|im_end|>",  # Turn boundary serves as EOS (Qwen-style)
         unk_token: str = "<|unk|>",
         pad_token: str = "<|pad|>",
         mask_token: str = "<|mask|>",
         additional_special_tokens: Optional[list[str]] = None,
+        add_bos_token: bool = False,  # Chat template controls special tokens
+        add_eos_token: bool = False,  # Chat template controls special tokens
         **kwargs,
     ):
         # Store file paths for saving/conversion
@@ -128,8 +132,9 @@ class ArlowTokenizer(PreTrainedTokenizer):
         #   - Whitespace blocks
         self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
 
-        # Whether to automatically add BOS on encoding
-        self.add_bos_token = kwargs.pop("add_bos_token", True)
+        # Store BOS/EOS behavior for explicit control
+        self.add_bos_token = add_bos_token
+        self.add_eos_token = add_eos_token
 
         super().__init__(
             bos_token=bos_token,

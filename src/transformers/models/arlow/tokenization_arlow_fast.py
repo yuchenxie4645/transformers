@@ -43,11 +43,12 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
         tokenizer_file: Optional[str] = None,
         unk_token: str = "<|unk|>",
         bos_token: Optional[str] = "<|startoftext|>",
-        eos_token: str = "<|endoftext|>",
+        eos_token: str = "<|im_end|>",  # Turn boundary serves as EOS (Qwen-style)
         pad_token: str = "<|pad|>",
         mask_token: str = "<|mask|>",
         additional_special_tokens: Optional[list] = None,
-        add_bos_token: bool = True,
+        add_bos_token: bool = False,  # Chat template controls special tokens
+        add_eos_token: bool = False,  # Chat template controls special tokens
         **kwargs,
     ):
         # Convert str tokens to AddedToken objects with no normalization,
@@ -91,14 +92,16 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
             **kwargs,
         )
 
-        # Expose BOS behavior similarly to slow tokenizer
+        # Expose BOS/EOS behavior for explicit control
         self.add_bos_token = add_bos_token
+        self.add_eos_token = add_eos_token
 
         # If there's NO tokenizer_file, we're building from vocab/merges. Ensure ByteLevel is set:
         if tokenizer_file is None:
             # Force ByteLevel pre-tokenizer + decoder for GPT-2 style byte handling
+            # add_prefix_space=False follows modern causal LM standards (CodeGen, StarCoder, DeepSeek)
             if self._tokenizer.pre_tokenizer is None:
-                self._tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=True)
+                self._tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
             if self._tokenizer.decoder is None:
                 self._tokenizer.decoder = ByteLevelDecoder()
 
