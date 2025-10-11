@@ -1,101 +1,126 @@
-# configuration_arlow.py
+"""Arlow model configuration"""
 
 from ...configuration_utils import PretrainedConfig
+from ...modeling_rope_utils import rope_config_validation
+from ...utils import logging
+
+
+logger = logging.get_logger(__name__)
 
 
 class ArlowConfig(PretrainedConfig):
     r"""
-    This is the configuration class to store the configuration of an [`ArlowModel`], intended for multi-turn
-    text-to-text causal language modeling. It is used to instantiate an ArlowGPT model according to the specified
-    arguments, defining the model architecture.
+    This is the configuration class to store the configuration of an [`ArlowModel`]. It is used to instantiate an
+    Arlow model according to the specified arguments, defining the model architecture. Instantiating a configuration
+    with the defaults will yield a similar configuration to that of
+    Arlow-Base [yuchenxie/ArlowGPT-Base](https://huggingface.co/yuchenxie/ArlowGPT-Base).
 
     Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
     documentation from [`PretrainedConfig`] for more information.
 
-    Checkpoint link: [yuchenxie/ArlowGPT-Base](https://huggingface.co/yuchenxie/ArlowGPT-Base)
 
     Args:
         vocab_size (`int`, *optional*, defaults to 131072):
-            Vocabulary size of the ArlowGPT model. Defines the number of different tokens that can be represented by
-            `input_ids`.
+            Vocabulary size of the Arlow model. Defines the number of different tokens that can be represented by the
+            `inputs_ids` passed when calling [`ArlowModel`]
         hidden_size (`int`, *optional*, defaults to 2304):
-            Dimensionality of the hidden representations.
+            Dimension of the hidden representations.
         intermediate_size (`int`, *optional*, defaults to 9216):
-            Dimensionality of the MLP (feed-forward) layers.
-        max_position_embeddings (`int`, *optional*, defaults to 2048):
-            The maximum sequence length (in tokens) that this model might ever be used with.
-        num_attention_heads (`int`, *optional*, defaults to 24):
-            Number of attention heads for each attention layer in the Transformer.
-        num_key_value_heads (`int`, *optional*, defaults to 4):
-            Number of key-value heads for attention (e.g., for Grouped Query Attention). If `num_key_value_heads`
-            equals `num_attention_heads`, it behaves like standard multi-head attention.
+            Dimension of the MLP representations.
         num_hidden_layers (`int`, *optional*, defaults to 32):
             Number of hidden layers in the Transformer decoder.
-        attention_dropout (`float`, *optional*, defaults to 0.1):
-            The dropout ratio for the attention probabilities.
+        num_attention_heads (`int`, *optional*, defaults to 24):
+            Number of attention heads for each attention layer in the Transformer decoder.
+        num_key_value_heads (`int`, *optional*, defaults to 4):
+            This is the number of key_value heads that should be used to implement Grouped Query Attention. If
+            `num_key_value_heads=num_attention_heads`, the model will use Multi Head Attention (MHA), if
+            `num_key_value_heads=1` the model will use Multi Query Attention (MQA) otherwise GQA is used. When
+            converting a multi-head checkpoint to a GQA checkpoint, each group key and value head should be constructed
+            by meanpooling all the original heads within that group. For more details, check out [this
+            paper](https://huggingface.co/papers/2305.13245). If it is not specified, will default to `4`.
+        hidden_act (`str` or `function`, *optional*, defaults to `"silu"`):
+            The non-linear activation function (function or string) in the decoder.
+        max_position_embeddings (`int`, *optional*, defaults to 2048):
+            The maximum sequence length that this model might ever be used with.
         initializer_range (`float`, *optional*, defaults to 0.02):
             The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
-        hidden_act (`str` or `function`, *optional*, defaults to `"silu"`):
-            The non-linear activation function in the MLP layers.
-        use_cache (`bool`, *optional*, defaults to `True`):
-            Whether or not the model should return the last key/values attentions (useful for speedy decoding in
-            multi-turn or streaming scenarios).
         rms_norm_eps (`float`, *optional*, defaults to 1e-06):
-            The epsilon used by RMS normalization layers.
-        rope_theta (`float`, *optional*, defaults to 100000.0):
-            The base period used by RoPE (rotary position embeddings).
+            The epsilon used by the rms normalization layers.
+        use_cache (`bool`, *optional*, defaults to `True`):
+            Whether or not the model should return the last key/values attentions (not used by all models). Only
+            relevant if `config.is_decoder=True`.
         pad_token_id (`int`, *optional*):
-            The padding token id. Must be set if padding is used, e.g., during batched training or generation.
+            Padding token id.
+        bos_token_id (`int`, *optional*):
+            Beginning of stream token id. Will be determined by the tokenizer.
+        eos_token_id (`int`, *optional*):
+            End of stream token id. Will be determined by the tokenizer.
+        tie_word_embeddings (`bool`, *optional*, defaults to `False`):
+            Whether to tie weight embeddings.
+        rope_theta (`float`, *optional*, defaults to 100000.0):
+            The base period of the RoPE embeddings.
+        rope_scaling (`Dict`, *optional*):
+            Dictionary containing the scaling configuration for the RoPE embeddings. NOTE: if you apply new rope type
+            and you expect the model to work on longer `max_position_embeddings`, we recommend you to update this value
+            accordingly.
+            Expected contents:
+                `rope_type` (`str`):
+                    The sub-variant of RoPE to use. Can be one of ['default', 'linear', 'dynamic', 'yarn', 'longrope',
+                    'llama3'], with 'default' being the original RoPE implementation.
+                `factor` (`float`, *optional*):
+                    Used with all rope types except 'default'. The scaling factor to apply to the RoPE embeddings. In
+                    most scaling types, a `factor` of x will enable the model to handle sequences of length x *
+                    original maximum pre-trained length.
+                `original_max_position_embeddings` (`int`, *optional*):
+                    Used with 'dynamic', 'longrope' and 'llama3'. The original max position embeddings used during
+                    pretraining.
+                `attention_factor` (`float`, *optional*):
+                    Used with 'yarn' and 'longrope'. The scaling factor to be applied on the attention
+                    computation. If unspecified, it defaults to value recommended by the implementation, using the
+                    `factor` field to infer the suggested value.
+                `beta_fast` (`float`, *optional*):
+                    Only used with 'yarn'. Parameter to set the boundary for extrapolation (only) in the linear
+                    ramp function. If unspecified, it defaults to 32.
+                `beta_slow` (`float`, *optional*):
+                    Only used with 'yarn'. Parameter to set the boundary for interpolation (only) in the linear
+                    ramp function. If unspecified, it defaults to 1.
+                `short_factor` (`list[float]`, *optional*):
+                    Only used with 'longrope'. The scaling factor to be applied to short contexts (<
+                    `original_max_position_embeddings`). Must be a list of numbers with the same length as the hidden
+                    size divided by the number of attention heads divided by 2
+                `long_factor` (`list[float]`, *optional*):
+                    Only used with 'longrope'. The scaling factor to be applied to long contexts (<
+                    `original_max_position_embeddings`). Must be a list of numbers with the same length as the hidden
+                    size divided by the number of attention heads divided by 2
+                `low_freq_factor` (`float`, *optional*):
+                    Only used with 'llama3'. Scaling factor applied to low frequency components of the RoPE
+                `high_freq_factor` (`float`, *optional*):
+                    Only used with 'llama3'. Scaling factor applied to high frequency components of the RoPE
         attention_bias (`bool`, *optional*, defaults to `False`):
-            Whether to use bias in attention layers.
+            Whether to use a bias in the query, key, value and output projection layers during self-attention.
+        attention_dropout (`float`, *optional*, defaults to 0.0):
+            The dropout ratio for the attention probabilities.
         resid_dropout (`float`, *optional*, defaults to 0.0):
             The dropout ratio for residual connections.
         mlp_dropout (`float`, *optional*, defaults to 0.0):
             The dropout ratio for MLP layers.
-        rope_scaling (`dict`, *optional*):
-            Dictionary containing the scaling configuration for RoPE embeddings.
         head_dim (`int`, *optional*):
-            The dimensionality of each attention head. If not set, defaults to `hidden_size // num_attention_heads`.
-        bos_token_id (`int`, *optional*, defaults to 1):
-            Token id of the beginning-of-sequence token.
-        eos_token_id (`int`, *optional*, defaults to 2):
-            Token id of the end-of-sequence token.
+            The attention head dimension. If None, it will default to hidden_size // num_attention_heads
 
-    Example:
     ```python
-    >>> from transformers import AutoTokenizer
-    >>> from your_package.configuration_arlow import ArlowConfig
+    >>> from transformers import ArlowModel, ArlowConfig
 
-    >>> # Assume you've created a tokenizer with 131072 tokens
-    >>> tokenizer = AutoTokenizer.from_pretrained("path/to/your-tokenizer")
+    >>> # Initializing an Arlow style configuration
+    >>> configuration = ArlowConfig()
 
-    >>> config = ArlowConfig(
-    ...     vocab_size=len(tokenizer),
-    ...     hidden_size=2304,
-    ...     intermediate_size=9216,
-    ...     max_position_embeddings=2048,
-    ...     num_attention_heads=12,
-    ...     num_key_value_heads=12,
-    ...     num_hidden_layers=28,
-    ...     attention_dropout=0.1,
-    ...     initializer_range=0.02,
-    ...     hidden_act="silu",
-    ...     use_cache=True,
-    ...     rms_norm_eps=1e-6,
-    ...     rope_theta=100000.0,
-    ...     pad_token_id=tokenizer.pad_token_id,
-    ...     bos_token_id=1,
-    ...     eos_token_id=2
-    ... )
-    >>> # You can now pass this config to your ArlowModel (multi-turn text-to-text for causal language modeling).
-    ```
+    >>> # Initializing a model from the Arlow style configuration
+    >>> model = ArlowModel(configuration)
 
-    """
+    >>> # Accessing the model configuration
+    >>> configuration = model.config
+    ```"""
 
     model_type = "arlow"
-
-    # By default, frameworks that generate or cache key-value states
-    # may store them under "past_key_values".
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
@@ -103,52 +128,58 @@ class ArlowConfig(PretrainedConfig):
         vocab_size=131072,
         hidden_size=2304,
         intermediate_size=9216,
-        max_position_embeddings=2048,
+        num_hidden_layers=32,
         num_attention_heads=24,
         num_key_value_heads=4,
-        num_hidden_layers=32,
-        attention_dropout=0.1,
-        initializer_range=0.02,
         hidden_act="silu",
-        use_cache=True,
+        max_position_embeddings=2048,
+        initializer_range=0.02,
         rms_norm_eps=1e-6,
-        rope_theta=100000.0,
+        use_cache=True,
         pad_token_id=None,
+        bos_token_id=None,
+        eos_token_id=None,
+        tie_word_embeddings=False,
+        rope_theta=100000.0,
+        rope_scaling=None,
         attention_bias=False,
+        attention_dropout=0.0,
         resid_dropout=0.0,
         mlp_dropout=0.0,
-        rope_scaling=None,
         head_dim=None,
-        bos_token_id=1,
-        eos_token_id=2,
         **kwargs,
     ):
+        self.vocab_size = vocab_size
+        self.max_position_embeddings = max_position_embeddings
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
+        self.hidden_act = hidden_act
+        self.initializer_range = initializer_range
+        self.rms_norm_eps = rms_norm_eps
+        self.use_cache = use_cache
+        self.rope_theta = rope_theta
+        self.rope_scaling = rope_scaling
+        self.attention_bias = attention_bias
+        self.attention_dropout = attention_dropout
+        self.resid_dropout = resid_dropout
+        self.mlp_dropout = mlp_dropout
+        self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
+        # Validate the correctness of rotary position embeddings parameters
+        # BC: if there is a 'type' field, copy it to 'rope_type'.
+        if self.rope_scaling is not None and "type" in self.rope_scaling:
+            self.rope_scaling["rope_type"] = self.rope_scaling["type"]
+        rope_config_validation(self)
+
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
+            tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
-
-        self.vocab_size = vocab_size
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-        self.max_position_embeddings = max_position_embeddings
-        self.num_attention_heads = num_attention_heads
-        self.num_key_value_heads = num_key_value_heads
-        self.num_hidden_layers = num_hidden_layers
-        self.attention_dropout = attention_dropout
-        self.initializer_range = initializer_range
-        self.hidden_act = hidden_act
-        self.use_cache = use_cache
-        self.rms_norm_eps = rms_norm_eps
-        self.rope_theta = rope_theta
-        # New fields
-        self.attention_bias = attention_bias
-        self.resid_dropout = resid_dropout
-        self.mlp_dropout = mlp_dropout
-        self.rope_scaling = rope_scaling
-        self.head_dim = head_dim
 
 
 __all__ = ["ArlowConfig"]
