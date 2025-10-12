@@ -1,10 +1,12 @@
 import json
 import os
+import unicodedata
+from functools import lru_cache
 from typing import Optional
 
 import regex as re
 
-from transformers.tokenization_utils import PreTrainedTokenizer
+from transformers.tokenization_utils import AddedToken, PreTrainedTokenizer
 from transformers.utils import logging
 
 
@@ -15,7 +17,12 @@ VOCAB_FILES_NAMES = {
     "merges_file": "merges.txt",
 }
 
+MAX_MODEL_INPUT_SIZES = {"arlow": 131072}
 
+PRETOKENIZE_REGEX = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+
+@lru_cache
 def bytes_to_unicode() -> dict[int, str]:
     """
     GPT-2 / ByteLevel BPE uses a list of utf-8 bytes and a corresponding list of unicode strings.
@@ -48,29 +55,53 @@ def get_pairs(word: list[str]) -> set:
 
 class ArlowTokenizer(PreTrainedTokenizer):
     """
-    ArlowTokenizer is a custom slow BPE tokenizer for the ArlowGPT model,
-    implementing a GPT-2/ByteLevel-like approach in pure Python.
+    Construct an Arlow tokenizer. Based on byte-level Byte-Pair-Encoding.
 
-    Example:
-        >>> from transformers.models.arlow.tokenization_arlow import ArlowTokenizer
-        >>> tokenizer = ArlowTokenizer.from_pretrained("path/to/tokenizer")
-        >>> tokens = tokenizer("Hello, world!")
-        >>> print(tokens)
+    Same with GPT2Tokenizer, this tokenizer has been trained to treat spaces like parts of the tokens so a word will
+    be encoded differently whether it is at the beginning of the sentence (without space) or not:
 
-    Attributes:
-        vocab_file (str): Path to the vocabulary file (JSON).
-        merges_file (str): Path to the merges file.
-        bos_token (`str`, *optional*, defaults to `"<|startoftext|>"`): The beginning of sequence token that was used during pretraining.
-            Can be used as a sequence classifier token.
-        eos_token (`str`, *optional*, defaults to `"<|im_end|>"`): The end of sequence token. Serves as turn boundary in chat.
-        unk_token (`str`, *optional*, defaults to `"<|unk|>"`): The unknown token. A token that is not in the vocabulary
-            cannot be converted to an ID and is set to be this token instead.
-        pad_token (`str`, *optional*, defaults to `"<|pad|>"`): The token used for padding, for example when batching sequences of different lengths.
-        mask_token (`str`, *optional*, defaults to `"<|mask|>"`): The token used for masking values. This is the token used when training
-            this model with masked language modeling. This is the token which the model will try to predict.
-        additional_special_tokens (`List[str]`, *optional*): Additional special tokens used by the tokenizer.
-        add_bos_token (`bool`, *optional*, defaults to `False`): Whether to add BOS token at the start of sequences.
-        add_eos_token (`bool`, *optional*, defaults to `False`): Whether to add EOS token at the end of sequences.
+    ```python
+    >>> from transformers import ArlowTokenizer
+
+    >>> tokenizer = ArlowTokenizer.from_pretrained("arlow-tokenizer")
+    >>> tokenizer("Hello world")["input_ids"]
+    [9707, 1879]
+
+    >>> tokenizer(" Hello world")["input_ids"]
+    [21927, 1879]
+    ```
+    This is expected.
+
+    You should not use GPT2Tokenizer instead, because of the different pretokenization rules.
+
+    This tokenizer inherits from [`PreTrainedTokenizer`] which contains most of the main methods. Users should refer to
+    this superclass for more information regarding those methods.
+
+    Args:
+        vocab_file (`str`):
+            Path to the vocabulary file.
+        merges_file (`str`):
+            Path to the merges file.
+        errors (`str`, *optional*, defaults to `"replace"`):
+            Paradigm to follow when decoding bytes to UTF-8. See
+            [bytes.decode](https://docs.python.org/3/library/stdtypes.html#bytes.decode) for more information.
+        unk_token (`str`, *optional*, defaults to `"<|endoftext|>"`):
+            The unknown token. A token that is not in the vocabulary cannot be converted to an ID and is set to be this
+            token instead.
+        bos_token (`str`, *optional*):
+            The beginning of sequence token. Not applicable for this tokenizer.
+        eos_token (`str`, *optional*, defaults to `"<|endoftext|>"`):
+            The end of sequence token.
+        pad_token (`str`, *optional*, defaults to `"<|endoftext|>"`):
+            The token used for padding, for example when batching sequences of different lengths.
+        clean_up_tokenization_spaces (`bool`, *optional*, defaults to `False`):
+            Whether or not the model should cleanup the spaces that were added when splitting the input text during the
+            tokenization process. Not applicable to this tokenizer, since tokenization does not add spaces.
+        split_special_tokens (`bool`, *optional*, defaults to `False`):
+            Whether or not the special tokens should be split during the tokenization process. The default behavior is
+            to not split special tokens. This means that if `<|endoftext|>` is the `eos_token`, then `tokenizer.tokenize("<|endoftext|>") =
+            ['<|endoftext|>`]. Otherwise, if `split_special_tokens=True`, then `tokenizer.tokenize("<|endoftext|>")` will be give `['<',
+            '|', 'endo', 'ft', 'ext', '|', '>']`. This argument is only supported for `slow` tokenizers for the moment.
     """
 
     vocab_files_names = VOCAB_FILES_NAMES
@@ -81,68 +112,73 @@ class ArlowTokenizer(PreTrainedTokenizer):
         self,
         vocab_file: str,
         merges_file: str,
-        bos_token: str = "<|startoftext|>",
-        eos_token: str = "<|im_end|>",  # Turn boundary serves as EOS (Qwen-style)
-        unk_token: str = "<|unk|>",
-        pad_token: str = "<|pad|>",
-        mask_token: str = "<|mask|>",
-        additional_special_tokens: Optional[list[str]] = None,
-        add_bos_token: bool = False,  # Chat template controls special tokens
-        add_eos_token: bool = False,  # Chat template controls special tokens
+        errors: str = "replace",
+        unk_token: str = "<|endoftext|>",
+        bos_token: Optional[str] = None,
+        eos_token: str = "<|endoftext|>",
+        pad_token: str = "<|endoftext|>",
+        clean_up_tokenization_spaces: bool = False,
+        split_special_tokens: bool = False,
         **kwargs,
     ):
-        # Store file paths for saving/conversion
-        self.vocab_file = vocab_file
-        self.merges_file = merges_file
-
-        # Convert or extend any additional special tokens
-        default_special_tokens = []
-        if additional_special_tokens and isinstance(additional_special_tokens, list):
-            default_special_tokens.extend(additional_special_tokens)
+        # Arlow vocab does not contain control tokens; added tokens need to be special
+        bos_token = (
+            AddedToken(bos_token, lstrip=False, rstrip=False, special=True, normalized=False)
+            if isinstance(bos_token, str)
+            else bos_token
+        )
+        eos_token = (
+            AddedToken(eos_token, lstrip=False, rstrip=False, special=True, normalized=False)
+            if isinstance(eos_token, str)
+            else eos_token
+        )
+        unk_token = (
+            AddedToken(unk_token, lstrip=False, rstrip=False, special=True, normalized=False)
+            if isinstance(unk_token, str)
+            else unk_token
+        )
+        pad_token = (
+            AddedToken(pad_token, lstrip=False, rstrip=False, special=True, normalized=False)
+            if isinstance(pad_token, str)
+            else pad_token
+        )
 
         # Load vocabulary
         with open(vocab_file, encoding="utf-8") as vocab_handle:
             self.encoder = json.load(vocab_handle)
         self.decoder = {v: k for k, v in self.encoder.items()}
 
-        # Ensure BOS/EOS are in vocab; if missing, add them to the end
-        for tok in [bos_token, eos_token, unk_token, pad_token, mask_token]:
-            if isinstance(tok, str) and tok not in self.encoder:
-                self.encoder[tok] = len(self.encoder)
-                self.decoder[self.encoder[tok]] = tok
+        self.errors = errors  # how to handle errors in decoding
 
         # Load merges (BPE ranks)
+        bpe_merges = []
         with open(merges_file, encoding="utf-8") as merges_handle:
-            merges = merges_handle.read().split("\n")
-            merges = [m for m in merges if m and not m.startswith("#")]
-            self.bpe_ranks = {tuple(merge.split()): i for i, merge in enumerate(merges)}
+            for i, line in enumerate(merges_handle):
+                line = line.strip()
+                if (i == 0 and line.startswith("#version:")) or not line:
+                    continue
+                bpe_merges.append(tuple(line.split()))
+        self.bpe_ranks = dict(zip(bpe_merges, range(len(bpe_merges))))
 
         # Byte-level mapping (GPT-2 style)
         self.byte_encoder = bytes_to_unicode()
         self.byte_decoder = {v: k for k, v in self.byte_encoder.items()}
 
-        # Cache for subwords
-        self.cache = {}
+        self.pat = re.compile(PRETOKENIZE_REGEX)
 
-        # A regex matching GPT-2/ByteLevel style word boundaries
-        # This will match:
-        #   - English contractions ('s, 't, etc.)
-        #   - Letters and digits
-        #   - Symbols
-        #   - Whitespace blocks
-        self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
-
-        # Store BOS/EOS behavior for explicit control
-        self.add_bos_token = add_bos_token
-        self.add_eos_token = add_eos_token
+        if kwargs.get("add_prefix_space", False):
+            logger.warning_once(
+                f"{self.__class__.__name__} does not support `add_prefix_space`, setting it to True has no effect."
+            )
 
         super().__init__(
+            errors=errors,
             bos_token=bos_token,
             eos_token=eos_token,
-            unk_token=unk_token,
             pad_token=pad_token,
-            mask_token=mask_token,
-            additional_special_tokens=default_special_tokens,
+            unk_token=unk_token,
+            clean_up_tokenization_spaces=clean_up_tokenization_spaces,
+            split_special_tokens=split_special_tokens,
             **kwargs,
         )
 
@@ -151,19 +187,16 @@ class ArlowTokenizer(PreTrainedTokenizer):
         return len(self.encoder)
 
     def get_vocab(self) -> dict[str, int]:
-        return dict(self.encoder)
+        return dict(self.encoder, **self.added_tokens_encoder)
 
+    @lru_cache
     def bpe(self, token: str) -> str:
         """
         Given a 'word' in the ByteLevel space, perform BPE merges according to self.bpe_ranks.
         """
-        if token in self.cache:
-            return self.cache[token]
-
-        word = list(token)
+        word = tuple(token)
         pairs = get_pairs(word)
         if not pairs:
-            self.cache[token] = token
             return token
 
         while True:
@@ -176,28 +209,30 @@ class ArlowTokenizer(PreTrainedTokenizer):
             new_word = []
             i = 0
             while i < len(word):
-                j = -1
                 try:
                     j = word.index(first, i)
                 except ValueError:
                     new_word.extend(word[i:])
                     break
-                new_word.extend(word[i:j])
-                i = j
+                else:
+                    new_word.extend(word[i:j])
+                    i = j
+
                 if i < len(word) - 1 and word[i] == first and word[i + 1] == second:
                     new_word.append(first + second)
                     i += 2
                 else:
                     new_word.append(word[i])
                     i += 1
+            new_word = tuple(new_word)
             word = new_word
             if len(word) == 1:
                 break
-            pairs = get_pairs(word)
+            else:
+                pairs = get_pairs(word)
 
-        subword = " ".join(word)
-        self.cache[token] = subword
-        return subword
+        word = " ".join(word)
+        return word
 
     def _tokenize(self, text: str) -> list[str]:
         """
@@ -225,24 +260,56 @@ class ArlowTokenizer(PreTrainedTokenizer):
         Reconstructs the text by reversing the ByteLevel encoding. We map each subword
         back to original bytes, then decode to UTF-8.
         """
-        decoded_bytes = bytearray()
-        for tok in tokens:
-            if tok in self.all_special_tokens:
-                # Do not treat specials as byte-encoded; insert as-is with spacing preserved
-                if decoded_bytes and not chr(decoded_bytes[-1]).isspace():
-                    decoded_bytes += b" "
-                decoded_bytes += tok.encode("utf-8")
-                continue
-            for ch in tok:
-                decoded_bytes.append(self.byte_decoder.get(ch, ord("?")))
-        return decoded_bytes.decode("utf-8", errors="replace")
+        text = "".join(tokens)
+        text = bytearray([self.byte_decoder[c] for c in text]).decode("utf-8", errors=self.errors)
+        return text
+
+    def decode(
+        self,
+        token_ids,
+        skip_special_tokens: bool = False,
+        clean_up_tokenization_spaces: Optional[bool] = False,
+        spaces_between_special_tokens: bool = False,
+        **kwargs,
+    ) -> str:
+        """
+        Converts a sequence of ids in a string, using the tokenizer and vocabulary with options to remove special
+        tokens and clean up tokenization spaces.
+
+        Args:
+            token_ids (`Union[int, List[int], np.ndarray, torch.Tensor, tf.Tensor]`):
+                List of tokenized input ids. Can be obtained using the `__call__` method.
+            skip_special_tokens (`bool`, *optional*, defaults to `False`):
+                Whether or not to remove special tokens in the decoding.
+            clean_up_tokenization_spaces (`bool`, *optional*, defaults to `False`):
+                Whether or not to clean up the tokenization spaces.
+            spaces_between_special_tokens (`bool`, *optional*, defaults to `False`):
+                Whether or not to add spaces between special tokens. Defaults to False to match modern tokenizers.
+            **kwargs (additional keyword arguments):
+                Will be passed to the underlying model specific decode method.
+
+        Returns:
+            `str`: The decoded string.
+        """
+        # `spaces_between_special_tokens` defaults to True for _decode in slow tokenizers
+        # and cannot be configured elsewhere, but it should default to False for ArlowTokenizer
+        return super().decode(
+            token_ids,
+            skip_special_tokens=skip_special_tokens,
+            clean_up_tokenization_spaces=clean_up_tokenization_spaces,
+            spaces_between_special_tokens=spaces_between_special_tokens,
+            **kwargs,
+        )
 
     def build_inputs_with_special_tokens(
         self, token_ids_0: list[int], token_ids_1: Optional[list[int]] = None
     ) -> list[int]:
         """
         Build model inputs from a sequence or a pair of sequences for sequence classification tasks by concatenating and
-        adding special tokens.
+        adding special tokens. An Arlow sequence has the following format:
+
+        - single sequence: `X`
+        - pair of sequences: `X Y`
 
         Args:
             token_ids_0 (`List[int]`): The first sequence to be encoded.
@@ -251,13 +318,9 @@ class ArlowTokenizer(PreTrainedTokenizer):
         Returns:
             `List[int]`: The encoded sequence(s) with special tokens.
         """
-        bos = [self.bos_token_id] if getattr(self, "add_bos_token", False) and self.bos_token_id is not None else []
-
         if token_ids_1 is None:
-            return bos + token_ids_0
-
-        # For pairs, add BOS to the first sequence only
-        return bos + token_ids_0 + token_ids_1
+            return token_ids_0
+        return token_ids_0 + token_ids_1
 
     def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> tuple[str, str]:
         if not os.path.isdir(save_directory):
@@ -286,6 +349,21 @@ class ArlowTokenizer(PreTrainedTokenizer):
                 writer.write(f"{first} {second}")
 
         return vocab_file, merges_file
+
+    def prepare_for_tokenization(self, text, **kwargs):
+        """
+        Performs pre-tokenization normalization. This is critical to avoid UTF-8 byte artifacts
+        and unicode inconsistencies during tokenizer training.
+
+        Unicode NFC (Canonical Decomposition, followed by Canonical Composition) ensures that
+        characters are represented in their composed form, preventing issues where:
+        - "é" (single codepoint U+00E9) vs "é" (e + combining accent U+0065 U+0301)
+
+        Without this normalization, these would produce different byte sequences and cause
+        BPE to learn inconsistent merges, leading to tokenization artifacts.
+        """
+        text = unicodedata.normalize("NFC", text)
+        return (text, kwargs)
 
 
 __all__ = ["ArlowTokenizer"]

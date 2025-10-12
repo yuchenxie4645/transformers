@@ -19,7 +19,6 @@ if is_flash_attn_available():
 
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
-from ...utils.generic import check_model_inputs
 from .configuration_arlow import ArlowConfig
 
 
