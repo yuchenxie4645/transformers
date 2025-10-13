@@ -1,16 +1,3 @@
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """Testing suite for the PyTorch Arlow model."""
 
 import unittest
@@ -215,3 +202,84 @@ class ArlowIntegrationTest(unittest.TestCase):
             if param.requires_grad:
                 self.assertIsNotNone(param.grad)
                 break
+
+    @slow
+    def test_model_sliding_window_attention(self):
+        """Test sliding window attention with long sequences."""
+        config = ArlowConfig(
+            vocab_size=1000,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=4,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=512,
+            use_sliding_window=True,
+            sliding_window=128,
+            max_window_layers=2,  # First 2 layers use full attention, last 2 use sliding window
+        )
+        model = ArlowForCausalLM(config).to(torch_device).eval()
+
+        # Test with a sequence longer than sliding window
+        input_ids = torch.randint(0, config.vocab_size, (1, 200), device=torch_device)
+        with torch.no_grad():
+            outputs = model(input_ids)
+
+        self.assertEqual(outputs.logits.shape, (1, 200, config.vocab_size))
+
+        # Verify layer types were set correctly
+        self.assertEqual(config.layer_types[0], "full_attention")
+        self.assertEqual(config.layer_types[1], "full_attention")
+        self.assertEqual(config.layer_types[2], "sliding_attention")
+        self.assertEqual(config.layer_types[3], "sliding_attention")
+
+        # Test generation with sliding window
+        generated = model.generate(input_ids[:, :10], max_new_tokens=20, do_sample=False)
+        self.assertEqual(generated.shape[1], 30)  # original 10 + 20 new tokens
+
+    @slow
+    def test_model_sliding_window_vs_full_attention(self):
+        """Test that sliding window and full attention produce similar results on short sequences."""
+        # For short sequences (shorter than sliding window), results should be identical
+        seq_len = 50
+        
+        # Config with sliding window
+        config_sliding = ArlowConfig(
+            vocab_size=1000,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=512,
+            use_sliding_window=True,
+            sliding_window=128,
+            max_window_layers=0,  # All layers use sliding window
+        )
+        
+        # Config without sliding window (all full attention)
+        config_full = ArlowConfig(
+            vocab_size=1000,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=512,
+            use_sliding_window=False,
+        )
+
+        model_sliding = ArlowForCausalLM(config_sliding).to(torch_device).eval()
+        model_full = ArlowForCausalLM(config_full).to(torch_device).eval()
+
+        # Copy weights to make them identical
+        model_full.load_state_dict(model_sliding.state_dict(), strict=False)
+
+        input_ids = torch.randint(0, 1000, (1, seq_len), device=torch_device)
+        
+        with torch.no_grad():
+            outputs_sliding = model_sliding(input_ids)
+            outputs_full = model_full(input_ids)
+
+        # For sequences shorter than sliding window, outputs should be very similar
+        torch.testing.assert_close(outputs_sliding.logits, outputs_full.logits, rtol=1e-3, atol=1e-3)

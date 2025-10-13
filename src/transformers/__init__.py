@@ -1338,6 +1338,9 @@ else:
             "ArlowPreTrainedModel",
             "ArlowModel",
             "ArlowForCausalLM",
+            "ArlowForSequenceClassification",
+            "ArlowForQuestionAnswering",
+            "ArlowForTokenClassification",
         ]
     )
     _import_structure["models.audio_spectrogram_transformer"].extend(
@@ -5439,6 +5442,9 @@ if TYPE_CHECKING:
         # PyTorch model imports
         from .models.arlow import (
             ArlowForCausalLM,
+            ArlowForQuestionAnswering,
+            ArlowForSequenceClassification,
+            ArlowForTokenClassification,
             ArlowModel,
             ArlowPreTrainedModel,
         )

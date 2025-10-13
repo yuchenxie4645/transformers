@@ -1,6 +1,6 @@
 """Arlow model configuration"""
 
-from ...configuration_utils import PretrainedConfig
+from ...configuration_utils import PretrainedConfig, layer_type_validation
 from ...modeling_rope_utils import rope_config_validation
 from ...utils import logging
 
@@ -106,6 +106,15 @@ class ArlowConfig(PretrainedConfig):
             The dropout ratio for MLP layers.
         head_dim (`int`, *optional*):
             The attention head dimension. If None, it will default to hidden_size // num_attention_heads
+        use_sliding_window (`bool`, *optional*, defaults to `False`):
+            Whether to use sliding window attention.
+        sliding_window (`int`, *optional*, defaults to 4096):
+            Sliding window attention (SWA) window size. If not specified, will default to `4096`.
+        max_window_layers (`int`, *optional*, defaults to 28):
+            The number of layers using full attention. The first `max_window_layers` layers will use full attention, while any
+            additional layer afterwards will use SWA (Sliding Window Attention).
+        layer_types (`list`, *optional*):
+            Attention pattern for each layer.
 
     ```python
     >>> from transformers import ArlowModel, ArlowConfig
@@ -147,6 +156,10 @@ class ArlowConfig(PretrainedConfig):
         resid_dropout=0.0,
         mlp_dropout=0.0,
         head_dim=None,
+        use_sliding_window=False,
+        sliding_window=4096,
+        max_window_layers=28,
+        layer_types=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -155,6 +168,9 @@ class ArlowConfig(PretrainedConfig):
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
+        self.use_sliding_window = use_sliding_window
+        self.sliding_window = sliding_window if self.use_sliding_window else None
+        self.max_window_layers = max_window_layers
         self.num_key_value_heads = num_key_value_heads
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
@@ -172,6 +188,16 @@ class ArlowConfig(PretrainedConfig):
         if self.rope_scaling is not None and "type" in self.rope_scaling:
             self.rope_scaling["rope_type"] = self.rope_scaling["type"]
         rope_config_validation(self)
+
+        self.layer_types = layer_types
+        if self.layer_types is None:
+            self.layer_types = [
+                "sliding_attention"
+                if self.sliding_window is not None and i >= self.max_window_layers
+                else "full_attention"
+                for i in range(self.num_hidden_layers)
+            ]
+        layer_type_validation(self.layer_types, self.num_hidden_layers)
 
         super().__init__(
             pad_token_id=pad_token_id,

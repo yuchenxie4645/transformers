@@ -2,12 +2,14 @@ from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
+from packaging import version
 from torch import nn
 
 from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache
 from ...generation import GenerationMixin
-from ...masking_utils import create_causal_mask
+from ...integrations import use_kernel_forward_from_hub
+from ...masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from ...modeling_flash_attention_utils import is_flash_attn_available
 from ...modeling_layers import (
     GenericForQuestionAnswering,
@@ -24,24 +26,37 @@ if is_flash_attn_available():
 
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
+from ...utils.import_utils import get_torch_version
 from .configuration_arlow import ArlowConfig
 
 
 logger = logging.get_logger(__name__)
 
 
-class ArlowRMSNorm(nn.Module):
-    def __init__(self, hidden_size: int, eps: float = 1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.eps = eps
+if version.parse(get_torch_version()) >= version.parse("2.3.0"):
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
-        return self.weight * hidden_states.to(input_dtype)
+    class ArlowRMSNorm(nn.RMSNorm):
+        def __init__(self, hidden_size: int, eps: float = 1e-6):
+            super().__init__(normalized_shape=hidden_size, eps=eps, elementwise_affine=True)
+
+else:
+
+    @use_kernel_forward_from_hub("RMSNorm")
+    class ArlowRMSNorm(nn.Module):
+        def __init__(self, hidden_size: int, eps: float = 1e-6):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(hidden_size))
+            self.variance_epsilon = eps
+
+        def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+            input_dtype = hidden_states.dtype
+            hidden_states = hidden_states.to(torch.float32)
+            variance = hidden_states.pow(2).mean(-1, keepdim=True)
+            hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+            return self.weight * hidden_states.to(input_dtype)
+
+        def extra_repr(self):
+            return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
 class ArlowRotaryEmbedding(nn.Module):
@@ -144,6 +159,8 @@ class ArlowAttention(nn.Module):
         self.num_key_value_groups = self.num_heads // self.num_kv_heads
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
+        # Sliding window support
+        self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
 
         self.q_proj = nn.Linear(
             self.hidden_size,
@@ -167,11 +184,9 @@ class ArlowAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],  # additive mask [B, 1, S, S]
+        attention_mask: Optional[torch.Tensor],
         past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        padding_mask_2d: Optional[torch.Tensor] = None,  # 2D bool mask for varlen path
-        is_incremental_decoding: Optional[bool] = False,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         input_shape = hidden_states.shape[:-1]
@@ -194,25 +209,6 @@ class ArlowAttention(nn.Module):
         if getattr(self.config, "_attn_implementation", "eager") != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
-        # Ensure 4D mask matches query/key dimensions after cache update
-        if attention_mask is not None and attention_mask.ndim == 4:
-            q_len = query_states.shape[-2]
-            kv_len = key_states.shape[-2]
-            # If the kv length is 1 (typical during decoding with cache) the 4D mask can create shape issues in SDPA.
-            if kv_len == 1:
-                attention_mask = None
-            else:
-                if attention_mask.shape[-2] != q_len:
-                    attention_mask = attention_mask[:, :, -q_len:, :]
-                if attention_mask.shape[-1] != kv_len:
-                    attention_mask = attention_mask[:, :, :, :kv_len]
-
-        # During incremental decoding with caches, we can rely on SDPA's `is_causal` path,
-        # but ONLY if we're actually in incremental decoding (adding tokens to existing cache).
-        # For the first forward pass (even if cache object exists), we must use the attention_mask for padding
-        if is_incremental_decoding and getattr(self.config, "_attn_implementation", "eager") != "eager":
-            attention_mask = None
-
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
@@ -221,6 +217,7 @@ class ArlowAttention(nn.Module):
             attention_mask,
             dropout=self.attention_dropout if self.training else 0.0,
             scaling=self.scaling,
+            sliding_window=self.sliding_window,
             **kwargs,
         )
 
@@ -249,6 +246,7 @@ class ArlowMLP(nn.Module):
 class ArlowDecoderLayer(nn.Module):
     def __init__(self, config: ArlowConfig, layer_idx: int):
         super().__init__()
+        self.attention_type = config.layer_types[layer_idx]
         self.self_attn = ArlowAttention(config=config, layer_idx=layer_idx)
         self.mlp = ArlowMLP(config)
         self.input_layernorm = ArlowRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -264,8 +262,6 @@ class ArlowDecoderLayer(nn.Module):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-        padding_mask_2d: Optional[torch.Tensor] = None,
-        is_incremental_decoding: Optional[bool] = False,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         residual = hidden_states
@@ -276,8 +272,6 @@ class ArlowDecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             past_key_values=past_key_values,
             cache_position=cache_position,
-            padding_mask_2d=padding_mask_2d,
-            is_incremental_decoding=is_incremental_decoding,
             **kwargs,
         )
         hidden_states = residual + self.resid_dropout(attn_out)
@@ -326,6 +320,7 @@ class ArlowModel(ArlowPreTrainedModel):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
+        self.has_sliding_layers = "sliding_attention" in config.layer_types
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
@@ -387,25 +382,27 @@ class ArlowModel(ArlowPreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        # Create additive causal mask for SDPA fallback
-        causal_mask = create_causal_mask(
-            config=self.config,
-            input_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            cache_position=cache_position,
-            past_key_values=past_key_values,
-            position_ids=position_ids,
-        )
+        # It may already have been prepared by e.g. `generate`
+        if not isinstance(causal_mask_mapping := attention_mask, dict):
+            # Prepare mask arguments
+            mask_kwargs = {
+                "config": self.config,
+                "input_embeds": inputs_embeds,
+                "attention_mask": attention_mask,
+                "cache_position": cache_position,
+                "past_key_values": past_key_values,
+                "position_ids": position_ids,
+            }
+            # Create the masks
+            causal_mask_mapping = {
+                "full_attention": create_causal_mask(**mask_kwargs),
+            }
+            # The sliding window alternating layers are not always activated depending on the config
+            if self.has_sliding_layers:
+                causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
 
         hidden_states = inputs_embeds
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-        # Check if we're in incremental decoding (adding to existing cache) vs first forward pass
-        # This determines whether we can drop the attention mask for SDPA's is_causal path
-        is_incremental_decoding = past_key_values is not None and past_key_values.get_seq_length() > 0
-
-        # Preserve original 2D padding mask for varlen path
-        padding_mask_2d = attention_mask
 
         # Collect hidden states and attentions for output if requested
         output_hidden_states = kwargs.get("output_hidden_states", self.config.output_hidden_states)
@@ -429,49 +426,21 @@ class ArlowModel(ArlowPreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
-            if self.gradient_checkpointing and self.training and past_key_values is None:
+            layer_outputs = decoder_layer(
+                hidden_states,
+                attention_mask=causal_mask_mapping[decoder_layer.attention_type],
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                **kwargs,
+            )
 
-                def create_custom_forward(module):
-                    def custom_forward(hidden_states):
-                        return module(
-                            hidden_states,
-                            attention_mask=causal_mask,
-                            position_ids=position_ids,
-                            past_key_values=past_key_values,
-                            use_cache=use_cache,
-                            cache_position=cache_position,
-                            position_embeddings=position_embeddings,
-                            padding_mask_2d=padding_mask_2d,
-                            is_incremental_decoding=is_incremental_decoding,
-                            **kwargs,
-                        )
+            hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
 
-                    return custom_forward
-
-                layer_outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(decoder_layer),
-                    hidden_states,
-                    use_reentrant=False,
-                )
-                hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
-            else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=causal_mask,
-                    position_ids=position_ids,
-                    past_key_values=past_key_values,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                    position_embeddings=position_embeddings,
-                    padding_mask_2d=padding_mask_2d,
-                    is_incremental_decoding=is_incremental_decoding,
-                    **kwargs,
-                )
-
-                hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
-
-                if all_self_attns is not None and isinstance(layer_outputs, tuple) and len(layer_outputs) > 1:
-                    all_self_attns += (layer_outputs[1],)
+            if all_self_attns is not None and isinstance(layer_outputs, tuple) and len(layer_outputs) > 1:
+                all_self_attns += (layer_outputs[1],)
 
             if all_hidden_states is not None:
                 all_hidden_states += (hidden_states,)
@@ -479,7 +448,7 @@ class ArlowModel(ArlowPreTrainedModel):
         hidden_states = self.norm(hidden_states)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=past_key_values,
+            past_key_values=past_key_values if use_cache else None,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )
