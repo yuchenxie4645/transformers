@@ -19,7 +19,7 @@ VOCAB_FILES_NAMES = {
 
 MAX_MODEL_INPUT_SIZES = {"arlow": 131072}
 
-PRETOKENIZE_REGEX = r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+PRETOKENIZE_REGEX = r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
 
 
 @lru_cache
@@ -189,7 +189,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
     def get_vocab(self) -> dict[str, int]:
         return dict(self.encoder, **self.added_tokens_encoder)
 
-    @lru_cache
+    @lru_cache(maxsize=4096)
     def bpe(self, token: str) -> str:
         """
         Given a 'word' in the ByteLevel space, perform BPE merges according to self.bpe_ranks.

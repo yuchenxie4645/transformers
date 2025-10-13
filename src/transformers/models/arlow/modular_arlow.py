@@ -9,6 +9,11 @@ from ...cache_utils import Cache, DynamicCache
 from ...generation import GenerationMixin
 from ...masking_utils import create_causal_mask
 from ...modeling_flash_attention_utils import is_flash_attn_available
+from ...modeling_layers import (
+    GenericForQuestionAnswering,
+    GenericForSequenceClassification,
+    GenericForTokenClassification,
+)
 from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
@@ -596,4 +601,20 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
         return past_key_values
 
 
-__all__ = ["ArlowPreTrainedModel", "ArlowModel", "ArlowForCausalLM"]
+class ArlowForSequenceClassification(GenericForSequenceClassification, ArlowPreTrainedModel): ...
+
+
+class ArlowForQuestionAnswering(GenericForQuestionAnswering, ArlowPreTrainedModel): ...
+
+
+class ArlowForTokenClassification(GenericForTokenClassification, ArlowPreTrainedModel): ...
+
+
+__all__ = [
+    "ArlowPreTrainedModel",
+    "ArlowModel",
+    "ArlowForCausalLM",
+    "ArlowForSequenceClassification",
+    "ArlowForQuestionAnswering",
+    "ArlowForTokenClassification",
+]

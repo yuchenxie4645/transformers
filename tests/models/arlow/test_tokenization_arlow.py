@@ -107,17 +107,17 @@ class ArlowTokenizerTests(unittest.TestCase):
     def test_special_tokens_normalization(self):
         """Test that special tokens are not normalized."""
         tok = ArlowTokenizer(vocab_file=self.vocab_file, merges_file=self.merges_file)
-        
+
         # Special tokens should remain unchanged
         eos = tok.eos_token
         unk = tok.unk_token
         pad = tok.pad_token
-        
+
         self.assertEqual(eos, "<|endoftext|>")
         self.assertEqual(unk, "<|endoftext|>")
         self.assertEqual(pad, "<|endoftext|>")
         self.assertIsNone(tok.bos_token)
-        
+
         # Verify special tokens are properly marked
         self.assertIn(eos, tok.all_special_tokens)
         self.assertIn(unk, tok.all_special_tokens)
@@ -126,7 +126,7 @@ class ArlowTokenizerTests(unittest.TestCase):
         """Test that get_vocab() includes added tokens."""
         tok = ArlowTokenizer(vocab_file=self.vocab_file, merges_file=self.merges_file)
         vocab = tok.get_vocab()
-        
+
         # Check that special tokens are in vocab
         self.assertIn("<|endoftext|>", vocab)
 

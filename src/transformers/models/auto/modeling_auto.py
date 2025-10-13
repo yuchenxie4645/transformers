@@ -1214,6 +1214,7 @@ MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES = OrderedDict(
     [
         # Model for Sequence Classification mapping
         ("albert", "AlbertForSequenceClassification"),
+        ("arlow", "ArlowForSequenceClassification"),
         ("arcee", "ArceeForSequenceClassification"),
         ("bart", "BartForSequenceClassification"),
         ("bert", "BertForSequenceClassification"),
@@ -1335,6 +1336,7 @@ MODEL_FOR_QUESTION_ANSWERING_MAPPING_NAMES = OrderedDict(
     [
         # Model for Question Answering mapping
         ("albert", "AlbertForQuestionAnswering"),
+        ("arlow", "ArlowForQuestionAnswering"),
         ("arcee", "ArceeForQuestionAnswering"),
         ("bart", "BartForQuestionAnswering"),
         ("bert", "BertForQuestionAnswering"),
@@ -1444,6 +1446,7 @@ MODEL_FOR_TOKEN_CLASSIFICATION_MAPPING_NAMES = OrderedDict(
         # Model for Token Classification mapping
         ("albert", "AlbertForTokenClassification"),
         ("apertus", "ApertusForTokenClassification"),
+        ("arlow", "ArlowForTokenClassification"),
         ("arcee", "ArceeForTokenClassification"),
         ("bert", "BertForTokenClassification"),
         ("big_bird", "BigBirdForTokenClassification"),

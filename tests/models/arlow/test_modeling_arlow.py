@@ -27,6 +27,9 @@ if is_torch_available():
     from transformers import (
         ArlowConfig,
         ArlowForCausalLM,
+        ArlowForQuestionAnswering,
+        ArlowForSequenceClassification,
+        ArlowForTokenClassification,
         ArlowModel,
     )
     from transformers.models.arlow.modeling_arlow import ArlowRotaryEmbedding
@@ -45,6 +48,9 @@ class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
         (
             ArlowModel,
             ArlowForCausalLM,
+            ArlowForSequenceClassification,
+            ArlowForTokenClassification,
+            ArlowForQuestionAnswering,
         )
         if is_torch_available()
         else ()
@@ -53,6 +59,9 @@ class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
         {
             "feature-extraction": ArlowModel,
             "text-generation": ArlowForCausalLM,
+            "text-classification": ArlowForSequenceClassification,
+            "token-classification": ArlowForTokenClassification,
+            "question-answering": ArlowForQuestionAnswering,
         }
         if is_torch_available()
         else {}
