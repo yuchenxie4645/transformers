@@ -194,6 +194,15 @@ class ArlowAttention(nn.Module):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
+        # For SDPA, during incremental decoding (query_len == 1), we should pass None as the mask
+        # to allow SDPA to use is_causal=False, avoiding shape issues with 4D masks
+        if (
+            getattr(self.config, "_attn_implementation", "eager") == "sdpa"
+            and attention_mask is not None
+            and query_states.shape[2] == 1  # q_len == 1 (incremental decoding)
+        ):
+            attention_mask = None
+
         # Dispatch to proper attention implementation
         attention_interface = eager_attention_forward
         if getattr(self.config, "_attn_implementation", "eager") != "eager":
