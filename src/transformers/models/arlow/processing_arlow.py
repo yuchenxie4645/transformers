@@ -82,26 +82,6 @@ class ArlowProcessor(ProcessorMixin):
             else tokenizer.convert_tokens_to_ids(self.vision_end_token)
         )
 
-        # Ensure tokenizer treats multimodal tokens as indivisible special tokens
-        try:
-            self.tokenizer.add_special_tokens(
-                {
-                    "additional_special_tokens": [
-                        self.image_token,
-                        self.video_token,
-                        self.vision_start_token,
-                        self.vision_end_token,
-                    ]
-                }
-            )
-            # Recompute token ids in case newly added
-            self.image_token_id = self.tokenizer.convert_tokens_to_ids(self.image_token)
-            self.video_token_id = self.tokenizer.convert_tokens_to_ids(self.video_token)
-            self.vision_start_token_id = self.tokenizer.convert_tokens_to_ids(self.vision_start_token)
-            self.vision_end_token_id = self.tokenizer.convert_tokens_to_ids(self.vision_end_token)
-        except Exception:
-            pass
-
     def __call__(
         self,
         images: ImageInput | None = None,

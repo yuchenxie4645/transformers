@@ -891,6 +891,226 @@ class ArlowDecoderLayer(nn.Module):
         return (hidden_states,)
 
 
+class PatchEmbed(nn.Module):
+    """Convert images/videos to patch embeddings."""
+    
+    def __init__(
+        self,
+        patch_size: int = 14,
+        temporal_patch_size: int = 2,
+        in_channels: int = 3,
+        embed_dim: int = 1280,
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+        self.temporal_patch_size = temporal_patch_size
+        self.in_channels = in_channels
+        self.embed_dim = embed_dim
+        
+        # 3D convolution for video, 2D for images
+        kernel_size = (temporal_patch_size, patch_size, patch_size)
+        self.proj = nn.Conv3d(in_channels, embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=False)
+    
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            hidden_states: (batch * num_tiles, channels, temporal, height, width)
+        Returns:
+            embeddings: (batch * num_tiles, embed_dim, T, H, W) -> flattened to (total_tokens, embed_dim)
+        """
+        hidden_states = self.proj(hidden_states)
+        # Flatten spatial dimensions: (B, C, T, H, W) -> (B, T*H*W, C)
+        batch_size = hidden_states.shape[0]
+        hidden_states = hidden_states.reshape(batch_size, self.embed_dim, -1).transpose(1, 2)
+        return hidden_states
+
+
+class PatchMerger(nn.Module):
+    """Merge vision patches and project to text model dimension."""
+    
+    def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2):
+        super().__init__()
+        self.hidden_size = context_dim * (spatial_merge_size ** 2)
+        self.ln_q = LayerNorm(context_dim, eps=1e-6)
+        self.mlp = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size),
+            nn.GELU(),
+            nn.Linear(self.hidden_size, dim),
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: vision embeddings of shape (total_patches, embed_dim)
+        Returns:
+            merged: (total_merged_patches, hidden_size)
+        """
+        x = self.ln_q(x)
+        # Reshape for spatial merging (simplified version - actual impl may vary)
+        # For now, apply MLP directly
+        return self.mlp(x)
+
+
+class ArlowVisionAttention(nn.Module):
+    """Vision self-attention with RoPE."""
+    
+    def __init__(self, config: ArlowVisionConfig):
+        super().__init__()
+        self.embed_dim = config.embed_dim
+        self.num_heads = config.num_heads
+        self.head_dim = self.embed_dim // self.num_heads
+        self.scaling = self.head_dim ** -0.5
+        
+        self.qkv = nn.Linear(self.embed_dim, self.embed_dim * 3, bias=True)
+        self.proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            hidden_states: (total_tokens, embed_dim)
+            position_embeddings: (cos, sin) for RoPE
+        """
+        batch_size, seq_length = hidden_states.shape[0], hidden_states.shape[1] if hidden_states.dim() > 2 else hidden_states.shape[0]
+        
+        # Compute Q, K, V
+        qkv = self.qkv(hidden_states).reshape(-1, 3, self.num_heads, self.head_dim)
+        query_states, key_states, value_states = qkv.unbind(1)
+        
+        # Apply RoPE if provided
+        if position_embeddings is not None:
+            cos, sin = position_embeddings
+            query_states, key_states = apply_rotary_pos_emb_vision(query_states, key_states, cos, sin)
+        
+        # Reshape for attention: (seq, heads, head_dim) -> (1, seq, heads, head_dim) -> (1, heads, seq, head_dim)
+        query_states = query_states.unsqueeze(0).transpose(1, 2)
+        key_states = key_states.unsqueeze(0).transpose(1, 2)
+        value_states = value_states.unsqueeze(0).transpose(1, 2)
+        
+        # Scaled dot-product attention
+        attn_weights = torch.matmul(query_states, key_states.transpose(-2, -1)) * self.scaling
+        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_output = torch.matmul(attn_weights, value_states)
+        
+        # Reshape back
+        attn_output = attn_output.transpose(1, 2).reshape(-1, self.embed_dim)
+        attn_output = self.proj(attn_output)
+        
+        return attn_output
+
+
+class ArlowVisionBlock(GradientCheckpointingLayer):
+    """Vision transformer block with attention and MLP."""
+    
+    def __init__(self, config: ArlowVisionConfig):
+        super().__init__()
+        self.norm1 = LayerNorm(config.embed_dim, eps=1e-6)
+        self.norm2 = LayerNorm(config.embed_dim, eps=1e-6)
+        self.attn = ArlowVisionAttention(config)
+        mlp_hidden_dim = int(config.embed_dim * config.mlp_ratio)
+        # Inline MLP instead of separate class
+        self.fc1 = nn.Linear(config.embed_dim, mlp_hidden_dim)
+        self.act = ACT2FN[config.hidden_act]
+        self.fc2 = nn.Linear(mlp_hidden_dim, config.embed_dim)
+    
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        # Self-attention with residual
+        hidden_states = hidden_states + self.attn(
+            self.norm1(hidden_states),
+            position_embeddings=position_embeddings,
+        )
+        # MLP with residual (inline)
+        residual = hidden_states
+        hidden_states = self.norm2(hidden_states)
+        hidden_states = self.fc2(self.act(self.fc1(hidden_states)))
+        hidden_states = residual + hidden_states
+        return hidden_states
+
+
+class ArlowVisionTransformer(nn.Module):
+    """Complete vision encoder for Arlow multimodal models."""
+    
+    def __init__(self, config: ArlowVisionConfig):
+        super().__init__()
+        self.config = config
+        self.spatial_merge_size = config.spatial_merge_size
+        
+        # Patch embedding
+        self.patch_embed = PatchEmbed(
+            patch_size=config.patch_size,
+            temporal_patch_size=config.temporal_patch_size,
+            in_channels=config.in_channels,
+            embed_dim=config.embed_dim,
+        )
+        
+        # Rotary position embeddings for vision
+        head_dim = config.embed_dim // config.num_heads
+        self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
+        
+        # Transformer blocks
+        self.blocks = nn.ModuleList([
+            ArlowVisionBlock(config) for _ in range(config.depth)
+        ])
+        
+        # Patch merger to project to text dimension
+        self.merger = PatchMerger(
+            dim=config.hidden_size,
+            context_dim=config.embed_dim,
+            spatial_merge_size=config.spatial_merge_size,
+        )
+        
+        self.gradient_checkpointing = False
+    
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        grid_thw: Optional[torch.LongTensor] = None,
+    ) -> torch.Tensor:
+        """
+        Args:
+            pixel_values: (batch, channels, temporal, height, width)
+            grid_thw: (num_images/videos, 3) containing [temporal, height, width] dimensions
+        Returns:
+            vision_embeddings: (total_tokens, hidden_size)
+        """
+        # Patch embedding
+        hidden_states = self.patch_embed(pixel_values)  # (batch, num_patches, embed_dim)
+        
+        # Get RoPE embeddings
+        # Simplified - in practice you'd compute based on grid_thw
+        seq_len = hidden_states.shape[1]
+        rotary_pos_emb = self.rotary_pos_emb(seq_len)
+        # Convert to cos/sin
+        cos = rotary_pos_emb.cos()
+        sin = rotary_pos_emb.sin()
+        position_embeddings = (cos, sin)
+        
+        # Apply transformer blocks
+        for block in self.blocks:
+            if self.gradient_checkpointing and self.training:
+                hidden_states = block._gradient_checkpointing_func(
+                    block.__call__,
+                    hidden_states,
+                    position_embeddings,
+                )
+            else:
+                hidden_states = block(hidden_states, position_embeddings)
+        
+        # Merge patches and project to text dimension
+        hidden_states = hidden_states.reshape(-1, self.config.embed_dim)
+        vision_embeddings = self.merger(hidden_states)
+        
+        return vision_embeddings
+
+
 class ArlowPreTrainedModel(PreTrainedModel):
     config_class = ArlowConfig
     base_model_prefix = "model"
@@ -1173,6 +1393,323 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
         return past_key_values
 
 
+@auto_docstring
+class ArlowMultimodalModel(ArlowPreTrainedModel):
+    """
+    Multimodal model combining vision encoder and text decoder.
+    This model handles both image and video inputs alongside text.
+    """
+    
+    def __init__(self, config: ArlowConfig):
+        super().__init__(config)
+        
+        # Vision encoder
+        self.visual = ArlowVisionTransformer(config.vision_config)
+        
+        # Text model (reuse the existing text-only model)
+        self.model = ArlowModel(config)
+        
+        # Multimodal RoPE for combined vision-text sequences
+        self.multimodal_rotary_emb = ArlowMultimodalRotaryEmbedding(config)
+        
+        self.post_init()
+    
+    def get_input_embeddings(self):
+        return self.model.get_input_embeddings()
+    
+    def set_input_embeddings(self, value):
+        self.model.set_input_embeddings(value)
+    
+    def get_image_features(
+        self,
+        pixel_values: torch.FloatTensor,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+    ) -> torch.FloatTensor:
+        """Extract image features from vision encoder."""
+        return self.visual(pixel_values, image_grid_thw)
+    
+    def get_video_features(
+        self,
+        pixel_values_videos: torch.FloatTensor,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+    ) -> torch.FloatTensor:
+        """Extract video features from vision encoder (same as images with temporal dim)."""
+        return self.visual(pixel_values_videos, video_grid_thw)
+    
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> ArlowMultimodalModelOutputWithPast:
+        """
+        Forward pass combining vision and text modalities.
+        
+        Args:
+            input_ids: Text token IDs with image/video placeholder tokens
+            pixel_values: Image tensor (batch, channels, height, width) 
+            pixel_values_videos: Video tensor (batch, channels, frames, height, width)
+            image_grid_thw: Image grid dimensions (num_images, 3) as [temporal=1, height, width]
+            video_grid_thw: Video grid dimensions (num_videos, 3) as [temporal, height, width]
+        """
+        # Get text embeddings
+        if inputs_embeds is None:
+            inputs_embeds = self.get_input_embeddings()(input_ids)
+        
+        # Process vision inputs if provided
+        if pixel_values is not None:
+            image_embeds = self.get_image_features(pixel_values, image_grid_thw)
+            # Merge image embeddings into text sequence at placeholder positions
+            inputs_embeds = self._merge_vision_embeds(
+                inputs_embeds, image_embeds, input_ids, self.config.image_token_id
+            )
+        
+        if pixel_values_videos is not None:
+            video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
+            # Merge video embeddings into text sequence at placeholder positions
+            inputs_embeds = self._merge_vision_embeds(
+                inputs_embeds, video_embeds, input_ids, self.config.video_token_id
+            )
+        
+        # Forward through text model
+        outputs = self.model(
+            input_ids=None,  # We're using inputs_embeds instead
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            cache_position=cache_position,
+            use_cache=use_cache,
+            **kwargs,
+        )
+        
+        return ArlowMultimodalModelOutputWithPast(
+            last_hidden_state=outputs.last_hidden_state,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            rope_deltas=None,  # TODO: Compute rope deltas for M-ROPE
+        )
+    
+    def _merge_vision_embeds(
+        self,
+        text_embeds: torch.Tensor,
+        vision_embeds: torch.Tensor,
+        input_ids: torch.Tensor,
+        vision_token_id: int,
+    ) -> torch.Tensor:
+        """
+        Merge vision embeddings into text sequence at placeholder token positions.
+        
+        Args:
+            text_embeds: (batch, seq_len, hidden_size)
+            vision_embeds: (total_vision_tokens, hidden_size)
+            input_ids: (batch, seq_len) with vision_token_id placeholders
+            vision_token_id: ID of vision placeholder token
+        
+        Returns:
+            merged_embeds: (batch, seq_len, hidden_size) with vision embeds inserted
+        """
+        batch_size, seq_len, hidden_size = text_embeds.shape
+        
+        # Find positions of vision tokens
+        vision_mask = (input_ids == vision_token_id)
+        
+        # Replace text embeddings at vision token positions with vision embeddings
+        vision_idx = 0
+        for batch_idx in range(batch_size):
+            for seq_idx in range(seq_len):
+                if vision_mask[batch_idx, seq_idx]:
+                    if vision_idx < vision_embeds.shape[0]:
+                        text_embeds[batch_idx, seq_idx] = vision_embeds[vision_idx]
+                        vision_idx += 1
+        
+        return text_embeds
+
+
+@auto_docstring
+class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
+    """
+    Arlow model for conditional generation (multimodal: text + images/videos).
+    This is the main model for VLM tasks.
+    """
+    _tied_weights_keys = ["lm_head.weight"]
+    
+    def __init__(self, config: ArlowConfig):
+        super().__init__(config)
+        self.model = ArlowMultimodalModel(config)
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        
+        self.post_init()
+    
+    def get_input_embeddings(self):
+        return self.model.get_input_embeddings()
+    
+    def set_input_embeddings(self, value):
+        self.model.set_input_embeddings(value)
+    
+    def get_image_features(self, pixel_values: torch.FloatTensor, image_grid_thw: Optional[torch.LongTensor] = None):
+        return self.model.get_image_features(pixel_values, image_grid_thw)
+    
+    def get_video_features(
+        self, pixel_values_videos: torch.FloatTensor, video_grid_thw: Optional[torch.LongTensor] = None
+    ):
+        return self.model.get_video_features(pixel_values_videos, video_grid_thw)
+    
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> ArlowMultimodalCausalLMOutputWithPast:
+        """
+        Forward pass for multimodal conditional generation.
+        
+        Args:
+            image_grid_thw (`torch.LongTensor`, *optional*):
+                Image grid dimensions of shape `(num_images, 3)` as `[temporal=1, height, width]`.
+            video_grid_thw (`torch.LongTensor`, *optional*):
+                Video grid dimensions of shape `(num_videos, 3)` as `[temporal, height, width]`.
+
+        Example:
+        ```python
+        >>> from transformers import AutoProcessor, ArlowForConditionalGeneration
+        >>> model = ArlowForConditionalGeneration.from_pretrained("yuchenxie/arlow-vlm")
+        >>> processor = AutoProcessor.from_pretrained("yuchenxie/arlow-vlm")
+        >>> 
+        >>> messages = [{
+        ...     "role": "user",
+        ...     "content": [
+        ...         {"type": "image", "image": "path/to/image.jpg"},
+        ...         {"type": "text", "text": "Describe this image."},
+        ...     ],
+        ... }]
+        >>> 
+        >>> inputs = processor(text=messages, images=..., return_tensors="pt")
+        >>> outputs = model.generate(**inputs, max_new_tokens=100)
+        >>> processor.batch_decode(outputs, skip_special_tokens=True)[0]
+        ```
+        """
+        outputs: ArlowMultimodalModelOutputWithPast = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            pixel_values=pixel_values,
+            pixel_values_videos=pixel_values_videos,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            **kwargs,
+        )
+        
+        hidden_states = outputs.last_hidden_state
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+        
+        loss = None
+        if labels is not None:
+            labels_window = labels[:, slice_indices]
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels_window[..., 1:].contiguous()
+            ignore_index = self.config.pad_token_id if self.config.pad_token_id is not None else -100
+            loss = F.cross_entropy(
+                shift_logits.view(-1, self.config.vocab_size),
+                shift_labels.view(-1),
+                ignore_index=ignore_index,
+            )
+        
+        return ArlowMultimodalCausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            rope_deltas=outputs.rope_deltas,
+        )
+    
+    def prepare_inputs_for_generation(
+        self,
+        input_ids: torch.LongTensor,
+        past_key_values: Optional[Cache] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ):
+        """Prepare inputs for generation, handling both text-only and multimodal inputs."""
+        cache_length = past_key_values.get_seq_length() if past_key_values is not None else 0
+        
+        # Only process vision on first forward pass
+        if cache_length > 0:
+            pixel_values = None
+            pixel_values_videos = None
+            image_grid_thw = None
+            video_grid_thw = None
+            
+            if input_ids is not None and input_ids.shape[1] == 0 and inputs_embeds is not None:
+                if inputs_embeds.shape[1] > cache_length:
+                    inputs_embeds = inputs_embeds[:, cache_length:]
+                    input_ids = None
+            else:
+                if cache_position is not None and len(cache_position) > 1:
+                    input_ids = input_ids[:, cache_position[0]:]
+                else:
+                    input_ids = input_ids[:, -1:]
+                inputs_embeds = None
+        elif inputs_embeds is not None:
+            input_ids = None
+        
+        return {
+            "input_ids": input_ids,
+            "past_key_values": past_key_values,
+            "attention_mask": attention_mask,
+            "inputs_embeds": inputs_embeds,
+            "pixel_values": pixel_values,
+            "pixel_values_videos": pixel_values_videos,
+            "image_grid_thw": image_grid_thw,
+            "video_grid_thw": video_grid_thw,
+            "cache_position": cache_position,
+            **kwargs,
+        }
+    
+    def _reorder_cache(self, past_key_values, beam_idx):
+        if past_key_values is not None and hasattr(past_key_values, "reorder_cache"):
+            past_key_values.reorder_cache(beam_idx)
+        return past_key_values
+
+
 class ArlowProcessorKwargs(ProcessingKwargs, total=False):
     _defaults = {
         "images_kwargs": {},
@@ -1399,6 +1936,9 @@ __all__ = [
     "ArlowPreTrainedModel",
     "ArlowModel",
     "ArlowForCausalLM",
+    "ArlowMultimodalModel",
+    "ArlowForConditionalGeneration",
+    "ArlowVisionTransformer",
     "ArlowProcessor",
     "ArlowForSequenceClassification",
     "ArlowForQuestionAnswering",

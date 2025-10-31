@@ -1338,6 +1338,7 @@ else:
             "ArlowPreTrainedModel",
             "ArlowModel",
             "ArlowForCausalLM",
+            "ArlowForConditionalGeneration",
             "ArlowForSequenceClassification",
             "ArlowForQuestionAnswering",
             "ArlowForTokenClassification",
@@ -5444,6 +5445,7 @@ if TYPE_CHECKING:
         # PyTorch model imports
         from .models.arlow import (
             ArlowForCausalLM,
+            ArlowForConditionalGeneration,
             ArlowForQuestionAnswering,
             ArlowForSequenceClassification,
             ArlowForTokenClassification,
