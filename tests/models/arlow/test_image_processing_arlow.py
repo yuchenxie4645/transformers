@@ -1,4 +1,3 @@
-
 import itertools
 import tempfile
 import unittest
@@ -355,13 +354,13 @@ class ArlowImageProcessingTest(ImageProcessingTestMixin, unittest.TestCase):
         """Test handling of extreme aspect ratios."""
         for image_processing_class in self.image_processor_list:
             image_processing = image_processing_class(**self.image_processor_dict)
-            
+
             # Test wide image
             wide_image = Image.new("RGB", (4000, 100))
             process_out = image_processing(wide_image, return_tensors="pt")
             self.assertIsNotNone(process_out.pixel_values)
             self.assertIsNotNone(process_out.image_grid_thw)
-            
+
             # Test tall image
             tall_image = Image.new("RGB", (100, 4000))
             process_out = image_processing(tall_image, return_tensors="pt")
@@ -385,16 +384,16 @@ class ArlowImageProcessingTest(ImageProcessingTestMixin, unittest.TestCase):
         """Test that patch grouping produces consistent results."""
         for image_processing_class in self.image_processor_list:
             image_processing = image_processing_class(**self.image_processor_dict)
-            
+
             # Create images with same resolution
             images = [Image.new("RGB", (224, 224)) for _ in range(4)]
-            
+
             # Process with grouping enabled (default)
             out_grouped = image_processing(images, return_tensors="pt")
-            
+
             # Process without grouping
             out_ungrouped = image_processing(images, return_tensors="pt", disable_grouping=True)
-            
+
             # Results should be identical
             torch.testing.assert_close(out_grouped.pixel_values, out_ungrouped.pixel_values)
             torch.testing.assert_close(out_grouped.image_grid_thw.float(), out_ungrouped.image_grid_thw.float())
@@ -403,10 +402,10 @@ class ArlowImageProcessingTest(ImageProcessingTestMixin, unittest.TestCase):
         """Test that temporal dimension is properly padded for image inputs."""
         for image_processing_class in self.image_processor_list:
             image_processing = image_processing_class(**self.image_processor_dict)
-            
+
             image = Image.new("RGB", (224, 224))
             process_out = image_processing(image, return_tensors="pt")
-            
+
             # Temporal dimension should be 1 after processing (images have 1 "frame")
             self.assertEqual(process_out.image_grid_thw[0][0].item(), 1)
 
@@ -414,7 +413,7 @@ class ArlowImageProcessingTest(ImageProcessingTestMixin, unittest.TestCase):
         """Test processing a batch with different resolutions."""
         for image_processing_class in self.image_processor_list:
             image_processing = image_processing_class(**self.image_processor_dict)
-            
+
             # Create images with different resolutions
             images = [
                 Image.new("RGB", (224, 224)),
@@ -422,15 +421,14 @@ class ArlowImageProcessingTest(ImageProcessingTestMixin, unittest.TestCase):
                 Image.new("RGB", (224, 448)),
                 Image.new("RGB", (336, 336)),
             ]
-            
+
             process_out = image_processing(images, return_tensors="pt")
-            
+
             # All images should be processed
             self.assertEqual(len(process_out.image_grid_thw), 4)
-            
+
             # Grid dimensions should vary based on input resolution
             grids = process_out.image_grid_thw
             # Verify that different input sizes produce different grid dimensions
             grid_set = set((g[1].item(), g[2].item()) for g in grids)
             self.assertGreater(len(grid_set), 1)  # Should have at least 2 different grid sizes
-

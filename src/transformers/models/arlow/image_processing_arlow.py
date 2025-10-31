@@ -19,7 +19,9 @@ from ...processing_utils import ImagesKwargs, Unpack
 from ...utils import TensorType, add_start_docstrings
 
 
-def smart_resize(height: int, width: int, factor: int = 28, min_pixels: int = 56 * 56, max_pixels: int = 28 * 28 * 1280):
+def smart_resize(
+    height: int, width: int, factor: int = 28, min_pixels: int = 56 * 56, max_pixels: int = 28 * 28 * 1280
+):
     """Rescales the image while enforcing divisibility and pixel bounds.
 
     Conditions:
@@ -89,7 +91,7 @@ class ArlowImageProcessor(BaseImageProcessorFast):
         max_pixels = kwargs.pop("max_pixels", None)
         # Start with class default, then override with provided values
         merged_size = dict(self.size) if size is None else {**self.size, **size}
-        
+
         # backward compatibility: override size with min_pixels and max_pixels if they are provided
         if min_pixels is not None:
             merged_size["shortest_edge"] = min_pixels
@@ -259,17 +261,25 @@ class ArlowImageProcessor(BaseImageProcessorFast):
         )
 
     def get_number_of_image_patches(self, height: int, width: int, images_kwargs=None):
-        min_pixels = images_kwargs["min_pixels"] if images_kwargs and "min_pixels" in images_kwargs else self.size["shortest_edge"]
-        max_pixels = images_kwargs["max_pixels"] if images_kwargs and "max_pixels" in images_kwargs else self.size["longest_edge"]
+        min_pixels = (
+            images_kwargs["min_pixels"]
+            if images_kwargs and "min_pixels" in images_kwargs
+            else self.size["shortest_edge"]
+        )
+        max_pixels = (
+            images_kwargs["max_pixels"]
+            if images_kwargs and "max_pixels" in images_kwargs
+            else self.size["longest_edge"]
+        )
         patch_size = images_kwargs.get("patch_size", self.patch_size) if images_kwargs else self.patch_size
         merge_size = images_kwargs.get("merge_size", self.merge_size) if images_kwargs else self.merge_size
 
         factor = patch_size * merge_size
-        resized_height, resized_width = smart_resize(height, width, factor, min_pixels=min_pixels, max_pixels=max_pixels)
+        resized_height, resized_width = smart_resize(
+            height, width, factor, min_pixels=min_pixels, max_pixels=max_pixels
+        )
         grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
         return grid_h * grid_w
 
 
 __all__ = ["ArlowImageProcessor"]
-
-

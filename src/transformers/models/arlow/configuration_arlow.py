@@ -176,16 +176,6 @@ class ArlowConfig(PretrainedConfig):
         mrope_sections (`list`, *optional*):
             M-ROPE sections for [temporal, height, width] dimensions.
             Defaults to split based on head_dim.
-        mrope_learnable_phases (`bool`, *optional*, defaults to False):
-            Whether to use learnable phase shifts in M-ROPE.
-        debug_vision (`bool`, *optional*, defaults to False):
-            Enable debug logging for vision forward passes.
-        debug_mrope (`bool`, *optional*, defaults to False):
-            Enable debug logging for M-ROPE operations.
-        debug_attention (`bool`, *optional*, defaults to False):
-            Enable debug logging for attention patterns.
-        debug_cache (`bool`, *optional*, defaults to False):
-            Enable debug logging for KV cache operations.
     """
 
     model_type = "arlow"
@@ -238,12 +228,6 @@ class ArlowConfig(PretrainedConfig):
         vision_end_token_id=None,
         frame_separator_token_id=None,
         mrope_sections=None,
-        mrope_learnable_phases=False,
-        # Debug parameters (will be tested and removed)
-        debug_vision=False,
-        debug_mrope=False,
-        debug_attention=False,
-        debug_cache=False,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -300,8 +284,6 @@ class ArlowConfig(PretrainedConfig):
         else:
             self.mrope_sections = mrope_sections
 
-        self.mrope_learnable_phases = mrope_learnable_phases
-
         # Validate mrope_sections sum equals head_dim
         if sum(self.mrope_sections) != self.head_dim:
             raise ValueError(
@@ -309,16 +291,10 @@ class ArlowConfig(PretrainedConfig):
                 f"must equal head_dim ({self.head_dim})"
             )
 
-        # Debug flags (to be tested and removed)
-        self.debug_vision = debug_vision
-        self.debug_mrope = debug_mrope
-        self.debug_attention = debug_attention
-        self.debug_cache = debug_cache
-
         # Validate rope parameters (ignore M-ROPE specific keys since we use custom M-ROPE)
         if self.rope_parameters is not None and "type" in self.rope_parameters:
             self.rope_parameters["rope_type"] = self.rope_parameters["type"]
-        rope_config_validation(self, ignore_keys={"mrope_sections", "mrope_learnable_phases"})
+        rope_config_validation(self, ignore_keys={"mrope_sections"})
 
         # Layer types configuration
         self.layer_types = layer_types

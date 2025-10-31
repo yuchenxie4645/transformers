@@ -242,7 +242,7 @@ class ArlowIntegrationTest(unittest.TestCase):
         """Test that sliding window and full attention produce similar results on short sequences."""
         # For short sequences (shorter than sliding window), results should be identical
         seq_len = 50
-        
+
         # Config with sliding window
         config_sliding = ArlowConfig(
             vocab_size=1000,
@@ -256,7 +256,7 @@ class ArlowIntegrationTest(unittest.TestCase):
             sliding_window=128,
             max_window_layers=0,  # All layers use sliding window
         )
-        
+
         # Config without sliding window (all full attention)
         config_full = ArlowConfig(
             vocab_size=1000,
@@ -276,10 +276,418 @@ class ArlowIntegrationTest(unittest.TestCase):
         model_full.load_state_dict(model_sliding.state_dict(), strict=False)
 
         input_ids = torch.randint(0, 1000, (1, seq_len), device=torch_device)
-        
+
         with torch.no_grad():
             outputs_sliding = model_sliding(input_ids)
             outputs_full = model_full(input_ids)
 
         # For sequences shorter than sliding window, outputs should be very similar
         torch.testing.assert_close(outputs_sliding.logits, outputs_full.logits, rtol=1e-3, atol=1e-3)
+
+
+@require_torch
+class ArlowMultimodalIntegrationTest(unittest.TestCase):
+    """Integration tests for Arlow multimodal (vision + text) functionality."""
+
+    def setUp(self):
+        pass
+
+    def tearDown(self):
+        pass
+
+    def test_model_multimodal_forward_image(self):
+        """Test multimodal model with image inputs."""
+        from transformers import ArlowForConditionalGeneration, ArlowVisionConfig
+
+        # Create a small config for testing
+        config = ArlowConfig(
+            vocab_size=1000,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=128,
+            image_token_id=10,
+            vision_start_token_id=11,
+            vision_end_token_id=12,
+            head_dim=16,  # Explicitly set head_dim
+            mrope_sections=[4, 6, 6],  # Sum = 16 = head_dim
+        )
+
+        # Add vision config
+        config.vision_config = ArlowVisionConfig(
+            depth=2,
+            embed_dim=32,
+            hidden_size=64,
+            num_heads=4,
+            patch_size=14,
+            spatial_merge_size=2,
+            temporal_patch_size=2,
+        )
+
+        model = ArlowForConditionalGeneration(config).to(torch_device).eval()
+
+        # Create dummy inputs
+        # Text with image placeholder
+        input_ids = torch.tensor([[1, 2, 11, 10, 12, 3, 4, 5]], device=torch_device)
+
+        # Create dummy pixel values (batch, channels, temporal, height, width)
+        # For images, temporal = 1
+        pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)  # temporal_patch_size=2
+
+        # Grid dimensions: (num_images, 3) as [temporal=1, height, width]
+        # After patching: 28/14 = 2 patches per dimension
+        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+
+        with torch.no_grad():
+            outputs = model(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+            )
+
+        # Check output shapes
+        self.assertIsNotNone(outputs.logits)
+        self.assertEqual(outputs.logits.shape[0], 1)  # batch size
+        self.assertEqual(outputs.logits.shape[2], config.vocab_size)
+
+    def test_model_multimodal_forward_video(self):
+        """Test multimodal model with video inputs."""
+        from transformers import ArlowForConditionalGeneration, ArlowVisionConfig
+
+        # Create a small config for testing
+        config = ArlowConfig(
+            vocab_size=1000,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=128,
+            video_token_id=13,
+            vision_start_token_id=11,
+            vision_end_token_id=12,
+            head_dim=16,
+            mrope_sections=[4, 6, 6],
+        )
+
+        config.vision_config = ArlowVisionConfig(
+            depth=2,
+            embed_dim=32,
+            hidden_size=64,
+            num_heads=4,
+            patch_size=14,
+            spatial_merge_size=2,
+            temporal_patch_size=2,
+        )
+
+        model = ArlowForConditionalGeneration(config).to(torch_device).eval()
+
+        # Text with video placeholder
+        input_ids = torch.tensor([[1, 2, 11, 13, 12, 3, 4, 5]], device=torch_device)
+
+        # Video: (batch, channels, temporal, height, width)
+        pixel_values_videos = torch.randn(1, 3, 4, 28, 28, device=torch_device)
+
+        # Grid: (num_videos, 3) as [temporal, height, width] after patching
+        video_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)  # 4/2=2, 28/14=2
+
+        with torch.no_grad():
+            outputs = model(
+                input_ids=input_ids,
+                pixel_values_videos=pixel_values_videos,
+                video_grid_thw=video_grid_thw,
+            )
+
+        self.assertIsNotNone(outputs.logits)
+        self.assertEqual(outputs.logits.shape[0], 1)
+        self.assertEqual(outputs.logits.shape[2], config.vocab_size)
+
+    def test_model_multimodal_forward_image_and_video(self):
+        """Test multimodal model with both image and video inputs."""
+        from transformers import ArlowForConditionalGeneration, ArlowVisionConfig
+
+        config = ArlowConfig(
+            vocab_size=1000,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=256,
+            image_token_id=10,
+            video_token_id=13,
+            vision_start_token_id=11,
+            vision_end_token_id=12,
+            head_dim=16,
+            mrope_sections=[4, 6, 6],
+        )
+
+        config.vision_config = ArlowVisionConfig(
+            depth=2,
+            embed_dim=32,
+            hidden_size=64,
+            num_heads=4,
+            patch_size=14,
+            spatial_merge_size=2,
+            temporal_patch_size=2,
+        )
+
+        model = ArlowForConditionalGeneration(config).to(torch_device).eval()
+
+        # Text with both image and video placeholders
+        input_ids = torch.tensor([[1, 11, 10, 12, 2, 3, 11, 13, 12, 4, 5]], device=torch_device)
+
+        # Image and video inputs
+        pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
+        pixel_values_videos = torch.randn(1, 3, 4, 28, 28, device=torch_device)
+
+        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+        video_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+
+        with torch.no_grad():
+            outputs = model(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                pixel_values_videos=pixel_values_videos,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+            )
+
+        self.assertIsNotNone(outputs.logits)
+        self.assertEqual(outputs.logits.shape[0], 1)
+
+    def test_model_multimodal_with_labels(self):
+        """Test multimodal model training with labels."""
+        from transformers import ArlowForConditionalGeneration, ArlowVisionConfig
+
+        config = ArlowConfig(
+            vocab_size=1000,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=128,
+            image_token_id=10,
+            vision_start_token_id=11,
+            pad_token_id=0,
+            head_dim=16,
+            mrope_sections=[4, 6, 6],
+        )
+
+        config.vision_config = ArlowVisionConfig(
+            depth=2,
+            embed_dim=32,
+            hidden_size=64,
+            num_heads=4,
+            patch_size=14,
+            spatial_merge_size=2,
+            temporal_patch_size=2,
+        )
+
+        model = ArlowForConditionalGeneration(config).to(torch_device).train()
+
+        input_ids = torch.tensor([[1, 2, 11, 10, 3, 4, 5]], device=torch_device)
+        pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
+        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+
+        # Labels for training
+        labels = input_ids.clone()
+        labels[:, :3] = -100  # Ignore loss on prompt
+
+        outputs = model(
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            labels=labels,
+        )
+
+        # Check that loss is computed
+        self.assertIsNotNone(outputs.loss)
+        self.assertGreater(outputs.loss.item(), 0)
+
+        # Test backward pass
+        outputs.loss.backward()
+
+        # Check that gradients are computed
+        for param in model.parameters():
+            if param.requires_grad:
+                self.assertIsNotNone(param.grad)
+                break
+
+    def test_model_multimodal_generation(self):
+        """Test generation with multimodal model."""
+        from transformers import ArlowForConditionalGeneration, ArlowVisionConfig
+
+        config = ArlowConfig(
+            vocab_size=1000,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=128,
+            image_token_id=10,
+            vision_start_token_id=11,
+            bos_token_id=1,
+            eos_token_id=2,
+            pad_token_id=0,
+            head_dim=16,
+            mrope_sections=[4, 6, 6],
+        )
+
+        config.vision_config = ArlowVisionConfig(
+            depth=2,
+            embed_dim=32,
+            hidden_size=64,
+            num_heads=4,
+            patch_size=14,
+            spatial_merge_size=2,
+            temporal_patch_size=2,
+        )
+
+        model = ArlowForConditionalGeneration(config).to(torch_device).eval()
+
+        input_ids = torch.tensor([[1, 11, 10, 3]], device=torch_device)
+        pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
+        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+
+        with torch.no_grad():
+            generated = model.generate(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+                max_new_tokens=10,
+                do_sample=False,
+            )
+
+        # Check that tokens were generated
+        self.assertEqual(generated.shape[0], 1)
+        self.assertGreater(generated.shape[1], input_ids.shape[1])
+
+    def test_model_mrope_position_ids(self):
+        """Test M-ROPE position IDs computation for multimodal inputs."""
+        from transformers import ArlowModel, ArlowVisionConfig
+
+        config = ArlowConfig(
+            vocab_size=1000,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=128,
+            image_token_id=10,
+            vision_start_token_id=11,
+            head_dim=16,
+            mrope_sections=[4, 6, 6],
+        )
+
+        config.vision_config = ArlowVisionConfig(
+            depth=2,
+            embed_dim=32,
+            hidden_size=64,
+            num_heads=4,
+            patch_size=14,
+            spatial_merge_size=2,
+            temporal_patch_size=2,
+        )
+
+        model = ArlowModel(config).to(torch_device).eval()
+
+        # Test get_rope_index method
+        input_ids = torch.tensor([[1, 2, 11, 10, 3, 4, 5]], device=torch_device)
+        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+
+        position_ids, rope_deltas = model.get_rope_index(
+            input_ids=input_ids,
+            image_grid_thw=image_grid_thw,
+        )
+
+        # Check shapes
+        self.assertEqual(position_ids.shape[0], 3)  # [temporal, height, width]
+        self.assertEqual(position_ids.shape[1], input_ids.shape[0])  # batch
+        self.assertEqual(rope_deltas.shape[0], input_ids.shape[0])  # batch
+
+    def test_vision_encoder_standalone(self):
+        """Test vision encoder as a standalone component."""
+        from transformers.models.arlow.modular_arlow import ArlowVisionConfig, ArlowVisionTransformerPretrainedModel
+
+        config = ArlowVisionConfig(
+            depth=2,
+            embed_dim=32,
+            hidden_size=64,
+            num_heads=4,
+            patch_size=14,
+            spatial_merge_size=2,
+            temporal_patch_size=2,
+        )
+
+        vision_model = ArlowVisionTransformerPretrainedModel._from_config(config)
+        vision_model = vision_model.to(torch_device).eval()
+
+        # Test image input
+        pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
+        grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+
+        with torch.no_grad():
+            vision_embeddings = vision_model(pixel_values, grid_thw)
+
+        # Check output shape
+        self.assertIsNotNone(vision_embeddings)
+        self.assertEqual(vision_embeddings.ndim, 2)  # (tokens, hidden_size)
+        self.assertEqual(vision_embeddings.shape[1], config.hidden_size)
+
+    def test_model_gradient_checkpointing_multimodal(self):
+        """Test gradient checkpointing with multimodal inputs."""
+        from transformers import ArlowForConditionalGeneration, ArlowVisionConfig
+
+        config = ArlowConfig(
+            vocab_size=1000,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=4,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=128,
+            image_token_id=10,
+            vision_start_token_id=11,
+            pad_token_id=0,
+            head_dim=16,
+            mrope_sections=[4, 6, 6],
+        )
+
+        config.vision_config = ArlowVisionConfig(
+            depth=4,
+            embed_dim=32,
+            hidden_size=64,
+            num_heads=4,
+            patch_size=14,
+            spatial_merge_size=2,
+            temporal_patch_size=2,
+        )
+
+        model = ArlowForConditionalGeneration(config).to(torch_device).train()
+        model.gradient_checkpointing_enable()
+
+        input_ids = torch.tensor([[1, 2, 11, 10, 3, 4, 5]], device=torch_device)
+        pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
+        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+        labels = input_ids.clone()
+
+        outputs = model(
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            labels=labels,
+        )
+
+        outputs.loss.backward()
+
+        # Verify gradients were computed
+        for param in model.parameters():
+            if param.requires_grad:
+                self.assertIsNotNone(param.grad)
+                break

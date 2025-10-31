@@ -6,11 +6,11 @@ from ...utils.import_utils import define_import_structure
 
 if TYPE_CHECKING:
     from .configuration_arlow import *
+    from .image_processing_arlow import *
+    from .image_processing_arlow_fast import *
     from .modeling_arlow import *
     from .tokenization_arlow import *
     from .tokenization_arlow_fast import *
-    from .image_processing_arlow import *
-    from .image_processing_arlow_fast import *
     from .video_processing_arlow import *
 else:
     import sys

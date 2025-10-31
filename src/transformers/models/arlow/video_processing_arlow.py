@@ -28,7 +28,7 @@ def smart_resize(
 ):
     """
     Smart resize for video frames with temporal/spatial constraints.
-    
+
     Args:
         num_frames: Number of frames in the video
         height: Frame height
@@ -37,12 +37,12 @@ def smart_resize(
         factor: Spatial patch size
         min_pixels: Minimum total pixels allowed
         max_pixels: Maximum total pixels allowed
-    
+
     Returns:
         Tuple of (new_height, new_width)
     """
     print(f"[DEBUG VIDEO] smart_resize: num_frames={num_frames}, height={height}, width={width}")
-    
+
     if num_frames < temporal_factor:
         raise ValueError(f"num_frames:{num_frames} must be larger than temporal_factor:{temporal_factor}")
     if height < factor or width < factor:
@@ -51,7 +51,7 @@ def smart_resize(
         raise ValueError(
             f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
         )
-    
+
     h_bar = round(height / factor) * factor
     w_bar = round(width / factor) * factor
     t_bar = round(num_frames / temporal_factor) * temporal_factor
@@ -74,36 +74,36 @@ def motion_adaptive_sampling(frames: np.ndarray, target_frames: int, threshold: 
     """
     Sample frames adaptively based on motion detection.
     Samples more frames from high-motion regions.
-    
+
     Args:
         frames: Input frames array (T, H, W, C) or (T, C, H, W)
         target_frames: Target number of frames
         threshold: Motion threshold for detecting significant changes
-    
+
     Returns:
         Indices of frames to sample
     """
     print(f"[DEBUG VIDEO] motion_adaptive_sampling: input shape={frames.shape}, target={target_frames}")
-    
+
     num_frames = frames.shape[0]
     if num_frames <= target_frames:
         return np.arange(num_frames)
-    
+
     # Compute frame differences (simple motion proxy)
     diffs = np.abs(np.diff(frames, axis=0)).mean(axis=(1, 2, 3))
     motion_scores = np.concatenate([[0], diffs])  # Prepend 0 for first frame
-    
+
     # Normalize scores
     motion_scores = motion_scores / (motion_scores.max() + 1e-8)
-    
+
     # Use motion scores as sampling probabilities
     # Higher motion = higher probability
     probs = motion_scores + 0.1  # Add base probability
     probs = probs / probs.sum()
-    
+
     # Sample indices based on probabilities
     indices = np.sort(np.random.choice(num_frames, size=target_frames, replace=False, p=probs))
-    
+
     print(f"[DEBUG VIDEO] motion_adaptive_sampling: selected {len(indices)} frames")
     return indices
 
@@ -157,7 +157,7 @@ class ArlowVideoProcessor(BaseVideoProcessor):
         max_pixels = kwargs.pop("max_pixels", None)
         # Start with class default, then override with provided values
         merged_size = dict(self.size) if size is None else {**self.size, **size}
-        
+
         # backward compatibility: override size with min_pixels and max_pixels if they are provided
         if min_pixels is not None:
             merged_size["shortest_edge"] = min_pixels
@@ -204,12 +204,12 @@ class ArlowVideoProcessor(BaseVideoProcessor):
     ):
         """
         Sample frames using configurable strategies.
-        
+
         Supports:
         - "uniform": Uniform sampling across the video
         - "motion_adaptive": Sample more frames from high-motion regions
         - "fps_based": Sample at a target FPS
-        
+
         Args:
             metadata (`VideoMetadata`):
                 Metadata of the video containing information about total duration, fps and total number of frames.
@@ -219,7 +219,7 @@ class ArlowVideoProcessor(BaseVideoProcessor):
                 Target frames to sample per second. Defaults to `self.fps`.
             sample_strategy (`str`, *optional*):
                 Sampling strategy override. Defaults to `self.sample_strategy`.
-        
+
         Returns:
             Frame indices to sample.
         """
@@ -239,9 +239,7 @@ class ArlowVideoProcessor(BaseVideoProcessor):
             return super().sample_frames(metadata, num_frames=None, fps=fps, **kwargs)
 
         # Motion-adaptive sampling requires accessing frames; fall back to uniform safely
-        logger.warning(
-            "Motion-adaptive sampling requires frame data access. Falling back to uniform sampling."
-        )
+        logger.warning("Motion-adaptive sampling requires frame data access. Falling back to uniform sampling.")
         # Default fallback to uniform with safe clamping
         effective_num_frames = num_frames
         if effective_num_frames is None:
@@ -371,4 +369,3 @@ class ArlowVideoProcessorFast(ArlowVideoProcessor):
 
 
 __all__ = ["ArlowVideoProcessor", "ArlowVideoProcessorFast"]
-
