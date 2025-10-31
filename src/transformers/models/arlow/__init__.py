@@ -9,6 +9,9 @@ if TYPE_CHECKING:
     from .modeling_arlow import *
     from .tokenization_arlow import *
     from .tokenization_arlow_fast import *
+    from .image_processing_arlow import *
+    from .image_processing_arlow_fast import *
+    from .video_processing_arlow import *
 else:
     import sys
 

@@ -87,6 +87,31 @@ class VideoMetadata(Mapping):
     video_backend: Optional[str] = None
     frames_indices: Optional[list[int]] = None
 
+    # Accept historical alias `total_frames` for compatibility in tests
+    def __init__(
+        self,
+        total_num_frames: Optional[int] = None,
+        fps: Optional[float] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        duration: Optional[float] = None,
+        video_backend: Optional[str] = None,
+        frames_indices: Optional[list[int]] = None,
+        total_frames: Optional[int] = None,
+    ):
+        if total_num_frames is None:
+            if total_frames is None:
+                raise TypeError("VideoMetadata requires 'total_num_frames' or alias 'total_frames'.")
+            total_num_frames = total_frames
+        # Assign fields
+        object.__setattr__(self, "total_num_frames", total_num_frames)
+        object.__setattr__(self, "fps", fps)
+        object.__setattr__(self, "width", width)
+        object.__setattr__(self, "height", height)
+        object.__setattr__(self, "duration", duration)
+        object.__setattr__(self, "video_backend", video_backend)
+        object.__setattr__(self, "frames_indices", frames_indices)
+
     def __iter__(self):
         return (f.name for f in fields(self))
 

@@ -1,12 +1,17 @@
-from typing import Optional, Union
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Optional, Union
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from packaging import version
 from torch import nn
+from torch.nn import LayerNorm
 
 from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache
+from ...configuration_utils import PretrainedConfig, layer_type_validation
 from ...generation import GenerationMixin
 from ...integrations import use_kernel_forward_from_hub
 from ...masking_utils import create_causal_mask, create_sliding_window_causal_mask
@@ -15,22 +20,402 @@ from ...modeling_layers import (
     GenericForQuestionAnswering,
     GenericForSequenceClassification,
     GenericForTokenClassification,
+    GradientCheckpointingLayer,
 )
-from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
-from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
+from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, ModelOutput
+from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update, rope_config_validation
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
+from ...feature_extraction_utils import BatchFeature
+from ...image_utils import ImageInput
+from ...processing_utils import MultiModalData, ProcessingKwargs, ProcessorMixin, Unpack
+from ...tokenization_utils_base import PreTokenizedInput, TextInput
+from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
+from ...utils.import_utils import get_torch_version
+from ...video_utils import VideoInput
 
 
 if is_flash_attn_available():
     pass
 
-from ...processing_utils import Unpack
-from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
-from ...utils.import_utils import get_torch_version
-from .configuration_arlow import ArlowConfig
-
-
 logger = logging.get_logger(__name__)
+
+class ArlowVisionConfig(PretrainedConfig):
+    r"""
+    Configuration for the vision transformer component of Arlow multimodal models.
+
+    Args:
+        depth (`int`, *optional*, defaults to 32):
+            Number of hidden layers in the vision transformer.
+        embed_dim (`int`, *optional*, defaults to 1280):
+            Dimensionality of the vision encoder embeddings.
+        hidden_size (`int`, *optional*, defaults to 3584):
+            Dimensionality after vision projection to match text model.
+        hidden_act (`str`, *optional*, defaults to `"gelu_pytorch_tanh"`):
+            The non-linear activation function in the vision encoder.
+        mlp_ratio (`int`, *optional*, defaults to 4):
+            Ratio of mlp hidden dim to embedding dim.
+        num_heads (`int`, *optional*, defaults to 16):
+            Number of attention heads in the vision transformer.
+        in_channels (`int`, *optional*, defaults to 3):
+            Number of input image channels.
+        patch_size (`int`, *optional*, defaults to 14):
+            Size of image patches.
+        spatial_merge_size (`int`, *optional*, defaults to 2):
+            Spatial merge factor for patch merging.
+        temporal_patch_size (`int`, *optional*, defaults to 2):
+            Temporal patch size for video inputs.
+        use_deformable_attention (`bool`, *optional*, defaults to False):
+            Whether to use deformable attention for high-resolution regions.
+        use_progressive_patches (`bool`, *optional*, defaults to False):
+            Whether to use progressive patch embeddings for multi-scale.
+        token_pruning_ratio (`float`, *optional*, defaults to 0.0):
+            Ratio of tokens to prune per region (0.0 means no pruning).
+        initializer_range (`float`, *optional*, defaults to 0.02):
+            Standard deviation for weight initialization.
+    """
+
+    model_type = "arlow_vision"
+    base_config_key = "vision_config"
+
+    def __init__(
+        self,
+        depth: int = 32,
+        embed_dim: int = 1280,
+        hidden_size: int = 3584,
+        hidden_act: str = "gelu_pytorch_tanh",
+        mlp_ratio: int = 4,
+        num_heads: int = 16,
+        in_channels: int = 3,
+        patch_size: int = 14,
+        spatial_merge_size: int = 2,
+        temporal_patch_size: int = 2,
+        use_deformable_attention: bool = False,
+        use_progressive_patches: bool = False,
+        token_pruning_ratio: float = 0.0,
+        initializer_range: float = 0.02,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.depth = depth
+        self.embed_dim = embed_dim
+        self.hidden_size = hidden_size
+        self.hidden_act = hidden_act
+        self.mlp_ratio = mlp_ratio
+        self.num_heads = num_heads
+        self.in_channels = in_channels
+        self.patch_size = patch_size
+        self.spatial_merge_size = spatial_merge_size
+        self.temporal_patch_size = temporal_patch_size
+        self.use_deformable_attention = use_deformable_attention
+        self.use_progressive_patches = use_progressive_patches
+        self.token_pruning_ratio = token_pruning_ratio
+        self.initializer_range = initializer_range
+
+
+class ArlowConfig(PretrainedConfig):
+    r"""
+    Configuration class for Arlow models (text-only and multimodal).
+
+    Instantiating with defaults yields configuration similar to Arlow-Base
+    [yuchenxie/ArlowGPT-Base](https://huggingface.co/yuchenxie/ArlowGPT-Base).
+
+    Configuration objects inherit from [`PretrainedConfig`] and control model outputs.
+
+    Args:
+        vocab_size (`int`, *optional*, defaults to 131072):
+            Vocabulary size of the model.
+        hidden_size (`int`, *optional*, defaults to 2304):
+            Dimension of hidden representations.
+        intermediate_size (`int`, *optional*, defaults to 9216):
+            Dimension of MLP representations.
+        num_hidden_layers (`int`, *optional*, defaults to 32):
+            Number of hidden layers in the Transformer decoder.
+        num_attention_heads (`int`, *optional*, defaults to 24):
+            Number of attention heads per layer.
+        num_key_value_heads (`int`, *optional*, defaults to 4):
+            Number of key_value heads for Grouped Query Attention.
+        hidden_act (`str`, *optional*, defaults to `"silu"`):
+            Non-linear activation function.
+        max_position_embeddings (`int`, *optional*, defaults to 2048):
+            Maximum sequence length.
+        initializer_range (`float`, *optional*, defaults to 0.02):
+            Standard deviation for weight initialization.
+        rms_norm_eps (`float`, *optional*, defaults to 1e-06):
+            Epsilon for RMS normalization layers.
+        use_cache (`bool`, *optional*, defaults to `True`):
+            Whether to return past key/values for faster decoding.
+        pad_token_id (`int`, *optional*):
+            Padding token ID.
+        bos_token_id (`int`, *optional*):
+            Beginning of sequence token ID.
+        eos_token_id (`int`, *optional*):
+            End of sequence token ID.
+        tie_word_embeddings (`bool`, *optional*, defaults to `False`):
+            Whether to tie input/output embeddings.
+        rope_theta (`float`, *optional*, defaults to 100000.0):
+            Base period of RoPE embeddings.
+        rope_parameters (`Dict`, *optional*):
+            RoPE scaling configuration. For backwards compatibility, `rope_scaling` is also accepted.
+        attention_bias (`bool`, *optional*, defaults to `False`):
+            Whether to use bias in attention projections.
+        attention_dropout (`float`, *optional*, defaults to 0.0):
+            Dropout ratio for attention probabilities.
+        resid_dropout (`float`, *optional*, defaults to 0.0):
+            Dropout ratio for residual connections.
+        mlp_dropout (`float`, *optional*, defaults to 0.0):
+            Dropout ratio for MLP layers.
+        head_dim (`int`, *optional*):
+            Attention head dimension. Defaults to hidden_size // num_attention_heads.
+        use_sliding_window (`bool`, *optional*, defaults to `False`):
+            Whether to use sliding window attention.
+        sliding_window (`int`, *optional*, defaults to 4096):
+            Sliding window size.
+        max_window_layers (`int`, *optional*, defaults to 28):
+            Number of layers using full attention before switching to sliding window.
+        layer_types (`list`, *optional*):
+            Attention pattern for each layer.
+        vision_config (`Union[PretrainedConfig, dict]`, *optional*):
+            Vision backbone configuration.
+        mm_tokens_per_image (`int`, *optional*, defaults to 256):
+            Number of tokens per image after vision projection.
+        mm_tokens_per_video (`int`, *optional*, defaults to 128):
+            Number of tokens per video after temporal resampling.
+        video_max_frames (`int`, *optional*, defaults to 64):
+            Maximum number of video frames to extract.
+        video_sample_strategy (`str`, *optional*, defaults to "uniform"):
+            Video frame sampling strategy: "uniform", "motion_adaptive", or "fps_based".
+        dynamic_resolution (`bool`, *optional*, defaults to True):
+            Whether to use dynamic resolution for images.
+        pan_and_scan (`bool`, *optional*, defaults to False):
+            Whether to use pan-and-scan to keep token budgets constant.
+        timestamp_alignment (`bool`, *optional*, defaults to False):
+            Whether to enable timestamp supervision for video grounding.
+        use_gated_cross_attention (`bool`, *optional*, defaults to False):
+            Whether to use gated cross-attention in upper layers.
+        gated_cross_attention_start_layer (`int`, *optional*):
+            Layer index to start gated cross-attention (if enabled).
+        image_token_id (`int`, *optional*):
+            Token ID for image placeholders.
+        video_token_id (`int`, *optional*):
+            Token ID for video placeholders.
+        vision_start_token_id (`int`, *optional*):
+            Token ID marking start of vision input.
+        vision_end_token_id (`int`, *optional*):
+            Token ID marking end of vision input.
+        frame_separator_token_id (`int`, *optional*):
+            Token ID for separating video frames.
+        mrope_sections (`list`, *optional*):
+            M-ROPE sections for [temporal, height, width] dimensions.
+            Defaults to split based on head_dim.
+        mrope_learnable_phases (`bool`, *optional*, defaults to False):
+            Whether to use learnable phase shifts in M-ROPE.
+        debug_vision (`bool`, *optional*, defaults to False):
+            Enable debug logging for vision forward passes.
+        debug_mrope (`bool`, *optional*, defaults to False):
+            Enable debug logging for M-ROPE operations.
+        debug_attention (`bool`, *optional*, defaults to False):
+            Enable debug logging for attention patterns.
+        debug_cache (`bool`, *optional*, defaults to False):
+            Enable debug logging for KV cache operations.
+    """
+
+    model_type = "arlow"
+    sub_configs = {"vision_config": ArlowVisionConfig}
+    keys_to_ignore_at_inference = ["past_key_values"]
+
+    def __init__(
+        self,
+        vocab_size=131072,
+        hidden_size=2304,
+        intermediate_size=9216,
+        num_hidden_layers=32,
+        num_attention_heads=24,
+        num_key_value_heads=4,
+        hidden_act="silu",
+        max_position_embeddings=2048,
+        initializer_range=0.02,
+        rms_norm_eps=1e-6,
+        use_cache=True,
+        pad_token_id=None,
+        bos_token_id=None,
+        eos_token_id=None,
+        tie_word_embeddings=False,
+        rope_theta=100000.0,
+        rope_parameters=None,
+        rope_scaling=None,  # Deprecated, use rope_parameters
+        attention_bias=False,
+        attention_dropout=0.0,
+        resid_dropout=0.0,
+        mlp_dropout=0.0,
+        head_dim=None,
+        use_sliding_window=False,
+        sliding_window=4096,
+        max_window_layers=28,
+        layer_types=None,
+        # Multimodal parameters
+        vision_config=None,
+        mm_tokens_per_image=256,
+        mm_tokens_per_video=128,
+        video_max_frames=64,
+        video_sample_strategy="uniform",
+        dynamic_resolution=True,
+        pan_and_scan=False,
+        timestamp_alignment=False,
+        use_gated_cross_attention=False,
+        gated_cross_attention_start_layer=None,
+        image_token_id=None,
+        video_token_id=None,
+        vision_start_token_id=None,
+        vision_end_token_id=None,
+        frame_separator_token_id=None,
+        mrope_sections=None,
+        mrope_learnable_phases=False,
+        # Debug parameters (will be tested and removed)
+        debug_vision=False,
+        debug_mrope=False,
+        debug_attention=False,
+        debug_cache=False,
+        **kwargs,
+    ):
+        self.vocab_size = vocab_size
+        self.max_position_embeddings = max_position_embeddings
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.use_sliding_window = use_sliding_window
+        self.sliding_window = sliding_window if self.use_sliding_window else None
+        self.max_window_layers = max_window_layers
+        self.num_key_value_heads = num_key_value_heads
+        self.hidden_act = hidden_act
+        self.initializer_range = initializer_range
+        self.rms_norm_eps = rms_norm_eps
+        self.use_cache = use_cache
+        self.rope_theta = rope_theta
+        self.rope_parameters = rope_scaling or rope_parameters
+        self.attention_bias = attention_bias
+        self.attention_dropout = attention_dropout
+        self.resid_dropout = resid_dropout
+        self.mlp_dropout = mlp_dropout
+        self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
+
+        # Multimodal configuration
+        if isinstance(vision_config, dict):
+            self.vision_config = ArlowVisionConfig(**vision_config)
+        elif vision_config is None:
+            self.vision_config = ArlowVisionConfig()
+        else:
+            self.vision_config = vision_config
+
+        self.mm_tokens_per_image = mm_tokens_per_image
+        self.mm_tokens_per_video = mm_tokens_per_video
+        self.video_max_frames = video_max_frames
+        self.video_sample_strategy = video_sample_strategy
+        self.dynamic_resolution = dynamic_resolution
+        self.pan_and_scan = pan_and_scan
+        self.timestamp_alignment = timestamp_alignment
+        self.use_gated_cross_attention = use_gated_cross_attention
+        self.gated_cross_attention_start_layer = gated_cross_attention_start_layer
+        self.image_token_id = image_token_id
+        self.video_token_id = video_token_id
+        self.vision_start_token_id = vision_start_token_id
+        self.vision_end_token_id = vision_end_token_id
+        self.frame_separator_token_id = frame_separator_token_id
+
+        # M-ROPE configuration: default sections based on head_dim
+        if mrope_sections is None:
+            # Split head_dim into temporal, height, width sections
+            # Default: temporal=16, rest split between h/w
+            remaining = self.head_dim - 16
+            self.mrope_sections = [16, remaining // 2, remaining - remaining // 2]
+        else:
+            self.mrope_sections = mrope_sections
+
+        self.mrope_learnable_phases = mrope_learnable_phases
+
+        # Validate mrope_sections sum equals head_dim
+        if sum(self.mrope_sections) != self.head_dim:
+            raise ValueError(
+                f"Sum of mrope_sections {self.mrope_sections} (={sum(self.mrope_sections)}) "
+                f"must equal head_dim ({self.head_dim})"
+            )
+
+        # Debug flags (to be tested and removed)
+        self.debug_vision = debug_vision
+        self.debug_mrope = debug_mrope
+        self.debug_attention = debug_attention
+        self.debug_cache = debug_cache
+
+        # Validate rope parameters (ignore M-ROPE specific keys since we use custom M-ROPE)
+        if self.rope_parameters is not None and "type" in self.rope_parameters:
+            self.rope_parameters["rope_type"] = self.rope_parameters["type"]
+        rope_config_validation(self, ignore_keys={"mrope_sections", "mrope_learnable_phases"})
+
+        # Layer types configuration
+        self.layer_types = layer_types
+        if self.layer_types is None:
+            self.layer_types = [
+                "sliding_attention"
+                if self.sliding_window is not None and i >= self.max_window_layers
+                else "full_attention"
+                for i in range(self.num_hidden_layers)
+            ]
+        layer_type_validation(self.layer_types, self.num_hidden_layers)
+
+        super().__init__(
+            pad_token_id=pad_token_id,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            tie_word_embeddings=tie_word_embeddings,
+            **kwargs,
+        )
+
+
+@dataclass
+@auto_docstring(
+    custom_intro="""
+    Base class for Arlow multimodal model outputs, with hidden states and M-ROPE deltas.
+    """
+)
+class ArlowMultimodalModelOutputWithPast(ModelOutput):
+    r"""
+    past_key_values (`Cache`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+        Contains pre-computed hidden-states (key and values in the self-attention blocks) that can be used to speed up sequential decoding.
+    rope_deltas (`torch.LongTensor` of shape `(batch_size, )`, *optional*):
+        The rope index difference between sequence length and multimodal rope for M-ROPE.
+    """
+
+    last_hidden_state: Optional[torch.FloatTensor] = None
+    past_key_values: Optional[Cache] = None
+    hidden_states: Optional[tuple[torch.FloatTensor]] = None
+    attentions: Optional[tuple[torch.FloatTensor]] = None
+    rope_deltas: Optional[torch.LongTensor] = None
+
+
+@dataclass
+@auto_docstring(
+    custom_intro="""
+    Base class for Arlow multimodal causal language model outputs.
+    """
+)
+class ArlowMultimodalCausalLMOutputWithPast(ModelOutput):
+    r"""
+    loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
+        Language modeling loss (for next-token prediction).
+    logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
+        Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
+    past_key_values (`Cache`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+        Contains pre-computed hidden-states (key and values in the self-attention blocks) that can be used to speed up sequential decoding.
+    rope_deltas (`torch.LongTensor` of shape `(batch_size, )`, *optional*):
+        The rope index difference between sequence length and multimodal rope for M-ROPE.
+    """
+
+    loss: Optional[torch.FloatTensor] = None
+    logits: Optional[torch.FloatTensor] = None
+    past_key_values: Optional[Cache] = None
+    hidden_states: Optional[tuple[torch.FloatTensor]] = None
+    attentions: Optional[tuple[torch.FloatTensor]] = None
+    rope_deltas: Optional[torch.LongTensor] = None
 
 
 if version.parse(get_torch_version()) >= version.parse("2.3.0"):
@@ -62,13 +447,13 @@ else:
 class ArlowRotaryEmbedding(nn.Module):
     def __init__(self, config: ArlowConfig, device=None):
         super().__init__()
-        # Validate rope_scaling
-        if getattr(config, "rope_scaling", None) is not None and not isinstance(config.rope_scaling, dict):
-            raise ValueError("rope_scaling must be a dict if provided")
-        if isinstance(config.rope_scaling, dict):
-            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+        rope_config = getattr(config, "rope_parameters", None)
+        if rope_config is not None and not isinstance(rope_config, dict):
+            raise ValueError("rope_parameters must be a dict if provided")
+        if isinstance(rope_config, dict):
+            self.rope_type = rope_config.get("rope_type", rope_config.get("type"))
             if self.rope_type is None:
-                logger.warning("rope_scaling provided without 'rope_type'/'type'; defaulting to 'default'.")
+                logger.warning("rope_parameters provided without 'rope_type'/'type'; defaulting to 'default'.")
                 self.rope_type = "default"
         else:
             self.rope_type = "default"
@@ -76,11 +461,43 @@ class ArlowRotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        
+        # Handle default rope type
+        rope_init_fn = self.compute_default_rope_parameters
+        if self.rope_type != "default":
+            rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+        inv_freq, self.attention_scaling = rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.original_inv_freq = self.inv_freq
+        self.original_inv_freq = inv_freq
+
+    @staticmethod
+    def compute_default_rope_parameters(
+        config: Optional[ArlowConfig] = None,
+        device: Optional["torch.device"] = None,
+        seq_len: Optional[int] = None,
+        **rope_kwargs,
+    ) -> tuple["torch.Tensor", float]:
+        """
+        Computes the inverse frequencies for default RoPE (no scaling).
+        """
+        if config is not None:
+            # Access rope_theta from rope_parameters if available, otherwise fallback to config attribute
+            if hasattr(config, "rope_parameters") and config.rope_parameters:
+                base = config.rope_parameters.get("rope_theta", config.rope_theta)
+            else:
+                base = config.rope_theta
+            head_dim = config.head_dim
+            if head_dim is None:
+                head_dim = config.hidden_size // config.num_attention_heads
+        else:
+            base = rope_kwargs.get("base", 10000.0)
+            head_dim = rope_kwargs.get("dim")
+
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to(device) / head_dim)
+        )
+        return inv_freq, 1.0
 
     @torch.no_grad()
     @dynamic_rope_update
@@ -91,9 +508,10 @@ class ArlowRotaryEmbedding(nn.Module):
         device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-            # Even/odd interleaving: expand frequencies for interleaved dims
-            cos = freqs.cos().repeat_interleave(2, dim=-1) * self.attention_scaling
-            sin = freqs.sin().repeat_interleave(2, dim=-1) * self.attention_scaling
+            # Concatenate for standard RoPE (matches Llama implementation)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos() * self.attention_scaling
+            sin = emb.sin() * self.attention_scaling
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
@@ -111,6 +529,182 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
+
+
+def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=1, debug=False):
+    """
+    Applies Multimodal Rotary Position Embedding (M-ROPE) to query and key tensors.
+    
+    M-ROPE extends standard RoPE for multimodal inputs by splitting the head dimension into
+    sections for temporal, height, and width dimensions separately.
+    
+    Args:
+        q: Query tensor of shape (batch, heads, seq_len, head_dim)
+        k: Key tensor of shape (batch, heads, seq_len, head_dim)
+        cos: Cosine positional embeddings of shape (3, batch, seq_len, section_dim)
+        sin: Sine positional embeddings of shape (3, batch, seq_len, section_dim)
+        mrope_section: List of 3 integers [t_dim, h_dim, w_dim] summing to head_dim
+        unsqueeze_dim: Dimension to unsqueeze for broadcasting (default: 1)
+        debug: Whether to enable debug logging (default: False)
+    
+    Returns:
+        Tuple of (q_embed, k_embed) with M-ROPE applied
+    """
+    print(f"[DEBUG M-ROPE] Input shapes: q={q.shape}, k={k.shape}, cos={cos.shape}, sin={sin.shape}")
+    print(f"[DEBUG M-ROPE] Sections: {mrope_section}")
+    
+    # mrope_section is [t, h, w] dimensions, we need to double for cos/sin interleaving
+    mrope_section = [s * 2 for s in mrope_section]
+    
+    # Split cos/sin into chunks and reassemble by interleaving temporal/height/width
+    # cos/sin shape: (3, batch, seq_len, section_dim*2)
+    cos_chunks = [m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))]
+    sin_chunks = [m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))]
+    
+    cos = torch.cat(cos_chunks, dim=-1).unsqueeze(unsqueeze_dim)
+    sin = torch.cat(sin_chunks, dim=-1).unsqueeze(unsqueeze_dim)
+    
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    
+    print(f"[DEBUG M-ROPE] Output shapes: q_embed={q_embed.shape}, k_embed={k_embed.shape}")
+    
+    return q_embed, k_embed
+
+
+def apply_rotary_pos_emb_vision(
+    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply RoPE to vision transformer Q/K tensors."""
+    orig_q_dtype = q.dtype
+    orig_k_dtype = k.dtype
+    q, k = q.float(), k.float()
+    cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    q_embed = q_embed.to(orig_q_dtype)
+    k_embed = k_embed.to(orig_k_dtype)
+    return q_embed, k_embed
+
+
+class VisionRotaryEmbedding(nn.Module):
+    """Rotary position embeddings for vision transformer."""
+
+    inv_freq: torch.Tensor  # fix linting for `register_buffer`
+
+    def __init__(self, dim: int, theta: float = 10000.0) -> None:
+        super().__init__()
+        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, seqlen: int) -> torch.Tensor:
+        seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(seq, self.inv_freq)
+        return freqs
+
+
+class ArlowMultimodalRotaryEmbedding(nn.Module):
+    """
+    M-ROPE with optional learnable phase shifts and damping per axis.
+    Extends ArlowRotaryEmbedding to handle (temporal, height, width) position IDs.
+    """
+
+    def __init__(self, config: ArlowConfig, device=None):
+        super().__init__()
+        self.config = config
+        self.head_dim = config.head_dim
+        self.mrope_sections = config.mrope_sections
+        
+        # Validate sections
+        if sum(self.mrope_sections) != self.head_dim:
+            raise ValueError(
+                f"Sum of mrope_sections {self.mrope_sections} must equal head_dim {self.head_dim}"
+            )
+        
+        # Compute inverse frequencies for each section (t, h, w)
+        self.rope_type = "default"
+        if hasattr(config, "rope_parameters") and config.rope_parameters:
+            self.rope_type = config.rope_parameters.get("rope_type", "default")
+        
+        rope_theta = config.rope_theta
+        
+        # Create separate inv_freq for each dimension
+        inv_freqs = []
+        for section_dim in self.mrope_sections:
+            dim = section_dim
+            inv_freq = 1.0 / (
+                rope_theta ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim)
+            )
+            inv_freqs.append(inv_freq)
+        
+        # Register as buffers
+        for i, inv_freq in enumerate(inv_freqs):
+            self.register_buffer(f"inv_freq_{i}", inv_freq, persistent=False)
+        
+        # Learnable phase shifts and damping if enabled
+        if config.mrope_learnable_phases:
+            self.phase_shift = nn.Parameter(torch.zeros(3))  # [t, h, w]
+            self.damping = nn.Parameter(torch.ones(3))  # [t, h, w]
+        else:
+            self.phase_shift = None
+            self.damping = None
+        
+        self.attention_scaling = 1.0
+        self.debug = config.debug_mrope
+        
+        print(f"[DEBUG M-ROPE Init] sections={self.mrope_sections}, head_dim={self.head_dim}")
+        print(f"[DEBUG M-ROPE Init] learnable_phases={config.mrope_learnable_phases}")
+
+    @torch.no_grad()
+    def forward(self, x: torch.Tensor, position_ids: torch.LongTensor):
+        """
+        Args:
+            x: Input tensor (used for device/dtype)
+            position_ids: Shape (3, batch, seq_len) containing [t, h, w] position indices
+        
+        Returns:
+            Tuple of (cos, sin) with shape (3, batch, seq_len, section_dim)
+        """
+        print(f"[DEBUG M-ROPE Forward] x.shape={x.shape}, position_ids.shape={position_ids.shape}")
+        
+        # position_ids shape: (3, batch, seq_len) for [temporal, height, width]
+        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        
+        cos_list = []
+        sin_list = []
+        
+        with torch.autocast(device_type=device_type, enabled=False):
+            for i in range(3):  # temporal, height, width
+                inv_freq = getattr(self, f"inv_freq_{i}")
+                # inv_freq shape: (section_dim/2,)
+                # position_ids[i] shape: (batch, seq_len)
+                
+                inv_freq_expanded = inv_freq[None, None, :, None].float().expand(1, position_ids.shape[1], -1, 1)
+                position_ids_expanded = position_ids[i:i+1, :, None, :].float()  # (1, batch, 1, seq_len)
+                
+                freqs = (inv_freq_expanded @ position_ids_expanded).transpose(2, 3)  # (1, batch, seq_len, section_dim/2)
+                freqs = freqs.repeat_interleave(2, dim=-1)  # (1, batch, seq_len, section_dim)
+                
+                # Apply learnable phase shifts and damping if enabled
+                if self.phase_shift is not None and self.damping is not None:
+                    phase = self.phase_shift[i]
+                    damp = self.damping[i]
+                    freqs = freqs + phase
+                    freqs = freqs * damp
+                
+                cos_i = (freqs.cos() * self.attention_scaling).squeeze(0)  # (batch, seq_len, section_dim)
+                sin_i = (freqs.sin() * self.attention_scaling).squeeze(0)  # (batch, seq_len, section_dim)
+                
+                cos_list.append(cos_i)
+                sin_list.append(sin_i)
+        
+        # Stack to get shape (3, batch, seq_len, section_dim)
+        cos = torch.stack(cos_list, dim=0).to(dtype=x.dtype)
+        sin = torch.stack(sin_list, dim=0).to(dtype=x.dtype)
+        
+        print(f"[DEBUG M-ROPE Forward] Output cos.shape={cos.shape}, sin.shape={sin.shape}")
+        
+        return cos, sin
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -579,6 +1173,217 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
         return past_key_values
 
 
+class ArlowProcessorKwargs(ProcessingKwargs, total=False):
+    _defaults = {
+        "images_kwargs": {},
+        "text_kwargs": {
+            "padding": False,
+            "return_token_type_ids": False,
+            "return_mm_token_type_ids": False,
+        },
+        "videos_kwargs": {"return_metadata": True},
+    }
+
+
+class ArlowProcessor(ProcessorMixin):
+    r"""
+    Constructs an Arlow processor which wraps an image processor, a tokenizer, and a video processor into a single
+    processor. Follows Qwen3VL's strategy for placeholder expansion and timestamp prompts.
+
+    Args:
+        image_processor: Required image processor.
+        tokenizer: Required tokenizer (`ArlowTokenizer` or `ArlowTokenizerFast`).
+        video_processor: Required video processor for video support.
+        chat_template: Optional chat template string.
+    """
+
+    attributes = ["image_processor", "tokenizer", "video_processor"]
+    image_processor_class = "AutoImageProcessor"
+    video_processor_class = "AutoVideoProcessor"
+    tokenizer_class = ("ArlowTokenizer", "ArlowTokenizerFast")
+
+    def __init__(self, image_processor=None, tokenizer=None, video_processor=None, chat_template=None, **kwargs):
+        # multimodal special tokens
+        self.image_token = "<image>" if not hasattr(tokenizer, "image_token") else tokenizer.image_token
+        self.video_token = "<video>" if not hasattr(tokenizer, "video_token") else tokenizer.video_token
+        self.image_token_id = (
+            tokenizer.image_token_id
+            if getattr(tokenizer, "image_token_id", None)
+            else tokenizer.convert_tokens_to_ids(self.image_token)
+        )
+        self.video_token_id = (
+            tokenizer.video_token_id
+            if getattr(tokenizer, "video_token_id", None)
+            else tokenizer.convert_tokens_to_ids(self.video_token)
+        )
+
+        super().__init__(image_processor, tokenizer, video_processor, chat_template=chat_template)
+
+        self.vision_start_token = (
+            "<|vision_start|>" if not hasattr(tokenizer, "vision_start_token") else tokenizer.vision_start_token
+        )
+        self.vision_end_token = (
+            "<|vision_end|>" if not hasattr(tokenizer, "vision_end_token") else tokenizer.vision_end_token
+        )
+        self.vision_start_token_id = (
+            tokenizer.vision_start_token_id
+            if getattr(tokenizer, "vision_start_token_id", None)
+            else tokenizer.convert_tokens_to_ids(self.vision_start_token)
+        )
+        self.vision_end_token_id = (
+            tokenizer.vision_end_token_id
+            if getattr(tokenizer, "vision_end_token_id", None)
+            else tokenizer.convert_tokens_to_ids(self.vision_end_token)
+        )
+
+    def __call__(
+        self,
+        images: ImageInput | None = None,
+        text: Union[TextInput, PreTokenizedInput, list[TextInput], list[PreTokenizedInput]] | None = None,
+        videos: VideoInput | None = None,
+        **kwargs: Unpack[ArlowProcessorKwargs],
+    ) -> BatchFeature:
+        output_kwargs = self._merge_kwargs(
+            ArlowProcessorKwargs,
+            tokenizer_init_kwargs=self.tokenizer.init_kwargs,
+            **kwargs,
+        )
+
+        image_inputs = {}
+        video_inputs = {}
+        image_grid_thw = None
+        video_grid_thw = None
+
+        if images is not None:
+            image_inputs = self.image_processor(images=images, **output_kwargs["images_kwargs"])
+            image_grid_thw = image_inputs.get("image_grid_thw")
+
+        if videos is not None:
+            video_inputs = self.video_processor(videos=videos, **output_kwargs["videos_kwargs"])
+            video_grid_thw = video_inputs.get("video_grid_thw")
+            # preserve metadata for timestamp prompts if provided
+            if "return_metadata" not in kwargs and "video_metadata" in video_inputs:
+                video_metadata = video_inputs.pop("video_metadata")
+            else:
+                video_metadata = video_inputs.get("video_metadata")
+
+        if not isinstance(text, list):
+            text = [text]
+
+        text = text.copy()  # will edit in-place
+
+        # Expand image placeholders by computed token budget
+        if image_grid_thw is not None:
+            merge_len = self.image_processor.merge_size**2 if hasattr(self.image_processor, "merge_size") else 1
+            index = 0
+            for i in range(len(text)):
+                while self.image_token in text[i]:
+                    num_image_tokens = image_grid_thw[index].prod() // merge_len
+                    text[i] = text[i].replace(self.image_token, "<|placeholder|>" * num_image_tokens, 1)
+                    index += 1
+                text[i] = text[i].replace("<|placeholder|>", self.image_token)
+
+        # Expand video placeholders into per-frame segments with optional timestamps
+        if video_grid_thw is not None:
+            merge_len = self.video_processor.merge_size**2 if hasattr(self.video_processor, "merge_size") else 1
+            index = 0
+            for i in range(len(text)):
+                while self.video_token in text[i]:
+                    # build per-frame blocks
+                    video_placeholder = ""
+                    frame_seqlen = video_grid_thw[index][1:].prod() // merge_len
+
+                    # compute timestamps if metadata exists, otherwise just omit
+                    curr_timestamps = None
+                    if video_metadata is not None:
+                        metadata = video_metadata[index]
+                        if getattr(metadata, "fps", None) is None:
+                            logger.warning_once(
+                                "Arlow requires video fps to build timestamp prompts; defaulting to fps=24."
+                            )
+                            metadata.fps = 24 if metadata.fps is None else metadata.fps
+                        curr_timestamps = self._calculate_timestamps(
+                            metadata.frames_indices, metadata.fps, self.video_processor.merge_size
+                        )
+
+                    for frame_idx in range(video_grid_thw[index][0]):
+                        if curr_timestamps is not None:
+                            curr_time = curr_timestamps[frame_idx]
+                            video_placeholder += f"<{curr_time:.1f} seconds>"
+                        video_placeholder += (
+                            self.vision_start_token + "<|placeholder|>" * frame_seqlen + self.vision_end_token
+                        )
+
+                    compound = f"{self.vision_start_token}{self.video_token}{self.vision_end_token}"
+                    if compound in text[i]:
+                        text[i] = text[i].replace(compound, video_placeholder, 1)
+                    else:
+                        text[i] = text[i].replace(self.video_token, video_placeholder, 1)
+                    index += 1
+
+                text[i] = text[i].replace("<|placeholder|>", self.video_token)
+
+        return_tensors = output_kwargs["text_kwargs"].pop("return_tensors", None)
+        return_mm_token_type_ids = output_kwargs["text_kwargs"].pop("return_mm_token_type_ids", None)
+        text_inputs = self.tokenizer(text, **output_kwargs["text_kwargs"])
+        self._check_special_mm_tokens(text, text_inputs, modalities=["image", "video"])
+
+        if return_mm_token_type_ids:
+            array_ids = np.array(text_inputs["input_ids"])  # type: ignore[arg-type]
+            mm_token_type_ids = np.zeros_like(text_inputs["input_ids"])  # type: ignore[arg-type]
+            mm_token_type_ids[array_ids == self.image_token_id] = 1
+            text_inputs["mm_token_type_ids"] = mm_token_type_ids.tolist()
+
+        return BatchFeature(data={**text_inputs, **image_inputs, **video_inputs}, tensor_type=return_tensors)
+
+    def _get_num_multimodal_tokens(self, image_sizes=None, video_sizes=None, **kwargs):
+        vision_data = {}
+        if image_sizes is not None and self.image_processor is not None:
+            images_kwargs = ArlowProcessorKwargs._defaults.get("images_kwargs", {}).copy()
+            images_kwargs.update(kwargs)
+            merge_size = images_kwargs.get("merge_size", None) or getattr(self.image_processor, "merge_size", 1)
+            num_image_patches = [
+                self.image_processor.get_number_of_image_patches(*image_size, images_kwargs)
+                for image_size in image_sizes
+            ]
+            num_image_tokens = [(num_patches // merge_size**2) for num_patches in num_image_patches]
+            vision_data.update({"num_image_tokens": num_image_tokens, "num_image_patches": num_image_patches})
+
+        if video_sizes is not None and self.video_processor is not None:
+            videos_kwargs = ArlowProcessorKwargs._defaults.get("videos_kwargs", {}).copy()
+            videos_kwargs.update(kwargs)
+            num_video_patches = [
+                self.video_processor.get_number_of_video_patches(*video_size, videos_kwargs)
+                for video_size in video_sizes
+            ]
+            merge_size = getattr(self.video_processor, "merge_size", 1)
+            num_video_tokens = [(num_patches // merge_size**2) for num_patches in num_video_patches]
+            vision_data["num_video_tokens"] = num_video_tokens
+
+        return MultiModalData(**vision_data)  # type: ignore[name-defined]
+
+    def post_process_image_text_to_text(
+        self, generated_outputs, skip_special_tokens=True, clean_up_tokenization_spaces=False, **kwargs
+    ):
+        return self.tokenizer.batch_decode(
+            generated_outputs,
+            skip_special_tokens=skip_special_tokens,
+            clean_up_tokenization_spaces=clean_up_tokenization_spaces,
+            **kwargs,
+        )
+
+    def _calculate_timestamps(self, indices: Union[list[int], np.ndarray], video_fps: float, merge_size: int = 2):
+        if not isinstance(indices, list):
+            indices = indices.tolist()
+        if len(indices) % merge_size != 0:
+            indices.extend(indices[-1] for _ in range(merge_size - len(indices) % merge_size))
+        timestamps = [idx / video_fps for idx in indices]
+        timestamps = [
+            (timestamps[i] + timestamps[i + merge_size - 1]) / 2 for i in range(0, len(timestamps), merge_size)
+        ]
+        return timestamps
+
+
 class ArlowForSequenceClassification(GenericForSequenceClassification, ArlowPreTrainedModel): ...
 
 
@@ -589,9 +1394,12 @@ class ArlowForTokenClassification(GenericForTokenClassification, ArlowPreTrained
 
 
 __all__ = [
+    "ArlowConfig",
+    "ArlowVisionConfig",
     "ArlowPreTrainedModel",
     "ArlowModel",
     "ArlowForCausalLM",
+    "ArlowProcessor",
     "ArlowForSequenceClassification",
     "ArlowForQuestionAnswering",
     "ArlowForTokenClassification",

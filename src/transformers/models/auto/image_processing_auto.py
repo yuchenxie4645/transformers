@@ -63,6 +63,7 @@ else:
             ("aimv2_vision_model", ("CLIPImageProcessor", "CLIPImageProcessorFast")),
             ("align", ("EfficientNetImageProcessor", "EfficientNetImageProcessorFast")),
             ("aria", ("AriaImageProcessor", None)),
+            ("arlow", ("ArlowImageProcessor", "ArlowImageProcessorFast")),
             ("beit", ("BeitImageProcessor", "BeitImageProcessorFast")),
             ("bit", ("BitImageProcessor", "BitImageProcessorFast")),
             ("blip", ("BlipImageProcessor", "BlipImageProcessorFast")),

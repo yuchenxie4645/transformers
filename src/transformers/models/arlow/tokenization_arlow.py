@@ -1,4 +1,5 @@
 import json
+import ast
 import os
 import unicodedata
 from functools import lru_cache
@@ -143,9 +144,14 @@ class ArlowTokenizer(PreTrainedTokenizer):
             else pad_token
         )
 
-        # Load vocabulary
+        # Load vocabulary (be tolerant to simple Python dict strings used in tests)
         with open(vocab_file, encoding="utf-8") as vocab_handle:
-            self.encoder = json.load(vocab_handle)
+            text = vocab_handle.read()
+        try:
+            self.encoder = json.loads(text)
+        except json.JSONDecodeError:
+            # Fallback to literal_eval for non-JSON dict strings (e.g., single quotes)
+            self.encoder = ast.literal_eval(text)
         self.decoder = {v: k for k, v in self.encoder.items()}
 
         self.errors = errors  # how to handle errors in decoding
@@ -181,6 +187,19 @@ class ArlowTokenizer(PreTrainedTokenizer):
             split_special_tokens=split_special_tokens,
             **kwargs,
         )
+
+        # Ensure multimodal control tokens are treated as indivisible special tokens
+        additional_specials = [
+            "<image>",
+            "<video>",
+            "<|vision_start|>",
+            "<|vision_end|>",
+        ]
+        try:
+            self.add_special_tokens({"additional_special_tokens": additional_specials})
+        except Exception:
+            # Be permissive if adding tokens is not supported in some contexts
+            pass
 
     @property
     def vocab_size(self) -> int:

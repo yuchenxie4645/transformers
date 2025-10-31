@@ -151,6 +151,7 @@ _import_structure = {
     ],
     "models.arlow": [
         "ArlowConfig",
+        "ArlowProcessor",
         "ArlowTokenizer",
     ],
     "models.audio_spectrogram_transformer": [
@@ -4203,6 +4204,7 @@ if TYPE_CHECKING:
     )
     from .models.arlow import (
         ArlowConfig,
+        ArlowProcessor,
         ArlowTokenizer,
     )
     from .models.audio_spectrogram_transformer import (

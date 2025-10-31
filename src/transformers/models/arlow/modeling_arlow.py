@@ -4,6 +4,7 @@
 #             the file from the modular. If any change should be done, please apply the change to the
 #                          modular_arlow.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
+from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
@@ -20,7 +21,7 @@ from ...modeling_layers import (
     GenericForSequenceClassification,
     GenericForTokenClassification,
 )
-from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, ModelOutput
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
@@ -29,6 +30,53 @@ from .configuration_arlow import ArlowConfig
 
 
 logger = logging.get_logger(__name__)
+
+
+@dataclass
+@auto_docstring(
+    custom_intro="""
+    Base class for Arlow multimodal model outputs, with hidden states and M-ROPE deltas.
+    """
+)
+class ArlowMultimodalModelOutputWithPast(ModelOutput):
+    r"""
+    past_key_values (`Cache`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+        Contains pre-computed hidden-states (key and values in the self-attention blocks) that can be used to speed up sequential decoding.
+    rope_deltas (`torch.LongTensor` of shape `(batch_size, )`, *optional*):
+        The rope index difference between sequence length and multimodal rope for M-ROPE.
+    """
+
+    last_hidden_state: Optional[torch.FloatTensor] = None
+    past_key_values: Optional[Cache] = None
+    hidden_states: Optional[tuple[torch.FloatTensor]] = None
+    attentions: Optional[tuple[torch.FloatTensor]] = None
+    rope_deltas: Optional[torch.LongTensor] = None
+
+
+@dataclass
+@auto_docstring(
+    custom_intro="""
+    Base class for Arlow multimodal causal language model outputs.
+    """
+)
+class ArlowMultimodalCausalLMOutputWithPast(ModelOutput):
+    r"""
+    loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
+        Language modeling loss (for next-token prediction).
+    logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
+        Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
+    past_key_values (`Cache`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
+        Contains pre-computed hidden-states (key and values in the self-attention blocks) that can be used to speed up sequential decoding.
+    rope_deltas (`torch.LongTensor` of shape `(batch_size, )`, *optional*):
+        The rope index difference between sequence length and multimodal rope for M-ROPE.
+    """
+
+    loss: Optional[torch.FloatTensor] = None
+    logits: Optional[torch.FloatTensor] = None
+    past_key_values: Optional[Cache] = None
+    hidden_states: Optional[tuple[torch.FloatTensor]] = None
+    attentions: Optional[tuple[torch.FloatTensor]] = None
+    rope_deltas: Optional[torch.LongTensor] = None
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -52,13 +100,13 @@ class ArlowRMSNorm(nn.Module):
 class ArlowRotaryEmbedding(nn.Module):
     def __init__(self, config: ArlowConfig, device=None):
         super().__init__()
-        # Validate rope_scaling
-        if getattr(config, "rope_scaling", None) is not None and not isinstance(config.rope_scaling, dict):
-            raise ValueError("rope_scaling must be a dict if provided")
-        if isinstance(config.rope_scaling, dict):
-            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+        rope_config = getattr(config, "rope_parameters", None)
+        if rope_config is not None and not isinstance(rope_config, dict):
+            raise ValueError("rope_parameters must be a dict if provided")
+        if isinstance(rope_config, dict):
+            self.rope_type = rope_config.get("rope_type", rope_config.get("type"))
             if self.rope_type is None:
-                logger.warning("rope_scaling provided without 'rope_type'/'type'; defaulting to 'default'.")
+                logger.warning("rope_parameters provided without 'rope_type'/'type'; defaulting to 'default'.")
                 self.rope_type = "default"
         else:
             self.rope_type = "default"
@@ -66,11 +114,41 @@ class ArlowRotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
+        # Handle default rope type
+        rope_init_fn = self.compute_default_rope_parameters
+        if self.rope_type != "default":
+            rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+
+        inv_freq, self.attention_scaling = rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.original_inv_freq = self.inv_freq
+        self.original_inv_freq = inv_freq
+
+    @staticmethod
+    def compute_default_rope_parameters(
+        config: Optional[ArlowConfig] = None,
+        device: Optional["torch.device"] = None,
+        seq_len: Optional[int] = None,
+        **rope_kwargs,
+    ) -> tuple["torch.Tensor", float]:
+        """
+        Computes the inverse frequencies for default RoPE (no scaling).
+        """
+        if config is not None:
+            # Access rope_theta from rope_parameters if available, otherwise fallback to config attribute
+            if hasattr(config, "rope_parameters") and config.rope_parameters:
+                base = config.rope_parameters.get("rope_theta", config.rope_theta)
+            else:
+                base = config.rope_theta
+            head_dim = config.head_dim
+            if head_dim is None:
+                head_dim = config.hidden_size // config.num_attention_heads
+        else:
+            base = rope_kwargs.get("base", 10000.0)
+            head_dim = rope_kwargs.get("dim")
+
+        inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to(device) / head_dim))
+        return inv_freq, 1.0
 
     @torch.no_grad()
     @dynamic_rope_update
@@ -81,11 +159,132 @@ class ArlowRotaryEmbedding(nn.Module):
         device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-            # Even/odd interleaving: expand frequencies for interleaved dims
-            cos = freqs.cos().repeat_interleave(2, dim=-1) * self.attention_scaling
-            sin = freqs.sin().repeat_interleave(2, dim=-1) * self.attention_scaling
+            # Concatenate for standard RoPE (matches Llama implementation)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos() * self.attention_scaling
+            sin = emb.sin() * self.attention_scaling
 
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+
+class VisionRotaryEmbedding(nn.Module):
+    """Rotary position embeddings for vision transformer."""
+
+    inv_freq: torch.Tensor  # fix linting for `register_buffer`
+
+    def __init__(self, dim: int, theta: float = 10000.0) -> None:
+        super().__init__()
+        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, seqlen: int) -> torch.Tensor:
+        seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(seq, self.inv_freq)
+        return freqs
+
+
+class ArlowMultimodalRotaryEmbedding(nn.Module):
+    """
+    M-ROPE with optional learnable phase shifts and damping per axis.
+    Extends ArlowRotaryEmbedding to handle (temporal, height, width) position IDs.
+    """
+
+    def __init__(self, config: ArlowConfig, device=None):
+        super().__init__()
+        self.config = config
+        self.head_dim = config.head_dim
+        self.mrope_sections = config.mrope_sections
+
+        # Validate sections
+        if sum(self.mrope_sections) != self.head_dim:
+            raise ValueError(f"Sum of mrope_sections {self.mrope_sections} must equal head_dim {self.head_dim}")
+
+        # Compute inverse frequencies for each section (t, h, w)
+        self.rope_type = "default"
+        if hasattr(config, "rope_parameters") and config.rope_parameters:
+            self.rope_type = config.rope_parameters.get("rope_type", "default")
+
+        rope_theta = config.rope_theta
+
+        # Create separate inv_freq for each dimension
+        inv_freqs = []
+        for section_dim in self.mrope_sections:
+            dim = section_dim
+            inv_freq = 1.0 / (
+                rope_theta ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim)
+            )
+            inv_freqs.append(inv_freq)
+
+        # Register as buffers
+        for i, inv_freq in enumerate(inv_freqs):
+            self.register_buffer(f"inv_freq_{i}", inv_freq, persistent=False)
+
+        # Learnable phase shifts and damping if enabled
+        if config.mrope_learnable_phases:
+            self.phase_shift = nn.Parameter(torch.zeros(3))  # [t, h, w]
+            self.damping = nn.Parameter(torch.ones(3))  # [t, h, w]
+        else:
+            self.phase_shift = None
+            self.damping = None
+
+        self.attention_scaling = 1.0
+        self.debug = config.debug_mrope
+
+        print(f"[DEBUG M-ROPE Init] sections={self.mrope_sections}, head_dim={self.head_dim}")
+        print(f"[DEBUG M-ROPE Init] learnable_phases={config.mrope_learnable_phases}")
+
+    @torch.no_grad()
+    def forward(self, x: torch.Tensor, position_ids: torch.LongTensor):
+        """
+        Args:
+            x: Input tensor (used for device/dtype)
+            position_ids: Shape (3, batch, seq_len) containing [t, h, w] position indices
+
+        Returns:
+            Tuple of (cos, sin) with shape (3, batch, seq_len, section_dim)
+        """
+        print(f"[DEBUG M-ROPE Forward] x.shape={x.shape}, position_ids.shape={position_ids.shape}")
+
+        # position_ids shape: (3, batch, seq_len) for [temporal, height, width]
+        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+
+        cos_list = []
+        sin_list = []
+
+        with torch.autocast(device_type=device_type, enabled=False):
+            for i in range(3):  # temporal, height, width
+                inv_freq = getattr(self, f"inv_freq_{i}")
+                # inv_freq shape: (section_dim/2,)
+                # position_ids[i] shape: (batch, seq_len)
+
+                inv_freq_expanded = inv_freq[None, None, :, None].float().expand(1, position_ids.shape[1], -1, 1)
+                position_ids_expanded = position_ids[i : i + 1, :, None, :].float()  # (1, batch, 1, seq_len)
+
+                freqs = (inv_freq_expanded @ position_ids_expanded).transpose(
+                    2, 3
+                )  # (1, batch, seq_len, section_dim/2)
+                freqs = freqs.repeat_interleave(2, dim=-1)  # (1, batch, seq_len, section_dim)
+
+                # Apply learnable phase shifts and damping if enabled
+                if self.phase_shift is not None and self.damping is not None:
+                    phase = self.phase_shift[i]
+                    damp = self.damping[i]
+                    freqs = freqs + phase
+                    freqs = freqs * damp
+
+                cos_i = (freqs.cos() * self.attention_scaling).squeeze(0)  # (batch, seq_len, section_dim)
+                sin_i = (freqs.sin() * self.attention_scaling).squeeze(0)  # (batch, seq_len, section_dim)
+
+                cos_list.append(cos_i)
+                sin_list.append(sin_i)
+
+        # Stack to get shape (3, batch, seq_len, section_dim)
+        cos = torch.stack(cos_list, dim=0).to(dtype=x.dtype)
+        sin = torch.stack(sin_list, dim=0).to(dtype=x.dtype)
+
+        print(f"[DEBUG M-ROPE Forward] Output cos.shape={cos.shape}, sin.shape={sin.shape}")
+
+        return cos, sin
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
