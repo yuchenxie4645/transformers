@@ -20,7 +20,6 @@ from ...utils import TensorType, add_start_docstrings
 def smart_resize(
     height: int, width: int, factor: int = 28, min_pixels: int = 56 * 56, max_pixels: int = 28 * 28 * 1280
 ):
-    print(f"[DEBUG IMAGE] smart_resize: h={height}, w={width}, factor={factor}")
     if max(height, width) / min(height, width) > 200:
         raise ValueError(
             f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
@@ -35,7 +34,6 @@ def smart_resize(
         beta = math.sqrt(min_pixels / (height * width))
         h_bar = math.ceil(height * beta / factor) * factor
         w_bar = math.ceil(width * beta / factor) * factor
-    print(f"[DEBUG IMAGE] smart_resize output: h_bar={h_bar}, w_bar={w_bar}")
     return h_bar, w_bar
 
 
@@ -90,7 +88,6 @@ class ArlowImageProcessorFast(BaseImageProcessorFast):
         if "shortest_edge" not in size or "longest_edge" not in size:
             raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
 
-        print(f"[DEBUG IMAGE] Initializing ArlowImageProcessorFast with keys: {list(kwargs.keys())}")
         super().__init__(size=size, min_pixels=min_pixels, max_pixels=max_pixels, **kwargs)
 
     def _further_process_kwargs(
@@ -117,7 +114,6 @@ class ArlowImageProcessorFast(BaseImageProcessorFast):
         images: ImageInput,
         **kwargs: Unpack[ArlowImageProcessorKwargs],
     ) -> BatchFeature:
-        print(f"[DEBUG IMAGE] preprocess(fast): kwargs keys={list(kwargs.keys())}")
         return super().preprocess(images, **kwargs)
 
     def _preprocess_image_like_inputs(
@@ -151,7 +147,7 @@ class ArlowImageProcessorFast(BaseImageProcessorFast):
         images: list["torch.Tensor"],
         do_resize: bool,
         size: SizeDict,
-        interpolation: Optional["torchvision.transforms.v2.functional.InterpolationMode"],
+        interpolation: Optional[PILImageResampling],
         do_rescale: bool,
         rescale_factor: float,
         do_normalize: bool,
@@ -237,9 +233,6 @@ class ArlowImageProcessorFast(BaseImageProcessorFast):
             padded.append(img)
         pixel_values = torch.stack(padded, dim=0)
         image_grid_thw = torch.tensor(processed_grids)
-        print(
-            f"[DEBUG IMAGE] _preprocess(fast): output batch={pixel_values.shape[0]}, patches={pixel_values.shape[1]}, grid_thw_shape={image_grid_thw.shape}"
-        )
 
         return BatchFeature(
             data={"pixel_values": pixel_values, "image_grid_thw": image_grid_thw}, tensor_type=return_tensors

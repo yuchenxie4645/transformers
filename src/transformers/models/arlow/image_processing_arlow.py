@@ -29,7 +29,6 @@ def smart_resize(
     2) total pixels within [min_pixels, max_pixels]
     3) aspect ratio not extreme
     """
-    print(f"[DEBUG IMAGE] smart_resize: h={height}, w={width}, factor={factor}")
     if max(height, width) / min(height, width) > 200:
         raise ValueError(
             f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
@@ -44,7 +43,6 @@ def smart_resize(
         beta = math.sqrt(min_pixels / (height * width))
         h_bar = math.ceil(height * beta / factor) * factor
         w_bar = math.ceil(width * beta / factor) * factor
-    print(f"[DEBUG IMAGE] smart_resize output: h_bar={h_bar}, w_bar={w_bar}")
     return h_bar, w_bar
 
 
@@ -130,7 +128,6 @@ class ArlowImageProcessor(BaseImageProcessorFast):
         images: ImageInput,
         **kwargs: Unpack[ArlowImageProcessorKwargs],
     ) -> BatchFeature:
-        print(f"[DEBUG IMAGE] preprocess: received images, kwargs keys={list(kwargs.keys())}")
         return super().preprocess(images, **kwargs)
 
     def _preprocess_image_like_inputs(
@@ -164,7 +161,7 @@ class ArlowImageProcessor(BaseImageProcessorFast):
         images: list["torch.Tensor"],
         do_resize: bool,
         size: SizeDict,
-        interpolation: Optional["torchvision.transforms.v2.functional.InterpolationMode"],
+        interpolation: Optional[PILImageResampling],
         do_rescale: bool,
         rescale_factor: float,
         do_normalize: bool,
@@ -252,9 +249,6 @@ class ArlowImageProcessor(BaseImageProcessorFast):
             padded.append(img)
         pixel_values = torch.stack(padded, dim=0)
         image_grid_thw = torch.tensor(processed_grids)
-        print(
-            f"[DEBUG IMAGE] _preprocess: output batch={pixel_values.shape[0]}, patches={pixel_values.shape[1]}, grid_thw_shape={image_grid_thw.shape}"
-        )
 
         return BatchFeature(
             data={"pixel_values": pixel_values, "image_grid_thw": image_grid_thw}, tensor_type=return_tensors

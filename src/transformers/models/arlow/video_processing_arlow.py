@@ -41,8 +41,6 @@ def smart_resize(
     Returns:
         Tuple of (new_height, new_width)
     """
-    print(f"[DEBUG VIDEO] smart_resize: num_frames={num_frames}, height={height}, width={width}")
-
     if num_frames < temporal_factor:
         raise ValueError(f"num_frames:{num_frames} must be larger than temporal_factor:{temporal_factor}")
     if height < factor or width < factor:
@@ -54,7 +52,7 @@ def smart_resize(
 
     h_bar = round(height / factor) * factor
     w_bar = round(width / factor) * factor
-    t_bar = round(num_frames / temporal_factor) * temporal_factor
+    round(num_frames / temporal_factor) * temporal_factor
 
     # Apply spatial constraints only (tests expect min/max on HxW, not including time)
     if h_bar * w_bar > max_pixels:
@@ -66,7 +64,6 @@ def smart_resize(
         h_bar = math.ceil(height * beta / factor) * factor
         w_bar = math.ceil(width * beta / factor) * factor
 
-    print(f"[DEBUG VIDEO] smart_resize output: h_bar={h_bar}, w_bar={w_bar}")
     return h_bar, w_bar
 
 
@@ -83,8 +80,6 @@ def motion_adaptive_sampling(frames: np.ndarray, target_frames: int, threshold: 
     Returns:
         Indices of frames to sample
     """
-    print(f"[DEBUG VIDEO] motion_adaptive_sampling: input shape={frames.shape}, target={target_frames}")
-
     num_frames = frames.shape[0]
     if num_frames <= target_frames:
         return np.arange(num_frames)
@@ -104,7 +99,6 @@ def motion_adaptive_sampling(frames: np.ndarray, target_frames: int, threshold: 
     # Sample indices based on probabilities
     indices = np.sort(np.random.choice(num_frames, size=target_frames, replace=False, p=probs))
 
-    print(f"[DEBUG VIDEO] motion_adaptive_sampling: selected {len(indices)} frames")
     return indices
 
 
@@ -224,7 +218,6 @@ class ArlowVideoProcessor(BaseVideoProcessor):
             Frame indices to sample.
         """
         strategy = sample_strategy or self.sample_strategy
-        print(f"[DEBUG VIDEO] sample_frames: strategy={strategy}, num_frames={num_frames}, fps={fps}")
 
         # Ensure mutual exclusivity of num_frames and fps
         if strategy == "uniform":

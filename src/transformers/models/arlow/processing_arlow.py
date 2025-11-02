@@ -37,10 +37,10 @@ class ArlowProcessor(ProcessorMixin):
     processor. Follows Qwen3VL's strategy for placeholder expansion and timestamp prompts.
 
     Args:
-        image_processor: Required image processor.
-        tokenizer: Required tokenizer (`ArlowTokenizer` or `ArlowTokenizerFast`).
-        video_processor: Required video processor for video support.
-        chat_template: Optional chat template string.
+            image_processor (`<fill_type>`, *optional*): <fill_docstring>
+            tokenizer (`<fill_type>`, *optional*): <fill_docstring>
+            video_processor (`<fill_type>`, *optional*): <fill_docstring>
+            chat_template (`<fill_type>`, *optional*): <fill_docstring>
     """
 
     attributes = ["image_processor", "tokenizer", "video_processor"]

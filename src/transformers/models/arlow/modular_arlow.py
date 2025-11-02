@@ -1,6 +1,6 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Optional, Union
-from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -111,15 +111,16 @@ class ArlowVisionConfig(PreTrainedConfig):
         self.use_progressive_patches = use_progressive_patches
         self.token_pruning_ratio = token_pruning_ratio
         self.initializer_range = initializer_range
-        
-        
+
         # Warn if unsupported features are enabled
         if self.use_deformable_attention:
             logger.warning("use_deformable_attention is not yet implemented and will be ignored")
         if self.use_progressive_patches:
             logger.warning("use_progressive_patches is not yet implemented and will be ignored")
         if self.token_pruning_ratio > 0.0:
-            logger.warning(f"token_pruning_ratio={self.token_pruning_ratio} is not yet implemented and will be ignored")
+            logger.warning(
+                f"token_pruning_ratio={self.token_pruning_ratio} is not yet implemented and will be ignored"
+            )
 
 
 class ArlowTextConfig(PreTrainedConfig):
@@ -194,7 +195,9 @@ class ArlowTextConfig(PreTrainedConfig):
         self.layer_types = layer_types
         if self.layer_types is None:
             self.layer_types = [
-                "sliding_attention" if self.sliding_window is not None and i >= self.max_window_layers else "full_attention"
+                "sliding_attention"
+                if self.sliding_window is not None and i >= self.max_window_layers
+                else "full_attention"
                 for i in range(self.num_hidden_layers)
             ]
         layer_type_validation(self.layer_types, self.num_hidden_layers)
@@ -206,6 +209,7 @@ class ArlowTextConfig(PreTrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+
 
 class ArlowConfig(PreTrainedConfig):
     r"""
@@ -621,9 +625,7 @@ class ArlowTextRotaryEmbedding(nn.Module):
             )
 
         batch_size = position_ids.shape[1]
-        inv_freq_expanded = (
-            self.inv_freq[None, None, :, None].float().expand(3, batch_size, -1, 1).to(device)
-        )
+        inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, batch_size, -1, 1).to(device)
         position_ids_expanded = position_ids[:, :, None, :].float()
 
         with torch.autocast(device_type=device_type, enabled=False):
@@ -707,12 +709,8 @@ class ArlowVLRotaryEmbedding(nn.Module):
             w = int(w)
             # Build flattened THW indices in conv3d flatten order (T-major, W fastest)
             t_index = torch.arange(t, device=device, dtype=dtype).view(-1, 1).expand(-1, h * w).reshape(-1)
-            h_index = (
-                torch.arange(h, device=device, dtype=dtype).view(1, -1, 1).expand(t, -1, w).reshape(-1)
-            )
-            w_index = (
-                torch.arange(w, device=device, dtype=dtype).view(1, 1, -1).expand(t, h, -1).reshape(-1)
-            )
+            h_index = torch.arange(h, device=device, dtype=dtype).view(1, -1, 1).expand(t, -1, w).reshape(-1)
+            w_index = torch.arange(w, device=device, dtype=dtype).view(1, 1, -1).expand(t, h, -1).reshape(-1)
 
             # Compute per-dimension frequencies then interleave sections equally (T,H,W)
             freqs_t = torch.outer(t_index, self.inv_freq)
@@ -725,9 +723,6 @@ class ArlowVLRotaryEmbedding(nn.Module):
             freqs_list.append(freqs_thw)
 
         return torch.cat(freqs_list, dim=0)
-
-
-    
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -1009,7 +1004,7 @@ class ArlowVLAttention(nn.Module):
             hidden_states: (total_tokens, embed_dim)
             position_embeddings: (cos, sin) for RoPE
         """
-        batch_size, seq_length = (
+        _batch_size, seq_length = (
             hidden_states.shape[0],
             hidden_states.shape[1] if hidden_states.dim() > 2 else hidden_states.shape[0],
         )
@@ -1160,7 +1155,7 @@ class ArlowPreTrainedModel(PreTrainedModel):
 class ArlowVLVisionModel(ArlowPreTrainedModel):
     """
     Vision encoder for Arlow vision-language models.
-    
+
     This model processes images and videos into continuous embeddings that can be
     forwarded to the language model. It is used internally by ArlowModel.
     """
@@ -1218,7 +1213,6 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
         Returns:
             vision_embeddings: (total_tokens, hidden_size)
         """
-        
 
         # Patch embedding
         hidden_states = self.patch_embed(pixel_values)  # (batch, num_patches, embed_dim)
@@ -1265,7 +1259,7 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
 class ArlowTextModel(ArlowPreTrainedModel):
     """
     Text-only decoder model for Arlow.
-    
+
     This is the language decoder part of Arlow, used internally by the multimodal ArlowModel
     and standalone in ArlowForCausalLM for text-only tasks.
     """
@@ -1310,7 +1304,6 @@ class ArlowTextModel(ArlowPreTrainedModel):
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
-        
         # Handle input_ids vs inputs_embeds
         if input_ids is None and inputs_embeds is None:
             raise ValueError("You must specify either input_ids or inputs_embeds")
@@ -1368,7 +1361,7 @@ class ArlowTextModel(ArlowPreTrainedModel):
                 causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
 
         hidden_states = inputs_embeds
-        
+
         # Use provided position_embeddings if available (from multimodal M-ROPE), otherwise compute standard RoPE
         if position_embeddings is None:
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
@@ -1427,7 +1420,7 @@ class ArlowTextModel(ArlowPreTrainedModel):
 class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
     """
     Arlow model for causal language modeling (text-only, no vision).
-    
+
     This model uses ArlowTextModel internally and is designed for pure text generation tasks.
     For multimodal (vision + text) tasks, use ArlowForConditionalGeneration instead.
     """
@@ -1550,10 +1543,10 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
 class ArlowModel(ArlowPreTrainedModel):
     """
     Main Arlow vision-language model (VLM) combining vision encoder and text decoder.
-    
+
     This is the primary model class for Arlow that handles both image/video and text inputs.
     It follows the Qwen2VL architecture pattern with vision and language components.
-    
+
     For text-only tasks, use ArlowTextModel or ArlowForCausalLM instead.
     """
 
@@ -1906,12 +1899,12 @@ class ArlowModel(ArlowPreTrainedModel):
 class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
     """
     Arlow model for conditional generation with vision-language inputs (VLM).
-    
+
     This is the main model for multimodal vision-language tasks. It uses ArlowModel internally
     and adds a language modeling head for text generation conditioned on vision inputs.
-    
+
     For text-only generation, use ArlowForCausalLM instead.
-    
+
     Example:
         ```python
         >>> from transformers import AutoProcessor, ArlowForConditionalGeneration
@@ -2101,7 +2094,7 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
             prefill_stage = (cache_position is not None and cache_position[0] == 0) or cache_length == 0
             if prefill_stage or getattr(self.model, "rope_deltas", None) is None:
                 vision_positions, rope_deltas = self.model.get_rope_index(
-                    model_inputs.get("input_ids", None),
+                    model_inputs.get("input_ids"),
                     image_grid_thw=image_grid_thw,
                     video_grid_thw=video_grid_thw,
                     attention_mask=attention_mask,
@@ -2120,7 +2113,11 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
                 else:
                     vision_positions = None
 
-            if "position_ids" in model_inputs and model_inputs["position_ids"] is not None and vision_positions is not None:
+            if (
+                "position_ids" in model_inputs
+                and model_inputs["position_ids"] is not None
+                and vision_positions is not None
+            ):
                 text_positions = model_inputs["position_ids"][None, ...]
                 model_inputs["position_ids"] = torch.cat([text_positions, vision_positions], dim=0)
 

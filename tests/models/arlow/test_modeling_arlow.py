@@ -613,7 +613,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
     def test_text_model_accepts_4d_position_ids(self):
         """Ensure text model supports packed 4D position_ids [text; 3D mrope]."""
-        from transformers.models.arlow.modeling_arlow import ArlowTextModel, ArlowTextConfig
+        from transformers.models.arlow.modeling_arlow import ArlowTextConfig, ArlowTextModel
 
         text_config = ArlowTextConfig(
             vocab_size=1000,

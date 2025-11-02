@@ -582,7 +582,7 @@ class ArlowVLAttention(nn.Module):
             hidden_states: (total_tokens, embed_dim)
             position_embeddings: (cos, sin) for RoPE
         """
-        batch_size, seq_length = (
+        _batch_size, seq_length = (
             hidden_states.shape[0],
             hidden_states.shape[1] if hidden_states.dim() > 2 else hidden_states.shape[0],
         )
@@ -1396,16 +1396,13 @@ class ArlowModel(ArlowPreTrainedModel):
         use_cache: Optional[bool] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> ArlowMultimodalModelOutputWithPast:
-        """
-        Forward pass combining vision and text modalities.
-
-        Args:
-            input_ids: Text token IDs with image/video placeholder tokens
-            pixel_values: Image tensor (batch, channels, height, width)
-            pixel_values_videos: Video tensor (batch, channels, frames, height, width)
-            image_grid_thw: Image grid dimensions (num_images, 3) as [temporal=1, height, width]
-            video_grid_thw: Video grid dimensions (num_videos, 3) as [temporal, height, width]
-            rope_deltas: Rope index difference for M-ROPE
+        r"""
+        image_grid_thw (<fill_type>):
+            <fill_docstring>
+        video_grid_thw (<fill_type>):
+            <fill_docstring>
+        rope_deltas (<fill_type>):
+            <fill_docstring>
         """
         # Get text embeddings
         if inputs_embeds is None:
@@ -1547,14 +1544,13 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs: Unpack[TransformersKwargs],
     ) -> ArlowMultimodalCausalLMOutputWithPast:
-        """
-        Forward pass for multimodal conditional generation.
-
-        Args:
-            image_grid_thw (`torch.LongTensor`, *optional*):
-                Image grid dimensions of shape `(num_images, 3)` as `[temporal=1, height, width]`.
-            video_grid_thw (`torch.LongTensor`, *optional*):
-                Video grid dimensions of shape `(num_videos, 3)` as `[temporal, height, width]`.
+        r"""
+        image_grid_thw (`torch.LongTensor`, *optional*):
+            Image grid dimensions of shape `(num_images, 3)` as `[temporal=1, height, width]`.
+        video_grid_thw (`torch.LongTensor`, *optional*):
+            Video grid dimensions of shape `(num_videos, 3)` as `[temporal, height, width]`.
+        rope_deltas (<fill_type>):
+            <fill_docstring>
 
         Example:
         ```python
