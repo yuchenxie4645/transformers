@@ -17,34 +17,34 @@ class ArlowVisionConfig(PreTrainedConfig):
     Configuration for the vision transformer component of Arlow multimodal models.
 
     Args:
-            depth (`int`, *optional*, defaults to 32):
-                Number of hidden layers in the vision transformer.
-            embed_dim (`int`, *optional*, defaults to 1280):
-                Dimensionality of the vision encoder embeddings.
-            hidden_size (`int`, *optional*, defaults to 3584):
-                Dimensionality after vision projection to match text model.
-            hidden_act (`str`, *optional*, defaults to `"gelu_pytorch_tanh"`):
-                The non-linear activation function in the vision encoder.
-            mlp_ratio (`int`, *optional*, defaults to 4):
-                Ratio of mlp hidden dim to embedding dim.
-            num_heads (`int`, *optional*, defaults to 16):
-                Number of attention heads in the vision transformer.
-            in_channels (`int`, *optional*, defaults to 3):
-                Number of input image channels.
-            patch_size (`int`, *optional*, defaults to 14):
-                Size of image patches.
-            spatial_merge_size (`int`, *optional*, defaults to 2):
-                Spatial merge factor for patch merging.
-            temporal_patch_size (`int`, *optional*, defaults to 2):
-                Temporal patch size for video inputs.
-            use_deformable_attention (`bool`, *optional*, defaults to `False`):
-                Whether to use deformable attention for high-resolution regions. **[Not yet implemented]**
-            use_progressive_patches (`bool`, *optional*, defaults to `False`):
-                Whether to use progressive patch embeddings for multi-scale. **[Not yet implemented]**
-            token_pruning_ratio (`float`, *optional*, defaults to 0.0):
-                Ratio of tokens to prune per region (0.0 means no pruning). **[Not yet implemented]**
-            initializer_range (`float`, *optional*, defaults to 0.02):
-                Standard deviation for weight initialization.
+        depth (`int`, *optional*, defaults to 32):
+            Number of hidden layers in the vision transformer.
+        embed_dim (`int`, *optional*, defaults to 1280):
+            Dimensionality of the vision encoder embeddings.
+        hidden_size (`int`, *optional*, defaults to 3584):
+            Dimensionality after vision projection to match text model.
+        hidden_act (`str`, *optional*, defaults to `"gelu_pytorch_tanh"`):
+            The non-linear activation function in the vision encoder.
+        mlp_ratio (`int`, *optional*, defaults to 4):
+            Ratio of mlp hidden dim to embedding dim.
+        num_heads (`int`, *optional*, defaults to 16):
+            Number of attention heads in the vision transformer.
+        in_channels (`int`, *optional*, defaults to 3):
+            Number of input image channels.
+        patch_size (`int`, *optional*, defaults to 14):
+            Size of image patches.
+        spatial_merge_size (`int`, *optional*, defaults to 2):
+            Spatial merge factor for patch merging.
+        temporal_patch_size (`int`, *optional*, defaults to 2):
+            Temporal patch size for video inputs.
+        use_deformable_attention (`bool`, *optional*, defaults to False):
+            Whether to use deformable attention for high-resolution regions. **[Not yet implemented]**
+        use_progressive_patches (`bool`, *optional*, defaults to False):
+            Whether to use progressive patch embeddings for multi-scale. **[Not yet implemented]**
+        token_pruning_ratio (`float`, *optional*, defaults to 0.0):
+            Ratio of tokens to prune per region (0.0 means no pruning). **[Not yet implemented]**
+        initializer_range (`float`, *optional*, defaults to 0.02):
+            Standard deviation for weight initialization.
     """
 
     model_type = "arlow"
@@ -134,6 +134,7 @@ class ArlowTextConfig(PreTrainedConfig):
         sliding_window=4096,
         max_window_layers=28,
         layer_types=None,
+        mrope_sections=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -155,10 +156,23 @@ class ArlowTextConfig(PreTrainedConfig):
         self.mlp_dropout = mlp_dropout
         self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
 
+        # Provide default M-ROPE sections for text model as well
+        if mrope_sections is None:
+            # Split head_dim approximately equally across [T, H, W]
+            t = max(1, self.head_dim // 3)
+            h = max(1, (self.head_dim - t) // 2)
+            w = max(1, self.head_dim - t - h)
+            # Adjust last to ensure exact sum
+            if t + h + w != self.head_dim:
+                w = self.head_dim - t - h
+            self.mrope_sections = [t, h, w]
+        else:
+            self.mrope_sections = mrope_sections
+
         # Validate rope parameters
         if self.rope_parameters is not None and "type" in self.rope_parameters:
             self.rope_parameters["rope_type"] = self.rope_parameters["type"]
-        rope_config_validation(self)
+        rope_config_validation(self, ignore_keys={"mrope_sections"})
 
         # Layer types configuration (supports full/sliding attention)
         self.use_sliding_window = use_sliding_window
@@ -196,92 +210,91 @@ class ArlowConfig(PreTrainedConfig):
     Configuration objects inherit from [`PretrainedConfig`] and control model outputs.
 
     Args:
-            vocab_size (`int`, *optional*, defaults to 131072):
-                Vocabulary size of the model.
-            hidden_size (`int`, *optional*, defaults to 2304):
-                Dimension of hidden representations.
-            intermediate_size (`int`, *optional*, defaults to 9216):
-                Dimension of MLP representations.
-            num_hidden_layers (`int`, *optional*, defaults to 32):
-                Number of hidden layers in the Transformer decoder.
-            num_attention_heads (`int`, *optional*, defaults to 24):
-                Number of attention heads per layer.
-            num_key_value_heads (`int`, *optional*, defaults to 4):
-                Number of key_value heads for Grouped Query Attention.
-            hidden_act (`str`, *optional*, defaults to `"silu"`):
-                Non-linear activation function.
-            max_position_embeddings (`int`, *optional*, defaults to 2048):
-                Maximum sequence length.
-            initializer_range (`float`, *optional*, defaults to 0.02):
-                Standard deviation for weight initialization.
-            rms_norm_eps (`float`, *optional*, defaults to 1e-06):
-                Epsilon for RMS normalization layers.
-            use_cache (`bool`, *optional*, defaults to `True`):
-                Whether to return past key/values for faster decoding.
-            pad_token_id (`int`, *optional*):
-                Padding token ID.
-            bos_token_id (`int`, *optional*):
-                Beginning of sequence token ID.
-            eos_token_id (`int`, *optional*):
-                End of sequence token ID.
-            tie_word_embeddings (`bool`, *optional*, defaults to `False`):
-                Whether to tie input/output embeddings.
-            rope_theta (`float`, *optional*, defaults to 100000.0):
-                Base period of RoPE embeddings.
-            rope_parameters (`Dict`, *optional*):
-                RoPE scaling configuration. For backwards compatibility, `rope_scaling` is also accepted.
-            rope_scaling (`<fill_type>`, *optional*): <fill_docstring>
-            attention_bias (`bool`, *optional*, defaults to `False`):
-                Whether to use bias in attention projections.
-            attention_dropout (`float`, *optional*, defaults to 0.0):
-                Dropout ratio for attention probabilities.
-            resid_dropout (`float`, *optional*, defaults to 0.0):
-                Dropout ratio for residual connections.
-            mlp_dropout (`float`, *optional*, defaults to 0.0):
-                Dropout ratio for MLP layers.
-            head_dim (`int`, *optional*):
-                Attention head dimension. Defaults to hidden_size // num_attention_heads.
-            use_sliding_window (`bool`, *optional*, defaults to `False`):
-                Whether to use sliding window attention.
-            sliding_window (`int`, *optional*, defaults to 4096):
-                Sliding window size.
-            max_window_layers (`int`, *optional*, defaults to 28):
-                Number of layers using full attention before switching to sliding window.
-            layer_types (`list`, *optional*):
-                Attention pattern for each layer.
-            vision_config (`Union[PreTrainedConfig, dict]`, *optional*):
-                Vision backbone configuration.
-            mm_tokens_per_image (`int`, *optional*, defaults to 256):
-                Number of tokens per image after vision projection.
-            mm_tokens_per_video (`int`, *optional*, defaults to 128):
-                Number of tokens per video after temporal resampling.
-            video_max_frames (`int`, *optional*, defaults to 64):
-                Maximum number of video frames to extract.
-            video_sample_strategy (`str`, *optional*, defaults to `"uniform"`):
-                Video frame sampling strategy: "uniform", "motion_adaptive", or "fps_based".
-            dynamic_resolution (`bool`, *optional*, defaults to `True`):
-                Whether to use dynamic resolution for images.
-            pan_and_scan (`bool`, *optional*, defaults to `False`):
-                Whether to use pan-and-scan to keep token budgets constant.
-            timestamp_alignment (`bool`, *optional*, defaults to `False`):
-                Whether to enable timestamp supervision for video grounding.
-            use_gated_cross_attention (`bool`, *optional*, defaults to `False`):
-                Whether to use gated cross-attention in upper layers.
-            gated_cross_attention_start_layer (`int`, *optional*):
-                Layer index to start gated cross-attention (if enabled).
-            image_token_id (`int`, *optional*):
-                Token ID for image placeholders.
-            video_token_id (`int`, *optional*):
-                Token ID for video placeholders.
-            vision_start_token_id (`int`, *optional*):
-                Token ID marking start of vision input.
-            vision_end_token_id (`int`, *optional*):
-                Token ID marking end of vision input.
-            frame_separator_token_id (`int`, *optional*):
-                Token ID for separating video frames.
-            mrope_sections (`list`, *optional*):
-                M-ROPE sections for [temporal, height, width] dimensions.
-                Defaults to split based on head_dim.
+        vocab_size (`int`, *optional*, defaults to 131072):
+            Vocabulary size of the model.
+        hidden_size (`int`, *optional*, defaults to 2304):
+            Dimension of hidden representations.
+        intermediate_size (`int`, *optional*, defaults to 9216):
+            Dimension of MLP representations.
+        num_hidden_layers (`int`, *optional*, defaults to 32):
+            Number of hidden layers in the Transformer decoder.
+        num_attention_heads (`int`, *optional*, defaults to 24):
+            Number of attention heads per layer.
+        num_key_value_heads (`int`, *optional*, defaults to 4):
+            Number of key_value heads for Grouped Query Attention.
+        hidden_act (`str`, *optional*, defaults to `"silu"`):
+            Non-linear activation function.
+        max_position_embeddings (`int`, *optional*, defaults to 2048):
+            Maximum sequence length.
+        initializer_range (`float`, *optional*, defaults to 0.02):
+            Standard deviation for weight initialization.
+        rms_norm_eps (`float`, *optional*, defaults to 1e-06):
+            Epsilon for RMS normalization layers.
+        use_cache (`bool`, *optional*, defaults to `True`):
+            Whether to return past key/values for faster decoding.
+        pad_token_id (`int`, *optional*):
+            Padding token ID.
+        bos_token_id (`int`, *optional*):
+            Beginning of sequence token ID.
+        eos_token_id (`int`, *optional*):
+            End of sequence token ID.
+        tie_word_embeddings (`bool`, *optional*, defaults to `False`):
+            Whether to tie input/output embeddings.
+        rope_theta (`float`, *optional*, defaults to 100000.0):
+            Base period of RoPE embeddings.
+        rope_parameters (`Dict`, *optional*):
+            RoPE scaling configuration. For backwards compatibility, `rope_scaling` is also accepted.
+        attention_bias (`bool`, *optional*, defaults to `False`):
+            Whether to use bias in attention projections.
+        attention_dropout (`float`, *optional*, defaults to 0.0):
+            Dropout ratio for attention probabilities.
+        resid_dropout (`float`, *optional*, defaults to 0.0):
+            Dropout ratio for residual connections.
+        mlp_dropout (`float`, *optional*, defaults to 0.0):
+            Dropout ratio for MLP layers.
+        head_dim (`int`, *optional*):
+            Attention head dimension. Defaults to hidden_size // num_attention_heads.
+        use_sliding_window (`bool`, *optional*, defaults to `False`):
+            Whether to use sliding window attention.
+        sliding_window (`int`, *optional*, defaults to 4096):
+            Sliding window size.
+        max_window_layers (`int`, *optional*, defaults to 28):
+            Number of layers using full attention before switching to sliding window.
+        layer_types (`list`, *optional*):
+            Attention pattern for each layer.
+        vision_config (`Union[PreTrainedConfig, dict]`, *optional*):
+            Vision backbone configuration.
+        mm_tokens_per_image (`int`, *optional*, defaults to 256):
+            Number of tokens per image after vision projection.
+        mm_tokens_per_video (`int`, *optional*, defaults to 128):
+            Number of tokens per video after temporal resampling.
+        video_max_frames (`int`, *optional*, defaults to 64):
+            Maximum number of video frames to extract.
+        video_sample_strategy (`str`, *optional*, defaults to "uniform"):
+            Video frame sampling strategy: "uniform", "motion_adaptive", or "fps_based".
+        dynamic_resolution (`bool`, *optional*, defaults to True):
+            Whether to use dynamic resolution for images.
+        pan_and_scan (`bool`, *optional*, defaults to False):
+            Whether to use pan-and-scan to keep token budgets constant.
+        timestamp_alignment (`bool`, *optional*, defaults to False):
+            Whether to enable timestamp supervision for video grounding.
+        use_gated_cross_attention (`bool`, *optional*, defaults to False):
+            Whether to use gated cross-attention in upper layers.
+        gated_cross_attention_start_layer (`int`, *optional*):
+            Layer index to start gated cross-attention (if enabled).
+        image_token_id (`int`, *optional*):
+            Token ID for image placeholders.
+        video_token_id (`int`, *optional*):
+            Token ID for video placeholders.
+        vision_start_token_id (`int`, *optional*):
+            Token ID marking start of vision input.
+        vision_end_token_id (`int`, *optional*):
+            Token ID marking end of vision input.
+        frame_separator_token_id (`int`, *optional*):
+            Token ID for separating video frames.
+        mrope_sections (`list`, *optional*):
+            M-ROPE sections for [temporal, height, width] dimensions.
+            Defaults to split based on head_dim.
     """
 
     model_type = "arlow"
@@ -383,10 +396,13 @@ class ArlowConfig(PreTrainedConfig):
 
         # M-ROPE configuration: default sections based on head_dim
         if mrope_sections is None:
-            # Split head_dim into temporal, height, width sections
-            # Default: temporal=16, rest split between h/w
-            remaining = self.head_dim - 16
-            self.mrope_sections = [16, remaining // 2, remaining - remaining // 2]
+            # Split head_dim into temporal, height, width sections with small-safe defaults
+            t = max(1, self.head_dim // 3)
+            h = max(1, (self.head_dim - t) // 2)
+            w = max(1, self.head_dim - t - h)
+            if t + h + w != self.head_dim:
+                w = self.head_dim - t - h
+            self.mrope_sections = [t, h, w]
         else:
             self.mrope_sections = mrope_sections
 

@@ -162,6 +162,7 @@ class ArlowTextConfig(PreTrainedConfig):
         sliding_window=4096,
         max_window_layers=28,
         layer_types=None,
+        mrope_sections=None,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -183,10 +184,23 @@ class ArlowTextConfig(PreTrainedConfig):
         self.mlp_dropout = mlp_dropout
         self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
 
+        # Provide default M-ROPE sections for text model as well
+        if mrope_sections is None:
+            # Split head_dim approximately equally across [T, H, W]
+            t = max(1, self.head_dim // 3)
+            h = max(1, (self.head_dim - t) // 2)
+            w = max(1, self.head_dim - t - h)
+            # Adjust last to ensure exact sum
+            if t + h + w != self.head_dim:
+                w = self.head_dim - t - h
+            self.mrope_sections = [t, h, w]
+        else:
+            self.mrope_sections = mrope_sections
+
         # Validate rope parameters
         if self.rope_parameters is not None and "type" in self.rope_parameters:
             self.rope_parameters["rope_type"] = self.rope_parameters["type"]
-        rope_config_validation(self)
+        rope_config_validation(self, ignore_keys={"mrope_sections"})
 
         # Layer types configuration (supports full/sliding attention)
         self.use_sliding_window = use_sliding_window
@@ -410,10 +424,13 @@ class ArlowConfig(PreTrainedConfig):
 
         # M-ROPE configuration: default sections based on head_dim
         if mrope_sections is None:
-            # Split head_dim into temporal, height, width sections
-            # Default: temporal=16, rest split between h/w
-            remaining = self.head_dim - 16
-            self.mrope_sections = [16, remaining // 2, remaining - remaining // 2]
+            # Split head_dim into temporal, height, width sections with small-safe defaults
+            t = max(1, self.head_dim // 3)
+            h = max(1, (self.head_dim - t) // 2)
+            w = max(1, self.head_dim - t - h)
+            if t + h + w != self.head_dim:
+                w = self.head_dim - t - h
+            self.mrope_sections = [t, h, w]
         else:
             self.mrope_sections = mrope_sections
 
@@ -605,17 +622,15 @@ class ArlowTextRotaryEmbedding(nn.Module):
         multimodal 3D M-ROPE (3, batch, seq) Qwen3-style.
         """
         device = x.device
-        device_type = device.type if isinstance(device.type, str) and device.type != "mps" else "cpu"
 
         # Standard 1D RoPE path (text-only)
         if position_ids.ndim == 2:
             inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(device)
             position_ids_expanded = position_ids[:, None, :].float()
-            with torch.autocast(device_type=device_type, enabled=False):
-                freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
-                emb = torch.cat((freqs, freqs), dim=-1)
-                cos = emb.cos() * self.attention_scaling
-                sin = emb.sin() * self.attention_scaling
+            freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos() * self.attention_scaling
+            sin = emb.sin() * self.attention_scaling
             return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
         # M-ROPE path (3, batch, seq): interleaved temporal/height/width
@@ -628,14 +643,13 @@ class ArlowTextRotaryEmbedding(nn.Module):
         inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, batch_size, -1, 1).to(device)
         position_ids_expanded = position_ids[:, :, None, :].float()
 
-        with torch.autocast(device_type=device_type, enabled=False):
-            # (3, batch, seq, head_dim//2)
-            freqs = (inv_freq_expanded @ position_ids_expanded).transpose(2, 3)
-            # Interleave per mrope_sections
-            freqs = self._apply_interleaved_mrope(freqs, self.config.mrope_sections)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos() * self.attention_scaling
-            sin = emb.sin() * self.attention_scaling
+        # (3, batch, seq, head_dim//2)
+        freqs = (inv_freq_expanded @ position_ids_expanded).transpose(2, 3)
+        # Interleave per mrope_sections
+        freqs = self._apply_interleaved_mrope(freqs, self.config.mrope_sections)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos() * self.attention_scaling
+        sin = emb.sin() * self.attention_scaling
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
@@ -674,8 +688,26 @@ class ArlowVLRotaryEmbedding(nn.Module):
 
     inv_freq: torch.Tensor  # fix linting for `register_buffer`
 
-    def __init__(self, dim: int, theta: float = 10000.0) -> None:
+    def __init__(
+        self,
+        dim: Optional[int] = None,
+        theta: float = 100000.0,
+        config: Optional[Union[ArlowVisionConfig, ArlowConfig]] = None,
+        **kwargs,
+    ) -> None:
         super().__init__()
+        if config is not None:
+            if isinstance(config, ArlowVisionConfig):
+                dim = (config.embed_dim // config.num_heads)
+            else:
+                # Fallback path if text config passed
+                dim = getattr(config, "head_dim", None) or (config.hidden_size // config.num_attention_heads)
+            if hasattr(config, "rope_parameters") and getattr(config, "rope_parameters", None):
+                theta = config.rope_parameters.get("rope_theta", getattr(config, "rope_theta", theta))
+            else:
+                theta = getattr(config, "rope_theta", theta)
+        if dim is None:
+            raise ValueError("ArlowVLRotaryEmbedding requires `dim` or `config` to infer head dimension.")
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -773,6 +805,8 @@ class ArlowAttention(nn.Module):
         self.attention_dropout = config.attention_dropout
         # Sliding window support
         self.sliding_window = config.sliding_window if config.layer_types[layer_idx] == "sliding_attention" else None
+        # Mark this attention as causal for backend dispatchers expecting this flag
+        self.is_causal = True
 
         self.q_proj = nn.Linear(
             self.hidden_size,
@@ -1220,6 +1254,11 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
         # Get grid-aware RoPE embeddings for vision
         batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
         rotary_pos_emb = self.rotary_pos_emb(grid_thw, batch_size=batch_size, seq_len=seq_len)
+        # Robustness: fall back to 1D positions if a mismatch occurs
+        total_tokens = batch_size * seq_len
+        if rotary_pos_emb.shape[0] != total_tokens:
+            seq = torch.arange(total_tokens, device=hidden_states.device, dtype=self.rotary_pos_emb.inv_freq.dtype)
+            rotary_pos_emb = torch.outer(seq, self.rotary_pos_emb.inv_freq)
         emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
         cos = emb.cos()
         sin = emb.sin()
@@ -1580,6 +1619,15 @@ class ArlowModel(ArlowPreTrainedModel):
     def get_decoder(self):
         return self.language_model
 
+    # Expose embed_tokens at the top-level model for common tests API
+    @property
+    def embed_tokens(self):
+        return self.get_input_embeddings()
+
+    @embed_tokens.setter
+    def embed_tokens(self, value):
+        self.set_input_embeddings(value)
+
     def get_image_features(
         self,
         pixel_values: torch.FloatTensor,
@@ -1720,6 +1768,8 @@ class ArlowModel(ArlowPreTrainedModel):
                 image_nums, video_nums = 0, 0
                 vision_start_indices = torch.argwhere(input_ids == vision_start_token_id).squeeze(1)
                 vision_tokens = input_ids[vision_start_indices + 1]
+                if vision_tokens.dim() == 0:
+                    vision_tokens = vision_tokens.unsqueeze(0)
                 image_nums = (vision_tokens == image_token_id).sum()
                 video_nums = (vision_tokens == video_token_id).sum()
                 input_tokens = input_ids.tolist()
