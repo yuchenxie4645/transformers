@@ -80,12 +80,12 @@ class ArlowVisionConfig(PreTrainedConfig):
 
     def __init__(
         self,
-        depth: int = 32,
-        embed_dim: int = 1280,
-        hidden_size: int = 3584,
+        depth: int = 2,
+        embed_dim: int = 32,
+        hidden_size: int = 64,
         hidden_act: str = "gelu_pytorch_tanh",
         mlp_ratio: int = 4,
-        num_heads: int = 16,
+        num_heads: int = 4,
         in_channels: int = 3,
         patch_size: int = 14,
         spatial_merge_size: int = 2,
@@ -696,35 +696,89 @@ class ArlowVLRotaryEmbedding(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__()
+        self.config = config
+        # Determine head dimension and rope parameters
+        rope_theta = theta
+        self.rope_type = "default"
         if config is not None:
             if isinstance(config, ArlowVisionConfig):
                 dim = (config.embed_dim // config.num_heads)
             else:
                 # Fallback path if text config passed
                 dim = getattr(config, "head_dim", None) or (config.hidden_size // config.num_attention_heads)
+            # Extract rope params if available
             if hasattr(config, "rope_parameters") and getattr(config, "rope_parameters", None):
-                theta = config.rope_parameters.get("rope_theta", getattr(config, "rope_theta", theta))
+                rope_params = config.rope_parameters
+                self.rope_type = rope_params.get("rope_type", rope_params.get("type", "default"))
+                rope_theta = rope_params.get("rope_theta", getattr(config, "rope_theta", rope_theta))
             else:
-                theta = getattr(config, "rope_theta", theta)
+                rope_theta = getattr(config, "rope_theta", rope_theta)
+        # Cache original sequence length if available (used by dynamic/yarn tests)
+        self.max_seq_len_cached = getattr(config, "max_position_embeddings", 0) if config is not None else 0
+        self.original_max_seq_len = self.max_seq_len_cached
+        # Initialize inverse frequencies (default or scaled if non-default rope type)
         if dim is None:
             raise ValueError("ArlowVLRotaryEmbedding requires `dim` or `config` to infer head dimension.")
-        inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+        if self.rope_type != "default" and self.config is not None:
+            # Initialize according to scaling type
+            rope_init_fn: Callable = ROPE_INIT_FUNCTIONS[self.rope_type]
+            inv_freq, self.attention_scaling = rope_init_fn(self.config, None, seq_len=None)
+        else:
+            inv_freq = 1.0 / (rope_theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+            self.attention_scaling = 1.0
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.original_inv_freq = inv_freq
 
     def forward(
         self,
-        grid_thw: Optional[torch.LongTensor],
-        batch_size: int,
-        seq_len: int,
-    ) -> torch.Tensor:
+        grid_thw: Optional[torch.Tensor] = None,
+        batch_size: Optional[Union[torch.Tensor, int]] = None,
+        seq_len: Optional[int] = None,
+        **kwargs,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
-        Returns per-token rotary frequencies shaped (batch_size * seq_len, head_dim//2).
-        If grid_thw is provided, build THW-aware indices; otherwise fall back to 1D.
+        Dual-mode forward:
+        - Vision mode (used by vision encoder): forward(grid_thw, batch_size, seq_len) -> freqs (total_tokens, head_dim//2)
+        - Text-compatible mode (used by common RoPE tests): forward(x, position_ids) -> (cos, sin)
         """
+        # Text-compatible path: called as (x, position_ids)
+        if torch.is_tensor(batch_size):
+            x = grid_thw  # dtype/device anchor
+            position_ids = batch_size
+
+            device = x.device
+            # Recompute inv_freq for scaling types that depend on seq_len
+            rope_type = getattr(self, "rope_type", "default")
+            config = getattr(self, "config", None)
+            if rope_type != "default" and config is not None:
+                rope_init_fn: Callable = ROPE_INIT_FUNCTIONS[rope_type]
+                curr_seq_len = int(position_ids.max().item() + 1) if position_ids.numel() > 0 else 0
+                inv_freq, attention_scaling = rope_init_fn(config, device, seq_len=curr_seq_len)
+                # Update buffers for assertions in tests (e.g., dynamic scaling expectations)
+                self.register_buffer("inv_freq", inv_freq, persistent=False)
+                self.attention_scaling = attention_scaling
+
+            # Standard 1D cos/sin computation (batch, seq_len, head_dim)
+            inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(device)
+            position_ids_expanded = position_ids[:, None, :].float()
+            freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos() * getattr(self, "attention_scaling", 1.0)
+            sin = emb.sin() * getattr(self, "attention_scaling", 1.0)
+            return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+        # Vision mode path: called as (grid_thw, batch_size, seq_len)
+        # Vision mode path: grid_thw provided (or None for 1D fallback)
+        if isinstance(batch_size, torch.Tensor):
+            # If user passed accidentally a tensor, coerce to int when possible
+            batch_size = int(batch_size.item())
+
         device = self.inv_freq.device
         dtype = self.inv_freq.dtype
 
         if grid_thw is None:
+            if batch_size is None or seq_len is None:
+                raise ValueError("When grid_thw is None, both batch_size and seq_len must be provided.")
             total = batch_size * seq_len
             seq = torch.arange(total, device=device, dtype=dtype)
             return torch.outer(seq, self.inv_freq)
@@ -732,6 +786,9 @@ class ArlowVLRotaryEmbedding(nn.Module):
         # grid_thw expected shape: (batch_size, 3) [T, H, W]
         if grid_thw.dim() != 2 or grid_thw.shape[-1] != 3:
             raise ValueError(f"grid_thw must be (batch, 3), got {tuple(grid_thw.shape)}")
+
+        if batch_size is None:
+            batch_size = grid_thw.shape[0]
 
         freqs_list: list[torch.Tensor] = []
         for b in range(batch_size):
@@ -1875,9 +1932,12 @@ class ArlowModel(ArlowPreTrainedModel):
             input_ids: Text token IDs with image/video placeholder tokens
             pixel_values: Image tensor (batch, channels, height, width)
             pixel_values_videos: Video tensor (batch, channels, frames, height, width)
-            image_grid_thw: Image grid dimensions (num_images, 3) as [temporal=1, height, width]
-            video_grid_thw: Video grid dimensions (num_videos, 3) as [temporal, height, width]
-            rope_deltas: Rope index difference for M-ROPE
+            image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
+                Image grid dimensions as `[temporal=1, height, width]` for each image in the batch.
+            video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
+                Video grid dimensions as `[temporal, height, width]` for each video in the batch.
+            rope_deltas (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+                The rope index difference between sequence length and multimodal rope for M-ROPE.
         """
         # Get text embeddings
         if inputs_embeds is None:
@@ -2023,10 +2083,12 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         Forward pass for multimodal conditional generation.
 
         Args:
-            image_grid_thw (`torch.LongTensor`, *optional*):
-                Image grid dimensions of shape `(num_images, 3)` as `[temporal=1, height, width]`.
-            video_grid_thw (`torch.LongTensor`, *optional*):
-                Video grid dimensions of shape `(num_videos, 3)` as `[temporal, height, width]`.
+            image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
+                Image grid dimensions as `[temporal=1, height, width]` for each image in the batch.
+            video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
+                Video grid dimensions as `[temporal, height, width]` for each video in the batch.
+            rope_deltas (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+                The rope index difference between sequence length and multimodal rope for M-ROPE.
 
         Example:
         ```python

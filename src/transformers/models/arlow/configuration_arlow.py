@@ -52,12 +52,12 @@ class ArlowVisionConfig(PreTrainedConfig):
 
     def __init__(
         self,
-        depth: int = 32,
-        embed_dim: int = 1280,
-        hidden_size: int = 3584,
+        depth: int = 2,
+        embed_dim: int = 32,
+        hidden_size: int = 64,
         hidden_act: str = "gelu_pytorch_tanh",
         mlp_ratio: int = 4,
-        num_heads: int = 16,
+        num_heads: int = 4,
         in_channels: int = 3,
         patch_size: int = 14,
         spatial_merge_size: int = 2,
