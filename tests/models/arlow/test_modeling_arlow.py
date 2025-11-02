@@ -19,7 +19,7 @@ if is_torch_available():
         ArlowForTokenClassification,
         ArlowModel,
     )
-    from transformers.models.arlow.modeling_arlow import ArlowRotaryEmbedding
+    from transformers.models.arlow.modeling_arlow import ArlowTextRotaryEmbedding
 
 
 class ArlowModelTester(CausalLMModelTester):
@@ -56,7 +56,7 @@ class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
     test_headmasking = False
     test_pruning = False
     model_tester_class = ArlowModelTester
-    rotary_embedding_layer = ArlowRotaryEmbedding  # Enables RoPE tests if set
+    rotary_embedding_layer = ArlowTextRotaryEmbedding  # Enables RoPE tests if set
 
     # Need to use `0.8` instead of `0.9` for `test_cpu_offload`
     # This is because we are hitting edge cases with the causal_mask buffer
@@ -611,9 +611,86 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
         self.assertEqual(position_ids.shape[1], input_ids.shape[0])  # batch
         self.assertEqual(rope_deltas.shape[0], input_ids.shape[0])  # batch
 
+    def test_text_model_accepts_4d_position_ids(self):
+        """Ensure text model supports packed 4D position_ids [text; 3D mrope]."""
+        from transformers.models.arlow.modeling_arlow import ArlowTextModel, ArlowTextConfig
+
+        text_config = ArlowTextConfig(
+            vocab_size=1000,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=128,
+        )
+        model = ArlowTextModel(text_config).to(torch_device).eval()
+
+        batch, seq = 1, 8
+        input_ids = torch.randint(0, text_config.vocab_size, (batch, seq), device=torch_device)
+        text_pos = torch.arange(seq, device=torch_device).unsqueeze(0).expand(batch, -1)
+        # dummy 3D mrope positions
+        vision_pos = torch.stack([text_pos, text_pos, text_pos], dim=0)
+        position_ids = torch.cat([text_pos.unsqueeze(0), vision_pos], dim=0)
+
+        with torch.no_grad():
+            outputs = model(input_ids=input_ids, position_ids=position_ids)
+
+        self.assertEqual(outputs.last_hidden_state.shape[:2], (batch, seq))
+
+    def test_vision_fa2_dispatch_runs_when_available(self):
+        """If FA2 is available, ensure vision path can dispatch without errors."""
+        try:
+            from transformers import is_flash_attn_available
+        except Exception:
+            return  # environment may not expose the helper; bail out silently
+
+        if not is_flash_attn_available():
+            self.skipTest("Flash Attention 2 not available in environment")
+
+        from transformers import ArlowForConditionalGeneration, ArlowVisionConfig
+
+        config = ArlowConfig(
+            vocab_size=1000,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=128,
+            image_token_id=10,
+            vision_start_token_id=11,
+            vision_end_token_id=12,
+            head_dim=16,
+            mrope_sections=[4, 6, 6],
+        )
+        config.vision_config = ArlowVisionConfig(
+            depth=2,
+            embed_dim=32,
+            hidden_size=64,
+            num_heads=4,
+            patch_size=14,
+            spatial_merge_size=2,
+            temporal_patch_size=2,
+        )
+        model = ArlowForConditionalGeneration(config).to(torch_device).eval()
+        # request FA2 on the vision side
+        model.model.visual.config._attn_implementation = "flash_attention_2"
+
+        input_ids = torch.tensor([[1, 2, 11, 10, 12, 3]], device=torch_device)
+        pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
+        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+
+        with torch.no_grad():
+            _ = model(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+            )
+
     def test_vision_encoder_standalone(self):
         """Test vision encoder as a standalone component."""
-        from transformers.models.arlow.modular_arlow import ArlowVisionConfig, ArlowVisionTransformerPretrainedModel
+        from transformers.models.arlow.modular_arlow import ArlowVisionConfig, ArlowVLVisionModel
 
         config = ArlowVisionConfig(
             depth=2,
@@ -625,7 +702,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
             temporal_patch_size=2,
         )
 
-        vision_model = ArlowVisionTransformerPretrainedModel._from_config(config)
+        vision_model = ArlowVLVisionModel._from_config(config)
         vision_model = vision_model.to(torch_device).eval()
 
         # Test image input

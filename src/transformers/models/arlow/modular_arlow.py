@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional, Union
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -10,7 +11,7 @@ from torch.nn import LayerNorm
 
 from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache
-from ...configuration_utils import PretrainedConfig, layer_type_validation
+from ...configuration_utils import PreTrainedConfig, layer_type_validation
 from ...feature_extraction_utils import BatchFeature
 from ...generation import GenerationMixin
 from ...image_utils import ImageInput
@@ -39,7 +40,7 @@ if is_flash_attn_available():
 logger = logging.get_logger(__name__)
 
 
-class ArlowVisionConfig(PretrainedConfig):
+class ArlowVisionConfig(PreTrainedConfig):
     r"""
     Configuration for the vision transformer component of Arlow multimodal models.
 
@@ -65,16 +66,16 @@ class ArlowVisionConfig(PretrainedConfig):
         temporal_patch_size (`int`, *optional*, defaults to 2):
             Temporal patch size for video inputs.
         use_deformable_attention (`bool`, *optional*, defaults to False):
-            Whether to use deformable attention for high-resolution regions.
+            Whether to use deformable attention for high-resolution regions. **[Not yet implemented]**
         use_progressive_patches (`bool`, *optional*, defaults to False):
-            Whether to use progressive patch embeddings for multi-scale.
+            Whether to use progressive patch embeddings for multi-scale. **[Not yet implemented]**
         token_pruning_ratio (`float`, *optional*, defaults to 0.0):
-            Ratio of tokens to prune per region (0.0 means no pruning).
+            Ratio of tokens to prune per region (0.0 means no pruning). **[Not yet implemented]**
         initializer_range (`float`, *optional*, defaults to 0.02):
             Standard deviation for weight initialization.
     """
 
-    model_type = "arlow_vision"
+    model_type = "arlow"
     base_config_key = "vision_config"
 
     def __init__(
@@ -110,11 +111,108 @@ class ArlowVisionConfig(PretrainedConfig):
         self.use_progressive_patches = use_progressive_patches
         self.token_pruning_ratio = token_pruning_ratio
         self.initializer_range = initializer_range
+        
+        
+        # Warn if unsupported features are enabled
+        if self.use_deformable_attention:
+            logger.warning("use_deformable_attention is not yet implemented and will be ignored")
+        if self.use_progressive_patches:
+            logger.warning("use_progressive_patches is not yet implemented and will be ignored")
+        if self.token_pruning_ratio > 0.0:
+            logger.warning(f"token_pruning_ratio={self.token_pruning_ratio} is not yet implemented and will be ignored")
 
 
-class ArlowConfig(PretrainedConfig):
+class ArlowTextConfig(PreTrainedConfig):
     r"""
-    Configuration class for Arlow models (text-only and multimodal).
+    Text-only configuration for Arlow.
+
+    This configuration is used by text-only models like `ArlowTextModel` and `ArlowForCausalLM`.
+    """
+
+    model_type = "arlow_text"
+    base_config_key = "text_config"
+
+    def __init__(
+        self,
+        vocab_size=131072,
+        hidden_size=2304,
+        intermediate_size=9216,
+        num_hidden_layers=32,
+        num_attention_heads=24,
+        num_key_value_heads=4,
+        hidden_act="silu",
+        max_position_embeddings=2048,
+        initializer_range=0.02,
+        rms_norm_eps=1e-6,
+        use_cache=True,
+        pad_token_id=None,
+        bos_token_id=None,
+        eos_token_id=None,
+        tie_word_embeddings=False,
+        rope_theta=100000.0,
+        rope_parameters=None,
+        rope_scaling=None,  # Deprecated, use rope_parameters
+        attention_bias=False,
+        attention_dropout=0.0,
+        resid_dropout=0.0,
+        mlp_dropout=0.0,
+        head_dim=None,
+        use_sliding_window=False,
+        sliding_window=4096,
+        max_window_layers=28,
+        layer_types=None,
+        **kwargs,
+    ):
+        self.vocab_size = vocab_size
+        self.max_position_embeddings = max_position_embeddings
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
+        self.hidden_act = hidden_act
+        self.initializer_range = initializer_range
+        self.rms_norm_eps = rms_norm_eps
+        self.use_cache = use_cache
+        self.rope_theta = rope_theta
+        self.rope_parameters = rope_scaling or rope_parameters
+        self.attention_bias = attention_bias
+        self.attention_dropout = attention_dropout
+        self.resid_dropout = resid_dropout
+        self.mlp_dropout = mlp_dropout
+        self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
+
+        # Validate rope parameters
+        if self.rope_parameters is not None and "type" in self.rope_parameters:
+            self.rope_parameters["rope_type"] = self.rope_parameters["type"]
+        rope_config_validation(self)
+
+        # Layer types configuration (supports full/sliding attention)
+        self.use_sliding_window = use_sliding_window
+        self.sliding_window = sliding_window if self.use_sliding_window else None
+        self.max_window_layers = max_window_layers
+        self.layer_types = layer_types
+        if self.layer_types is None:
+            self.layer_types = [
+                "sliding_attention" if self.sliding_window is not None and i >= self.max_window_layers else "full_attention"
+                for i in range(self.num_hidden_layers)
+            ]
+        layer_type_validation(self.layer_types, self.num_hidden_layers)
+
+        super().__init__(
+            pad_token_id=pad_token_id,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            tie_word_embeddings=tie_word_embeddings,
+            **kwargs,
+        )
+
+class ArlowConfig(PreTrainedConfig):
+    r"""
+    Configuration class for Arlow multimodal models.
+
+    This is the configuration for the main Arlow vision-language model. Use ArlowTextConfig if you need
+    a text-only configuration.
 
     Instantiating with defaults yields configuration similar to Arlow-Base
     [yuchenxie/ArlowGPT-Base](https://huggingface.co/yuchenxie/ArlowGPT-Base).
@@ -174,7 +272,7 @@ class ArlowConfig(PretrainedConfig):
             Number of layers using full attention before switching to sliding window.
         layer_types (`list`, *optional*):
             Attention pattern for each layer.
-        vision_config (`Union[PretrainedConfig, dict]`, *optional*):
+        vision_config (`Union[PreTrainedConfig, dict]`, *optional*):
             Vision backbone configuration.
         mm_tokens_per_image (`int`, *optional*, defaults to 256):
             Number of tokens per image after vision projection.
@@ -420,7 +518,7 @@ else:
             return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
-class ArlowRotaryEmbedding(nn.Module):
+class ArlowTextRotaryEmbedding(nn.Module):
     def __init__(self, config: ArlowConfig, device=None):
         super().__init__()
         rope_config = getattr(config, "rope_parameters", None)
@@ -473,20 +571,69 @@ class ArlowRotaryEmbedding(nn.Module):
         inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to(device) / head_dim))
         return inv_freq, 1.0
 
+    def _apply_interleaved_mrope(self, freqs: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
+        """
+        Apply interleaved M-ROPE layout to 3D rotary frequencies.
+
+        Reorganizes from chunked [TTT...HHH...WWW] to interleaved [THTHWHTH...TT],
+        preserving frequency continuity per section.
+
+        Args:
+            freqs: (3, batch, seq_len, head_dim // 2)
+            mrope_section: [t_dim, h_dim, w_dim]
+
+        Returns:
+            (batch, seq_len, head_dim // 2) interleaved across dimensions
+        """
+        freqs_t = freqs[0]
+        # Interleave H and W into temporal layout per 3-slot cycle
+        for dim, offset in enumerate((1, 2), start=1):
+            length = mrope_section[dim] * 3
+            idx = slice(offset, length, 3)
+            freqs_t[..., idx] = freqs[dim, ..., idx]
+        return freqs_t
+
     @torch.no_grad()
     @dynamic_rope_update
     def forward(self, x: torch.Tensor, position_ids: torch.LongTensor):
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
-        position_ids_expanded = position_ids[:, None, :].float()
+        """
+        Compute rotary cos/sin. Supports both 1D text RoPE (batch, seq) and
+        multimodal 3D M-ROPE (3, batch, seq) Qwen3-style.
+        """
+        device = x.device
+        device_type = device.type if isinstance(device.type, str) and device.type != "mps" else "cpu"
 
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        # Standard 1D RoPE path (text-only)
+        if position_ids.ndim == 2:
+            inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(device)
+            position_ids_expanded = position_ids[:, None, :].float()
+            with torch.autocast(device_type=device_type, enabled=False):
+                freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
+                emb = torch.cat((freqs, freqs), dim=-1)
+                cos = emb.cos() * self.attention_scaling
+                sin = emb.sin() * self.attention_scaling
+            return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+        # M-ROPE path (3, batch, seq): interleaved temporal/height/width
+        if position_ids.ndim != 3 or position_ids.shape[0] != 3:
+            raise ValueError(
+                f"Expected position_ids of shape (3, batch, seq_len) for M-ROPE, got {tuple(position_ids.shape)}"
+            )
+
+        batch_size = position_ids.shape[1]
+        inv_freq_expanded = (
+            self.inv_freq[None, None, :, None].float().expand(3, batch_size, -1, 1).to(device)
+        )
+        position_ids_expanded = position_ids[:, :, None, :].float()
+
         with torch.autocast(device_type=device_type, enabled=False):
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-            # Concatenate for standard RoPE (matches Llama implementation)
+            # (3, batch, seq, head_dim//2)
+            freqs = (inv_freq_expanded @ position_ids_expanded).transpose(2, 3)
+            # Interleave per mrope_sections
+            freqs = self._apply_interleaved_mrope(freqs, self.config.mrope_sections)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos() * self.attention_scaling
             sin = emb.sin() * self.attention_scaling
-
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
@@ -498,29 +645,6 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    q_embed = (q * cos) + (rotate_half(q) * sin)
-    k_embed = (k * cos) + (rotate_half(k) * sin)
-    return q_embed, k_embed
-
-
-def apply_multimodal_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
-    """
-    Applies Multimodal Rotary Position Embedding (M-ROPE) to query and key tensors.
-
-    M-ROPE extends standard RoPE for multimodal inputs with interleaved 3D position encoding.
-
-    Args:
-        q: Query tensor of shape (batch, heads, seq_len, head_dim)
-        k: Key tensor of shape (batch, heads, seq_len, head_dim)
-        cos: Cosine positional embeddings of shape (batch, seq_len, head_dim)
-        sin: Sine positional embeddings of shape (batch, seq_len, head_dim)
-        unsqueeze_dim: Dimension to unsqueeze for broadcasting (default: 1)
-
-    Returns:
-        Tuple of (q_embed, k_embed) with M-ROPE applied
-    """
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
     q_embed = (q * cos) + (rotate_half(q) * sin)
@@ -543,8 +667,8 @@ def apply_rotary_pos_emb_vision(
     return q_embed, k_embed
 
 
-class VisionRotaryEmbedding(nn.Module):
-    """Rotary position embeddings for vision transformer."""
+class ArlowVLRotaryEmbedding(nn.Module):
+    """Grid-aware rotary position embeddings for vision transformer (THW)."""
 
     inv_freq: torch.Tensor  # fix linting for `register_buffer`
 
@@ -553,94 +677,57 @@ class VisionRotaryEmbedding(nn.Module):
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-    def forward(self, seqlen: int) -> torch.Tensor:
-        seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
-        freqs = torch.outer(seq, self.inv_freq)
-        return freqs
-
-
-class ArlowMultimodalRotaryEmbedding(nn.Module):
-    """
-    M-ROPE with interleaved frequency layout for (temporal, height, width) dimensions.
-    Follows Qwen3VL's implementation with apply_interleaved_mrope.
-    """
-
-    inv_freq: torch.Tensor  # fix linting for `register_buffer`
-
-    def __init__(self, config: ArlowConfig, device=None):
-        super().__init__()
-        self.config = config
-        self.head_dim = config.head_dim
-        self.mrope_sections = config.mrope_sections
-
-        # Validate sections
-        if sum(self.mrope_sections) != self.head_dim:
-            raise ValueError(f"Sum of mrope_sections {self.mrope_sections} must equal head_dim {self.head_dim}")
-
-        # Get rope parameters
-        rope_theta = config.rope_theta
-        if hasattr(config, "rope_parameters") and config.rope_parameters:
-            rope_theta = config.rope_parameters.get("rope_theta", rope_theta)
-
-        # Create single inv_freq for head_dim // 2 (like Qwen3VL)
-        inv_freq = 1.0 / (
-            rope_theta ** (torch.arange(0, self.head_dim, 2, dtype=torch.float, device=device) / self.head_dim)
-        )
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-        self.attention_scaling = 1.0
-
-    def apply_interleaved_mrope(self, freqs: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
+    def forward(
+        self,
+        grid_thw: Optional[torch.LongTensor],
+        batch_size: int,
+        seq_len: int,
+    ) -> torch.Tensor:
         """
-        Apply interleaved MRoPE to 3D rotary embeddings.
-        Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
-        interleaved [THTHWHTHW...TT], preserving frequency continuity.
-
-        Args:
-            freqs: (3, batch, seq_len, head_dim // 2)
-            mrope_section: (3,) list of section dimensions [t_dim, h_dim, w_dim]
-
-        Returns:
-            freqs_t: (batch, seq_len, head_dim // 2) with interleaved frequencies
+        Returns per-token rotary frequencies shaped (batch_size * seq_len, head_dim//2).
+        If grid_thw is provided, build THW-aware indices; otherwise fall back to 1D.
         """
-        freqs_t = freqs[0]  # Start with temporal dimension
-        for dim, offset in enumerate((1, 2), start=1):  # H, W
-            length = mrope_section[dim] * 3
-            idx = slice(offset, length, 3)
-            freqs_t[..., idx] = freqs[dim, ..., idx]
-        return freqs_t
+        device = self.inv_freq.device
+        dtype = self.inv_freq.dtype
 
-    @torch.no_grad()
-    def forward(self, x: torch.Tensor, position_ids: torch.LongTensor):
-        """
-        Args:
-            x: Input tensor (used for device/dtype)
-            position_ids: Shape (3, batch, seq_len) containing [t, h, w] position indices
+        if grid_thw is None:
+            total = batch_size * seq_len
+            seq = torch.arange(total, device=device, dtype=dtype)
+            return torch.outer(seq, self.inv_freq)
 
-        Returns:
-            Tuple of (cos, sin) with shape (batch, seq_len, head_dim)
-        """
-        # Expand position_ids if needed (handle 2D case)
-        if position_ids.ndim == 2:
-            position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
+        # grid_thw expected shape: (batch_size, 3) [T, H, W]
+        if grid_thw.dim() != 2 or grid_thw.shape[-1] != 3:
+            raise ValueError(f"grid_thw must be (batch, 3), got {tuple(grid_thw.shape)}")
 
-        # Expand inv_freq to shape (3, batch, head_dim//2, 1)
-        inv_freq_expanded = self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1)
-        # position_ids shape: (3, batch, 1, seq_len)
-        position_ids_expanded = position_ids[:, :, None, :].float()
+        freqs_list: list[torch.Tensor] = []
+        for b in range(batch_size):
+            t, h, w = grid_thw[b].tolist()
+            t = int(t)
+            h = int(h)
+            w = int(w)
+            # Build flattened THW indices in conv3d flatten order (T-major, W fastest)
+            t_index = torch.arange(t, device=device, dtype=dtype).view(-1, 1).expand(-1, h * w).reshape(-1)
+            h_index = (
+                torch.arange(h, device=device, dtype=dtype).view(1, -1, 1).expand(t, -1, w).reshape(-1)
+            )
+            w_index = (
+                torch.arange(w, device=device, dtype=dtype).view(1, 1, -1).expand(t, h, -1).reshape(-1)
+            )
 
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
-            # Compute frequencies: (3, batch, seq_len, head_dim//2)
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(2, 3)
-            # Apply interleaved MRoPE
-            freqs = self.apply_interleaved_mrope(freqs, self.mrope_sections)
-            # Concatenate for standard RoPE application
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos() * self.attention_scaling
-            sin = emb.sin() * self.attention_scaling
+            # Compute per-dimension frequencies then interleave sections equally (T,H,W)
+            freqs_t = torch.outer(t_index, self.inv_freq)
+            freqs_h = torch.outer(h_index, self.inv_freq)
+            freqs_w = torch.outer(w_index, self.inv_freq)
 
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+            # Simple interleave: average the three components to build a single freq table
+            # (keeps shape while encoding THW; lightweight alternative to full sectioned interleave)
+            freqs_thw = (freqs_t + freqs_h + freqs_w) / 3.0
+            freqs_list.append(freqs_thw)
+
+        return torch.cat(freqs_list, dim=0)
+
+
+    
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -717,6 +804,7 @@ class ArlowAttention(nn.Module):
         attention_mask: Optional[torch.Tensor],
         past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         input_shape = hidden_states.shape[:-1]
@@ -757,6 +845,7 @@ class ArlowAttention(nn.Module):
             dropout=self.attention_dropout if self.training else 0.0,
             scaling=self.scaling,
             sliding_window=self.sliding_window,
+            position_ids=position_ids,
             **kwargs,
         )
 
@@ -766,7 +855,7 @@ class ArlowAttention(nn.Module):
         return attn_output, attn_weights
 
 
-class ArlowMLP(nn.Module):
+class ArlowVLMLP(nn.Module):
     def __init__(self, config: ArlowConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -779,7 +868,8 @@ class ArlowMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
-        return self.dropout(x)
+        output = self.dropout(x)
+        return output
 
 
 class ArlowDecoderLayer(nn.Module):
@@ -787,7 +877,7 @@ class ArlowDecoderLayer(nn.Module):
         super().__init__()
         self.attention_type = config.layer_types[layer_idx]
         self.self_attn = ArlowAttention(config=config, layer_idx=layer_idx)
-        self.mlp = ArlowMLP(config)
+        self.mlp = ArlowVLMLP(config)
         self.input_layernorm = ArlowRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = ArlowRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.resid_dropout = nn.Dropout(config.resid_dropout)
@@ -809,6 +899,7 @@ class ArlowDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
+            position_ids=position_ids,
             past_key_values=past_key_values,
             cache_position=cache_position,
             **kwargs,
@@ -827,7 +918,7 @@ class ArlowDecoderLayer(nn.Module):
         return (hidden_states,)
 
 
-class PatchEmbed(nn.Module):
+class ArlowVLPatchEmbed(nn.Module):
     """Convert images/videos to patch embeddings."""
 
     def __init__(
@@ -854,17 +945,14 @@ class PatchEmbed(nn.Module):
         Returns:
             embeddings: (batch * num_tiles, embed_dim, T, H, W) -> flattened to (total_tokens, embed_dim)
         """
-        print(f"[DEBUG VISION] PatchEmbed.forward input shape: {hidden_states.shape}")
         hidden_states = self.proj(hidden_states)
-        print(f"[DEBUG VISION] PatchEmbed.forward after projection: {hidden_states.shape}")
         # Flatten spatial dimensions: (B, C, T, H, W) -> (B, T*H*W, C)
         batch_size = hidden_states.shape[0]
         hidden_states = hidden_states.reshape(batch_size, self.embed_dim, -1).transpose(1, 2)
-        print(f"[DEBUG VISION] PatchEmbed.forward output shape: {hidden_states.shape}")
         return hidden_states
 
 
-class PatchMerger(nn.Module):
+class ArlowVLPatchMerger(nn.Module):
     """Merge vision patches and project to text model dimension."""
 
     def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2):
@@ -884,20 +972,19 @@ class PatchMerger(nn.Module):
         Returns:
             merged: (total_merged_patches, hidden_size)
         """
-        print(f"[DEBUG VISION] PatchMerger.forward input shape: {x.shape}")
         x = self.ln_q(x)
         # Reshape for spatial merging (simplified version - actual impl may vary)
         # For now, apply MLP directly
         output = self.mlp(x)
-        print(f"[DEBUG VISION] PatchMerger.forward output shape: {output.shape}")
         return output
 
 
-class ArlowVisionAttention(nn.Module):
+class ArlowVLAttention(nn.Module):
     """Vision self-attention with RoPE."""
 
     def __init__(self, config: ArlowVisionConfig):
         super().__init__()
+        self.config = config
         self.embed_dim = config.embed_dim
         self.num_heads = config.num_heads
         self.head_dim = self.embed_dim // self.num_heads
@@ -905,18 +992,23 @@ class ArlowVisionAttention(nn.Module):
 
         self.qkv = nn.Linear(self.embed_dim, self.embed_dim * 3, bias=True)
         self.proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
+        # For backend-dispatched attention APIs
+        self.num_key_value_groups = 1
+        self.attention_dropout = 0.0
+        self.is_causal = False
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> torch.Tensor:
         """
         Args:
             hidden_states: (total_tokens, embed_dim)
             position_embeddings: (cos, sin) for RoPE
         """
-        print(f"[DEBUG VISION] ArlowVisionAttention.forward input shape: {hidden_states.shape}")
         batch_size, seq_length = (
             hidden_states.shape[0],
             hidden_states.shape[1] if hidden_states.dim() > 2 else hidden_states.shape[0],
@@ -925,40 +1017,90 @@ class ArlowVisionAttention(nn.Module):
         # Compute Q, K, V
         qkv = self.qkv(hidden_states).reshape(-1, 3, self.num_heads, self.head_dim)
         query_states, key_states, value_states = qkv.unbind(1)
-        print(f"[DEBUG VISION] ArlowVisionAttention.forward Q/K/V shapes: {query_states.shape}")
 
         # Apply RoPE if provided
         if position_embeddings is not None:
             cos, sin = position_embeddings
             query_states, key_states = apply_rotary_pos_emb_vision(query_states, key_states, cos, sin)
-            print(f"[DEBUG VISION] ArlowVisionAttention.forward after RoPE: {query_states.shape}")
 
         # Reshape for attention: (seq, heads, head_dim) -> (1, seq, heads, head_dim) -> (1, heads, seq, head_dim)
         query_states = query_states.unsqueeze(0).transpose(1, 2)
         key_states = key_states.unsqueeze(0).transpose(1, 2)
         value_states = value_states.unsqueeze(0).transpose(1, 2)
 
-        # Scaled dot-product attention
-        attn_weights = torch.matmul(query_states, key_states.transpose(-2, -1)) * self.scaling
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
+        # Dispatch to attention backends (FA2/SDPA/eager)
+        attention_interface: Callable = eager_attention_forward
+        # Use the same attribute name as text model if set on the vision config via parent
+        attn_impl = getattr(self, "_attn_implementation", None)
+        if attn_impl is None:
+            attn_impl = getattr(self.proj, "_attn_implementation", None)
+        # Fall back to config if available
+        if attn_impl is None:
+            attn_impl = getattr(getattr(self, "config", None), "_attn_implementation", "eager")
+        if attn_impl != "eager":
+            attention_interface = ALL_ATTENTION_FUNCTIONS[attn_impl]
+
+        if attn_impl == "flash_attention_2":
+            # FA2 expects int32 cu_seqlens with a leading zero
+            seq_length = query_states.shape[2]
+            if cu_seqlens is None:
+                cu_seqlens = torch.tensor([0, seq_length], device=query_states.device, dtype=torch.int32)
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+            attn_output, _ = attention_interface(
+                self,
+                query_states,
+                key_states,
+                value_states,
+                attention_mask=None,
+                scaling=self.scaling,
+                dropout=0.0 if not self.training else self.attention_dropout,
+                cu_seq_lens_q=cu_seqlens,
+                cu_seq_lens_k=cu_seqlens,
+                max_length_q=max_seqlen,
+                max_length_k=max_seqlen,
+                is_causal=False,
+                **kwargs,
+            )
+        else:
+            # Process chunks if cu_seqlens provided; otherwise treat as one chunk
+            seq_length = query_states.shape[2]
+            if cu_seqlens is None:
+                cu_seqlens = torch.tensor([0, seq_length], device=query_states.device, dtype=torch.int32)
+            lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+            splits = [
+                torch.split(tensor, lengths.tolist(), dim=2) for tensor in (query_states, key_states, value_states)
+            ]
+            attn_outputs = [
+                attention_interface(
+                    self,
+                    q,
+                    k,
+                    v,
+                    attention_mask=None,
+                    scaling=self.scaling,
+                    dropout=0.0 if not self.training else self.attention_dropout,
+                    is_causal=False,
+                    **kwargs,
+                )[0]
+                for q, k, v in zip(*splits)
+            ]
+            attn_output = torch.cat(attn_outputs, dim=1)
 
         # Reshape back
         attn_output = attn_output.transpose(1, 2).reshape(-1, self.embed_dim)
         attn_output = self.proj(attn_output)
-        print(f"[DEBUG VISION] ArlowVisionAttention.forward output shape: {attn_output.shape}")
 
         return attn_output
 
 
-class ArlowVisionBlock(GradientCheckpointingLayer):
+class ArlowVLBlock(GradientCheckpointingLayer):
     """Vision transformer block with attention and MLP."""
 
     def __init__(self, config: ArlowVisionConfig):
         super().__init__()
         self.norm1 = LayerNorm(config.embed_dim, eps=1e-6)
         self.norm2 = LayerNorm(config.embed_dim, eps=1e-6)
-        self.attn = ArlowVisionAttention(config)
+        self.attn = ArlowVLAttention(config)
         mlp_hidden_dim = int(config.embed_dim * config.mlp_ratio)
         # Inline MLP instead of separate class
         self.fc1 = nn.Linear(config.embed_dim, mlp_hidden_dim)
@@ -969,12 +1111,15 @@ class ArlowVisionBlock(GradientCheckpointingLayer):
         self,
         hidden_states: torch.Tensor,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         # Self-attention with residual
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             position_embeddings=position_embeddings,
+            cu_seqlens=cu_seqlens,
+            **kwargs,
         )
         # MLP with residual (inline)
         residual = hidden_states
@@ -994,6 +1139,7 @@ class ArlowPreTrainedModel(PreTrainedModel):
     is_loaded_in_4bit = False
     _supports_flash_attn = True
     _supports_sdpa = True
+    _supports_attention_backend = True
     _can_record_outputs = {}
 
     def _init_weights(self, module: nn.Module):
@@ -1011,12 +1157,17 @@ class ArlowPreTrainedModel(PreTrainedModel):
 
 
 @auto_docstring
-class ArlowVisionTransformerPretrainedModel(ArlowPreTrainedModel):
-    """Vision encoder for Arlow multimodal models."""
+class ArlowVLVisionModel(ArlowPreTrainedModel):
+    """
+    Vision encoder for Arlow vision-language models.
+    
+    This model processes images and videos into continuous embeddings that can be
+    forwarded to the language model. It is used internally by ArlowModel.
+    """
 
     config_class = ArlowVisionConfig
     input_modalities = ["image", "video"]
-    _no_split_modules = ["ArlowVisionBlock"]
+    _no_split_modules = ["ArlowVLBlock"]
 
     def __init__(self, config: ArlowVisionConfig):
         super().__init__(config)
@@ -1024,22 +1175,22 @@ class ArlowVisionTransformerPretrainedModel(ArlowPreTrainedModel):
         self.spatial_merge_size = config.spatial_merge_size
 
         # Patch embedding
-        self.patch_embed = PatchEmbed(
+        self.patch_embed = ArlowVLPatchEmbed(
             patch_size=config.patch_size,
             temporal_patch_size=config.temporal_patch_size,
             in_channels=config.in_channels,
             embed_dim=config.embed_dim,
         )
 
-        # Rotary position embeddings for vision
+        # Rotary position embeddings for vision (dim=head_dim)
         head_dim = config.embed_dim // config.num_heads
-        self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
+        self.rotary_pos_emb = ArlowVLRotaryEmbedding(head_dim)
 
         # Transformer blocks
-        self.blocks = nn.ModuleList([ArlowVisionBlock(config) for _ in range(config.depth)])
+        self.blocks = nn.ModuleList([ArlowVLBlock(config) for _ in range(config.depth)])
 
         # Patch merger to project to text dimension
-        self.merger = PatchMerger(
+        self.merger = ArlowVLPatchMerger(
             dim=config.hidden_size,
             context_dim=config.embed_dim,
             spatial_merge_size=config.spatial_merge_size,
@@ -1067,22 +1218,29 @@ class ArlowVisionTransformerPretrainedModel(ArlowPreTrainedModel):
         Returns:
             vision_embeddings: (total_tokens, hidden_size)
         """
-        print(f"[DEBUG VISION] ArlowVisionTransformer.forward pixel_values shape: {pixel_values.shape}")
-        if grid_thw is not None:
-            print(f"[DEBUG VISION] ArlowVisionTransformer.forward grid_thw shape: {grid_thw.shape}")
+        
 
         # Patch embedding
         hidden_states = self.patch_embed(pixel_values)  # (batch, num_patches, embed_dim)
 
-        # Get RoPE embeddings
-        # Simplified - in practice you'd compute based on grid_thw
-        seq_len = hidden_states.shape[1]
-        print(f"[DEBUG VISION] ArlowVisionTransformer.forward seq_len for RoPE: {seq_len}")
-        rotary_pos_emb = self.rotary_pos_emb(seq_len)
-        # Convert to cos/sin
-        cos = rotary_pos_emb.cos()
-        sin = rotary_pos_emb.sin()
+        # Get grid-aware RoPE embeddings for vision
+        batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
+        rotary_pos_emb = self.rotary_pos_emb(grid_thw, batch_size=batch_size, seq_len=seq_len)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        cos = emb.cos()
+        sin = emb.sin()
         position_embeddings = (cos, sin)
+
+        # Prepare cu_seqlens for attention backends (FA2/SDPA)
+        if grid_thw is not None:
+            cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+                dim=0,
+                dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+            )
+            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        else:
+            total = hidden_states.shape[1]
+            cu_seqlens = torch.tensor([0, total], device=hidden_states.device, dtype=torch.int32)
 
         # Apply transformer blocks
         for idx, block in enumerate(self.blocks):
@@ -1091,28 +1249,31 @@ class ArlowVisionTransformerPretrainedModel(ArlowPreTrainedModel):
                     block.__call__,
                     hidden_states,
                     position_embeddings,
+                    cu_seqlens,
                 )
             else:
-                hidden_states = block(hidden_states, position_embeddings)
-            print(f"[DEBUG VISION] ArlowVisionTransformer block {idx} output shape: {hidden_states.shape}")
+                hidden_states = block(hidden_states, position_embeddings, cu_seqlens=cu_seqlens)
 
         # Merge patches and project to text dimension
         hidden_states = hidden_states.reshape(-1, self.config.embed_dim)
-        print(f"[DEBUG VISION] ArlowVisionTransformer before merger: {hidden_states.shape}")
         vision_embeddings = self.merger(hidden_states)
-        print(f"[DEBUG VISION] ArlowVisionTransformer final output: {vision_embeddings.shape}")
 
         return vision_embeddings
 
 
 @auto_docstring
 class ArlowTextModel(ArlowPreTrainedModel):
-    """Text-only decoder model for Arlow (used internally by ArlowModel)."""
+    """
+    Text-only decoder model for Arlow.
+    
+    This is the language decoder part of Arlow, used internally by the multimodal ArlowModel
+    and standalone in ArlowForCausalLM for text-only tasks.
+    """
 
-    config_class = ArlowConfig
+    config_class = ArlowTextConfig
     input_modalities = "text"
 
-    def __init__(self, config: ArlowConfig):
+    def __init__(self, config: ArlowTextConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -1123,7 +1284,7 @@ class ArlowTextModel(ArlowPreTrainedModel):
             [ArlowDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = ArlowRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.rotary_emb = ArlowRotaryEmbedding(config=config)
+        self.rotary_emb = ArlowTextRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
         self.post_init()
@@ -1146,8 +1307,10 @@ class ArlowTextModel(ArlowPreTrainedModel):
         inputs_embeds: Optional[torch.FloatTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
+        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> BaseModelOutputWithPast:
+        
         # Handle input_ids vs inputs_embeds
         if input_ids is None and inputs_embeds is None:
             raise ValueError("You must specify either input_ids or inputs_embeds")
@@ -1178,6 +1341,13 @@ class ArlowTextModel(ArlowPreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
+        # Support FA2-style packed positions: [4, batch, seq] => [text_pos; 3D mrope]
+        if position_ids.ndim == 3 and position_ids.shape[0] == 4:
+            text_position_ids = position_ids[0]
+            position_ids = position_ids[1:]
+        else:
+            text_position_ids = None
+
         # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
             # Prepare mask arguments
@@ -1187,7 +1357,7 @@ class ArlowTextModel(ArlowPreTrainedModel):
                 "attention_mask": attention_mask,
                 "cache_position": cache_position,
                 "past_key_values": past_key_values,
-                "position_ids": position_ids,
+                "position_ids": text_position_ids,
             }
             # Create the masks
             causal_mask_mapping = {
@@ -1198,7 +1368,10 @@ class ArlowTextModel(ArlowPreTrainedModel):
                 causal_mask_mapping["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
 
         hidden_states = inputs_embeds
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        
+        # Use provided position_embeddings if available (from multimodal M-ROPE), otherwise compute standard RoPE
+        if position_embeddings is None:
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         # Collect hidden states and attentions for output if requested
         output_hidden_states = kwargs.get("output_hidden_states", self.config.output_hidden_states)
@@ -1225,7 +1398,7 @@ class ArlowTextModel(ArlowPreTrainedModel):
             layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask_mapping[decoder_layer.attention_type],
-                position_ids=position_ids,
+                position_ids=text_position_ids,
                 past_key_values=past_key_values,
                 use_cache=use_cache,
                 cache_position=cache_position,
@@ -1252,11 +1425,16 @@ class ArlowTextModel(ArlowPreTrainedModel):
 
 @auto_docstring
 class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
-    """Text-only causal language model (no vision)."""
+    """
+    Arlow model for causal language modeling (text-only, no vision).
+    
+    This model uses ArlowTextModel internally and is designed for pure text generation tasks.
+    For multimodal (vision + text) tasks, use ArlowForConditionalGeneration instead.
+    """
 
     _tied_weights_keys = ["lm_head.weight"]
 
-    def __init__(self, config: ArlowConfig):
+    def __init__(self, config: ArlowTextConfig):
         super().__init__(config)
         self.model = ArlowTextModel(config)
         self.vocab_size = config.vocab_size
@@ -1371,9 +1549,12 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
 @auto_docstring
 class ArlowModel(ArlowPreTrainedModel):
     """
-    Main multimodal model combining vision encoder and text decoder.
-    This is the primary model class that handles both image/video and text inputs.
-    Follows Qwen2VL architecture pattern.
+    Main Arlow vision-language model (VLM) combining vision encoder and text decoder.
+    
+    This is the primary model class for Arlow that handles both image/video and text inputs.
+    It follows the Qwen2VL architecture pattern with vision and language components.
+    
+    For text-only tasks, use ArlowTextModel or ArlowForCausalLM instead.
     """
 
     base_model_prefix = ""
@@ -1384,13 +1565,10 @@ class ArlowModel(ArlowPreTrainedModel):
         super().__init__(config)
 
         # Vision encoder
-        self.visual = ArlowVisionTransformerPretrainedModel._from_config(config.vision_config)
+        self.visual = ArlowVLVisionModel._from_config(config.vision_config)
 
         # Text model (language decoder)
         self.language_model = ArlowTextModel._from_config(config)
-
-        # Multimodal RoPE for combined vision-text sequences
-        self.multimodal_rotary_emb = ArlowMultimodalRotaryEmbedding(config)
 
         # Cache for rope deltas
         self.rope_deltas = None
@@ -1415,21 +1593,15 @@ class ArlowModel(ArlowPreTrainedModel):
         image_grid_thw: Optional[torch.LongTensor] = None,
     ) -> torch.FloatTensor:
         """Extract image features from vision encoder."""
-        print(f"[DEBUG VISION] get_image_features: pixel_values shape={pixel_values.shape}")
-        if image_grid_thw is not None:
-            print(f"[DEBUG VISION] get_image_features: image_grid_thw shape={image_grid_thw.shape}")
 
         # Get dtype from vision model, fallback to float32
         target_dtype = self.visual.get_dtype() if hasattr(self.visual, "get_dtype") else torch.float32
         pixel_values = pixel_values.to(dtype=target_dtype)
 
         image_embeds = self.visual(pixel_values, image_grid_thw)
-        print(f"[DEBUG VISION] get_image_features: raw image_embeds shape={image_embeds.shape}")
 
         split_sizes = (image_grid_thw.prod(-1) // self.config.vision_config.spatial_merge_size**2).tolist()
-        print(f"[DEBUG VISION] get_image_features: split_sizes={split_sizes}")
         image_embeds = torch.split(image_embeds, split_sizes)
-        print(f"[DEBUG VISION] get_image_features: num splits={len(image_embeds)}")
         return image_embeds
 
     def get_video_features(
@@ -1438,21 +1610,15 @@ class ArlowModel(ArlowPreTrainedModel):
         video_grid_thw: Optional[torch.LongTensor] = None,
     ) -> torch.FloatTensor:
         """Extract video features from vision encoder (same as images with temporal dim)."""
-        print(f"[DEBUG VIDEO] get_video_features: pixel_values_videos shape={pixel_values_videos.shape}")
-        if video_grid_thw is not None:
-            print(f"[DEBUG VIDEO] get_video_features: video_grid_thw shape={video_grid_thw.shape}")
 
         # Get dtype from vision model, fallback to float32
         target_dtype = self.visual.get_dtype() if hasattr(self.visual, "get_dtype") else torch.float32
         pixel_values_videos = pixel_values_videos.to(dtype=target_dtype)
 
         video_embeds = self.visual(pixel_values_videos, video_grid_thw)
-        print(f"[DEBUG VIDEO] get_video_features: raw video_embeds shape={video_embeds.shape}")
 
         split_sizes = (video_grid_thw.prod(-1) // self.config.vision_config.spatial_merge_size**2).tolist()
-        print(f"[DEBUG VIDEO] get_video_features: split_sizes={split_sizes}")
         video_embeds = torch.split(video_embeds, split_sizes)
-        print(f"[DEBUG VIDEO] get_video_features: num splits={len(video_embeds)}")
         return video_embeds
 
     def get_placeholder_mask(
@@ -1673,40 +1839,23 @@ class ArlowModel(ArlowPreTrainedModel):
         # Get text embeddings
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
-            print(f"[DEBUG MULTIMODAL] ArlowModel.forward: text embeddings shape={inputs_embeds.shape}")
 
         # Process vision inputs if provided using masked_scatter
         if pixel_values is not None:
-            print("[DEBUG MULTIMODAL] ArlowModel.forward: processing image inputs")
             image_embeds = self.get_image_features(pixel_values, image_grid_thw)
             image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
-            print(f"[DEBUG MULTIMODAL] ArlowModel.forward: concatenated image_embeds shape={image_embeds.shape}")
             image_mask, _ = self.get_placeholder_mask(
                 input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
             )
-            print(
-                f"[DEBUG MULTIMODAL] ArlowModel.forward: image_mask shape={image_mask.shape}, sum={image_mask.sum()}"
-            )
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-            print(
-                f"[DEBUG MULTIMODAL] ArlowModel.forward: after image scatter, inputs_embeds shape={inputs_embeds.shape}"
-            )
 
         if pixel_values_videos is not None:
-            print("[DEBUG MULTIMODAL] ArlowModel.forward: processing video inputs")
             video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
             video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
-            print(f"[DEBUG MULTIMODAL] ArlowModel.forward: concatenated video_embeds shape={video_embeds.shape}")
             _, video_mask = self.get_placeholder_mask(
                 input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
             )
-            print(
-                f"[DEBUG MULTIMODAL] ArlowModel.forward: video_mask shape={video_mask.shape}, sum={video_mask.sum()}"
-            )
             inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
-            print(
-                f"[DEBUG MULTIMODAL] ArlowModel.forward: after video scatter, inputs_embeds shape={inputs_embeds.shape}"
-            )
 
         # Compute position_ids with M-ROPE if needed
         if position_ids is None:
@@ -1732,10 +1881,6 @@ class ArlowModel(ArlowPreTrainedModel):
                 delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
                 position_ids = position_ids + delta.to(position_ids.device)
 
-        # Forward through text model (language decoder) with M-ROPE
-        # Use multimodal rotary embedding for position embeddings
-        position_embeddings = self.multimodal_rotary_emb(inputs_embeds, position_ids)
-
         outputs = self.language_model(
             input_ids=None,  # We're using inputs_embeds instead
             attention_mask=attention_mask,
@@ -1744,7 +1889,7 @@ class ArlowModel(ArlowPreTrainedModel):
             inputs_embeds=inputs_embeds,
             cache_position=cache_position,
             use_cache=use_cache,
-            position_embeddings=position_embeddings,
+            position_embeddings=None,
             **kwargs,
         )
 
@@ -1760,8 +1905,31 @@ class ArlowModel(ArlowPreTrainedModel):
 @auto_docstring
 class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
     """
-    Arlow model for conditional generation (multimodal: text + images/videos).
-    This is the main model for VLM tasks. Uses ArlowModel internally.
+    Arlow model for conditional generation with vision-language inputs (VLM).
+    
+    This is the main model for multimodal vision-language tasks. It uses ArlowModel internally
+    and adds a language modeling head for text generation conditioned on vision inputs.
+    
+    For text-only generation, use ArlowForCausalLM instead.
+    
+    Example:
+        ```python
+        >>> from transformers import AutoProcessor, ArlowForConditionalGeneration
+        >>> model = ArlowForConditionalGeneration.from_pretrained("yuchenxie/arlow-vlm")
+        >>> processor = AutoProcessor.from_pretrained("yuchenxie/arlow-vlm")
+        >>>
+        >>> messages = [{
+        ...     "role": "user",
+        ...     "content": [
+        ...         {"type": "image", "image": "path/to/image.jpg"},
+        ...         {"type": "text", "text": "Describe this image."},
+        ...     ],
+        ... }]
+        >>>
+        >>> inputs = processor(text=messages, images=..., return_tensors="pt")
+        >>> outputs = model.generate(**inputs, max_new_tokens=100)
+        >>> processor.batch_decode(outputs, skip_special_tokens=True)[0]
+        ```
     """
 
     _tied_weights_keys = ["lm_head.weight"]
@@ -1914,7 +2082,7 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         elif inputs_embeds is not None:
             input_ids = None
 
-        return {
+        model_inputs = {
             "input_ids": input_ids,
             "past_key_values": past_key_values,
             "attention_mask": attention_mask,
@@ -1927,6 +2095,41 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
             "cache_position": cache_position,
             **kwargs,
         }
+
+        # Prepare 4D packed position_ids: [text; 3D mrope]
+        if "position_ids" not in model_inputs or model_inputs["position_ids"] is None:
+            prefill_stage = (cache_position is not None and cache_position[0] == 0) or cache_length == 0
+            if prefill_stage or getattr(self.model, "rope_deltas", None) is None:
+                vision_positions, rope_deltas = self.model.get_rope_index(
+                    model_inputs.get("input_ids", None),
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
+                    attention_mask=attention_mask,
+                )
+                self.model.rope_deltas = rope_deltas
+            else:
+                # If text positions are provided, compute vision positions using cached rope_deltas
+                if "position_ids" in model_inputs and model_inputs["position_ids"] is not None:
+                    batch_size, seq_length = model_inputs["position_ids"].shape
+                    device = model_inputs["position_ids"].device
+                    position_ids = torch.arange(seq_length, device=device)
+                    position_ids = position_ids.view(1, 1, -1).expand(3, batch_size, -1)
+                    delta = cache_position[0] + self.model.rope_deltas
+                    delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+                    vision_positions = position_ids + delta.expand_as(position_ids)
+                else:
+                    vision_positions = None
+
+            if "position_ids" in model_inputs and model_inputs["position_ids"] is not None and vision_positions is not None:
+                text_positions = model_inputs["position_ids"][None, ...]
+                model_inputs["position_ids"] = torch.cat([text_positions, vision_positions], dim=0)
+
+        # After prefill, don't pass pixels again
+        if model_inputs["cache_position"] is not None and model_inputs["cache_position"][0] != 0:
+            model_inputs["pixel_values"] = None
+            model_inputs["pixel_values_videos"] = None
+
+        return model_inputs
 
     def _reorder_cache(self, past_key_values, beam_idx):
         if past_key_values is not None and hasattr(past_key_values, "reorder_cache"):
@@ -2156,13 +2359,14 @@ class ArlowForTokenClassification(GenericForTokenClassification, ArlowPreTrained
 
 __all__ = [
     "ArlowConfig",
+    "ArlowTextConfig",
     "ArlowVisionConfig",
     "ArlowPreTrainedModel",
     "ArlowTextModel",
     "ArlowModel",
     "ArlowForCausalLM",
     "ArlowForConditionalGeneration",
-    "ArlowVisionTransformerPretrainedModel",
+    "ArlowVLVisionModel",
     "ArlowProcessor",
     "ArlowForSequenceClassification",
     "ArlowForQuestionAnswering",

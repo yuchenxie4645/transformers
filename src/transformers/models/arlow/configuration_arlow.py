@@ -4,11 +4,15 @@
 #             the file from the modular. If any change should be done, please apply the change to the
 #                          modular_arlow.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
-from ...configuration_utils import PretrainedConfig, layer_type_validation
+from ...configuration_utils import PreTrainedConfig, layer_type_validation
 from ...modeling_rope_utils import rope_config_validation
+from ...utils import logging
 
 
-class ArlowVisionConfig(PretrainedConfig):
+logger = logging.get_logger(__name__)
+
+
+class ArlowVisionConfig(PreTrainedConfig):
     r"""
     Configuration for the vision transformer component of Arlow multimodal models.
 
@@ -34,16 +38,16 @@ class ArlowVisionConfig(PretrainedConfig):
         temporal_patch_size (`int`, *optional*, defaults to 2):
             Temporal patch size for video inputs.
         use_deformable_attention (`bool`, *optional*, defaults to False):
-            Whether to use deformable attention for high-resolution regions.
+            Whether to use deformable attention for high-resolution regions. **[Not yet implemented]**
         use_progressive_patches (`bool`, *optional*, defaults to False):
-            Whether to use progressive patch embeddings for multi-scale.
+            Whether to use progressive patch embeddings for multi-scale. **[Not yet implemented]**
         token_pruning_ratio (`float`, *optional*, defaults to 0.0):
-            Ratio of tokens to prune per region (0.0 means no pruning).
+            Ratio of tokens to prune per region (0.0 means no pruning). **[Not yet implemented]**
         initializer_range (`float`, *optional*, defaults to 0.02):
             Standard deviation for weight initialization.
     """
 
-    model_type = "arlow_vision"
+    model_type = "arlow"
     base_config_key = "vision_config"
 
     def __init__(
@@ -80,10 +84,111 @@ class ArlowVisionConfig(PretrainedConfig):
         self.token_pruning_ratio = token_pruning_ratio
         self.initializer_range = initializer_range
 
+        # Warn if unsupported features are enabled
+        if self.use_deformable_attention:
+            logger.warning("use_deformable_attention is not yet implemented and will be ignored")
+        if self.use_progressive_patches:
+            logger.warning("use_progressive_patches is not yet implemented and will be ignored")
+        if self.token_pruning_ratio > 0.0:
+            logger.warning(
+                f"token_pruning_ratio={self.token_pruning_ratio} is not yet implemented and will be ignored"
+            )
 
-class ArlowConfig(PretrainedConfig):
+
+class ArlowTextConfig(PreTrainedConfig):
     r"""
-    Configuration class for Arlow models (text-only and multimodal).
+    Text-only configuration for Arlow.
+
+    This configuration is used by text-only models like `ArlowTextModel` and `ArlowForCausalLM`.
+    """
+
+    model_type = "arlow_text"
+    base_config_key = "text_config"
+
+    def __init__(
+        self,
+        vocab_size=131072,
+        hidden_size=2304,
+        intermediate_size=9216,
+        num_hidden_layers=32,
+        num_attention_heads=24,
+        num_key_value_heads=4,
+        hidden_act="silu",
+        max_position_embeddings=2048,
+        initializer_range=0.02,
+        rms_norm_eps=1e-6,
+        use_cache=True,
+        pad_token_id=None,
+        bos_token_id=None,
+        eos_token_id=None,
+        tie_word_embeddings=False,
+        rope_theta=100000.0,
+        rope_parameters=None,
+        rope_scaling=None,  # Deprecated, use rope_parameters
+        attention_bias=False,
+        attention_dropout=0.0,
+        resid_dropout=0.0,
+        mlp_dropout=0.0,
+        head_dim=None,
+        use_sliding_window=False,
+        sliding_window=4096,
+        max_window_layers=28,
+        layer_types=None,
+        **kwargs,
+    ):
+        self.vocab_size = vocab_size
+        self.max_position_embeddings = max_position_embeddings
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.num_hidden_layers = num_hidden_layers
+        self.num_attention_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
+        self.hidden_act = hidden_act
+        self.initializer_range = initializer_range
+        self.rms_norm_eps = rms_norm_eps
+        self.use_cache = use_cache
+        self.rope_theta = rope_theta
+        self.rope_parameters = rope_scaling or rope_parameters
+        self.attention_bias = attention_bias
+        self.attention_dropout = attention_dropout
+        self.resid_dropout = resid_dropout
+        self.mlp_dropout = mlp_dropout
+        self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
+
+        # Validate rope parameters
+        if self.rope_parameters is not None and "type" in self.rope_parameters:
+            self.rope_parameters["rope_type"] = self.rope_parameters["type"]
+        rope_config_validation(self)
+
+        # Layer types configuration (supports full/sliding attention)
+        self.use_sliding_window = use_sliding_window
+        self.sliding_window = sliding_window if self.use_sliding_window else None
+        self.max_window_layers = max_window_layers
+        self.layer_types = layer_types
+        if self.layer_types is None:
+            self.layer_types = [
+                "sliding_attention"
+                if self.sliding_window is not None and i >= self.max_window_layers
+                else "full_attention"
+                for i in range(self.num_hidden_layers)
+            ]
+        layer_type_validation(self.layer_types, self.num_hidden_layers)
+
+        super().__init__(
+            pad_token_id=pad_token_id,
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            tie_word_embeddings=tie_word_embeddings,
+            **kwargs,
+        )
+
+
+class ArlowConfig(PreTrainedConfig):
+    r"""
+    Configuration class for Arlow multimodal models.
+
+    This is the configuration for the main Arlow vision-language model. Use ArlowTextConfig if you need
+    a text-only configuration.
 
     Instantiating with defaults yields configuration similar to Arlow-Base
     [yuchenxie/ArlowGPT-Base](https://huggingface.co/yuchenxie/ArlowGPT-Base).
@@ -143,7 +248,7 @@ class ArlowConfig(PretrainedConfig):
             Number of layers using full attention before switching to sliding window.
         layer_types (`list`, *optional*):
             Attention pattern for each layer.
-        vision_config (`Union[PretrainedConfig, dict]`, *optional*):
+        vision_config (`Union[PreTrainedConfig, dict]`, *optional*):
             Vision backbone configuration.
         mm_tokens_per_image (`int`, *optional*, defaults to 256):
             Number of tokens per image after vision projection.
@@ -316,4 +421,4 @@ class ArlowConfig(PretrainedConfig):
         )
 
 
-__all__ = ["ArlowConfig", "ArlowVisionConfig"]
+__all__ = ["ArlowConfig", "ArlowTextConfig", "ArlowVisionConfig"]
