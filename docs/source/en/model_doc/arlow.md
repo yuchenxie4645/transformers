@@ -1,93 +1,289 @@
-# ArlowGPT — A Future-Ready Decoder for CLM + Vision Fusion
 
-**ArlowGPT** is a decoder-only Transformer architecture purpose-built for **large-scale causal language modeling (CLM)**. Designed for performance, extensibility, and vision integration, Arlow features a lightweight core, frozen cross-attention pathways, and seamless compatibility with FlashAttention and grouped-query attention, as well as standard pytorch attention for easy quants + fine tuning with LoRA or QLoRA.
+# Arlow
 
-While currently optimized for text generation tasks, **Arlow is architected with future multimodal backbones in mind** — allowing for straightforward upgrades like image-text fusion due to the inclusion of cross attention weights.
+<div class="flex flex-wrap space-x-1">
+<img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-DE3412?style=flat&logo=pytorch&logoColor=white">
+<img alt="FlashAttention" src="https://img.shields.io/badge/%E2%9A%A1%EF%B8%8E%20FlashAttention-eae0c8?style=flat">
+<img alt="SDPA" src="https://img.shields.io/badge/SDPA-DE3412?style=flat&logo=pytorch&logoColor=white">
+</div>
 
-**Important: FlashAttention VarLen does NOT support any other DATA TYPE other than **BF16** and **FP16**. Therefore my implemenation includes conditionally applying flash attention when detected DTYPE to be FP16 or BF16.**
+## Overview
 
----
+Arlow is a vision-language model that combines a visual encoder with a text decoder for multimodal understanding and generation. The model is built on the Transformer architecture with several key features:
 
-## What’s Included
+- **Vision Encoder**: Processes images and videos through a vision transformer with rotary position embeddings (RoPE)
+- **Text Decoder**: Decoder-only architecture with grouped query attention (GQA), RoPE, and sliding window attention support
+- **Multimodal Integration**: Seamlessly fuses vision and text modalities using M-ROPE (Multimodal Rotary Position Embedding)
+- **Flexible Usage**: Supports both text-only (ArlowForCausalLM) and multimodal (ArlowForConditionalGeneration) tasks
 
-This repo contains the full modeling stack and configuration setup required to register and train Arlow models using the Hugging Face ecosystem.
+The model can handle:
+- Single and multiple images
+- Video inputs with temporal understanding
+- Pure text generation
+- Mixed multimodal conversations
 
-### `configuration_arlow.py`
-Defines the `ArlowConfig` class — the blueprint for model architecture and hyperparameters. It includes:
-- Support for grouped-query attention
-- FlashAttention-ready toggles
-- Cross-attention control (`use_cross_attention`)
-- Hugging Face `model_type = "arlow"` registration
-- Tied embeddings and rotary position embedding (RoPE) parameters
+## Usage Examples
 
-### `modeling_arlow.py`
-Implements the full modeling logic, including:
-- `ArlowPreTrainedModel`: Base class with weight init and checkpoint support
-- `ArlowModel`: Backbone-only decoder stack (no LM head)
-- `ArlowForCausalLM`: Decoder stack + LM head + loss + generation logic
+### Text-only Generation
 
-Key features:
-- FlashAttention integration (with **varlen** QKV path)
-- RoPE rotary embedding
-- Grouped Query Attention
-- Cross-attention blocks for encoder-decoder pipelines
+For text-only tasks, use `ArlowForCausalLM`:
 
-### Unit Tests (`test_modeling_arlow.py`)
-- Covers `ArlowForCausalLM` and `ArlowModel` forward passes
-- Tests `generate()` output shape
-- Save/load weight consistency
-- Full Hugging Face `check_repo.py` compliance via `all_model_classes`
+```python
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-### 🔁 Pretraining Script (WIP)
-Includes pretraining logic compatible with:
-- `🤗 Trainer`
-- FlashAttention 2.0 (if installed)
-- Gradient checkpointing
-- Streaming/large-scale datasets
-- Mixed precision (`bfloat16` or `fp16`) 
+model = AutoModelForCausalLM.from_pretrained(
+    "your-arlow-model",
+    dtype=torch.bfloat16,
+    device_map="auto",
+    attn_implementation="sdpa"
+)
+tokenizer = AutoTokenizer.from_pretrained("your-arlow-model")
 
----
+prompt = "Explain the concept of large language models."
+inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-## Naming Convention & Integration
+generated_ids = model.generate(
+    **inputs,
+    max_new_tokens=512,
+    do_sample=True,
+    temperature=0.7,
+    top_k=50,
+    top_p=0.95
+)
 
-- All modeling classes use the prefix **`Arlow`** (e.g. `ArlowModel`, `ArlowConfig`)
-- However, for HF compatibility, `ArlowConfig.model_type = "arlow"`  
-  (so checkpoint naming and auto model loading works via `AutoModelForCausalLM.from_pretrained()`)
+response = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+print(response)
+```
 
----
+### Single Image Inference
 
-## Designed For:
+For vision-language tasks, use `ArlowForConditionalGeneration`:
 
-- **Decoder-only causal LM pretraining**
-- **Large-scale inference** with FlashAttention and GQA
-- **Easy opt-in to encoder-decoder setups** (via frozen cross-attention)
-- **Future multimodal support**, such as vision transformer backbones or retrieval components
-- **Lightweight adaptation** (LoRA, adapters, etc.)
-- **Conditionally apply Flash attention methods for BF16 and FP16 DTypes**
+```python
+import torch
+from transformers import ArlowForConditionalGeneration, AutoProcessor
 
-## ArlowTokenizer
-[[autodoc]] ArlowTokenizer
+model = ArlowForConditionalGeneration.from_pretrained(
+    "your-arlow-vlm-model",
+    dtype=torch.bfloat16,
+    device_map="auto"
+)
+processor = AutoProcessor.from_pretrained("your-arlow-vlm-model")
 
-## ArlowTokenizerFast
-[[autodoc]] ArlowTokenizerFast
+conversation = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "image", "url": "path/to/image.jpg"},
+            {"type": "text", "text": "Describe this image."}
+        ]
+    }
+]
+
+inputs = processor.apply_chat_template(
+    conversation,
+    add_generation_prompt=True,
+    tokenize=True,
+    return_dict=True,
+    return_tensors="pt"
+).to(model.device)
+
+output_ids = model.generate(**inputs, max_new_tokens=128)
+generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, output_ids)]
+output_text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+print(output_text)
+```
+
+### Video Understanding
+
+```python
+conversation = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "video", "path": "/path/to/video.mp4"},
+            {"type": "text", "text": "What happens in this video?"}
+        ]
+    }
+]
+
+inputs = processor.apply_chat_template(
+    conversation,
+    fps=1,  # Sample 1 frame per second
+    add_generation_prompt=True,
+    tokenize=True,
+    return_dict=True,
+    return_tensors="pt"
+).to(model.device)
+
+output_ids = model.generate(**inputs, max_new_tokens=256)
+generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, output_ids)]
+output_text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+print(output_text)
+```
+
+### Batch Mixed Media Inference
+
+The model can process batches with mixed media types:
+
+```python
+# Multiple images
+conversation1 = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "image", "path": "/path/to/image1.jpg"},
+            {"type": "image", "path": "/path/to/image2.jpg"},
+            {"type": "text", "text": "Compare these two images."}
+        ]
+    }
+]
+
+# Pure text
+conversation2 = [
+    {
+        "role": "user",
+        "content": "What is machine learning?"
+    }
+]
+
+# Mixed media
+conversation3 = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "image", "path": "/path/to/image.jpg"},
+            {"type": "video", "path": "/path/to/video.mp4"},
+            {"type": "text", "text": "What are the common themes?"}
+        ]
+    }
+]
+
+conversations = [conversation1, conversation2, conversation3]
+
+inputs = processor.apply_chat_template(
+    conversations,
+    fps=1,
+    add_generation_prompt=True,
+    tokenize=True,
+    return_dict=True,
+    return_tensors="pt",
+    padding=True
+).to(model.device)
+
+output_ids = model.generate(**inputs, max_new_tokens=128)
+generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids in zip(inputs.input_ids, output_ids)]
+output_text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+print(output_text)
+```
+
+## Usage Tips
+
+### Flash Attention 2
+
+To enable Flash Attention 2 for faster inference:
+
+```bash
+pip install -U flash-attn --no-build-isolation
+```
+
+Then load the model with:
+
+```python
+model = ArlowForConditionalGeneration.from_pretrained(
+    "your-arlow-model",
+    dtype=torch.bfloat16,
+    attn_implementation="flash_attention_2",
+    device_map="auto"
+)
+```
+
+Note: Flash Attention 2 requires `torch.float16` or `torch.bfloat16` dtype.
+
+### Quantization
+
+For reduced memory usage, quantize the model with bitsandbytes:
+
+```python
+from transformers import BitsAndBytesConfig
+
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+)
+
+model = ArlowForConditionalGeneration.from_pretrained(
+    "your-arlow-model",
+    quantization_config=quantization_config,
+    device_map="auto"
+)
+```
 
 ## ArlowConfig
+
 [[autodoc]] ArlowConfig
 
-## ArlowForCausalLM
-[[autodoc]] ArlowForCausalLM
+## ArlowTextConfig
 
-## ArlowModel
-[[autodoc]] ArlowModel
+[[autodoc]] ArlowTextConfig
+
+## ArlowVisionConfig
+
+[[autodoc]] ArlowVisionConfig
+
+## ArlowProcessor
+
+[[autodoc]] ArlowProcessor
+
+## ArlowImageProcessor
+
+[[autodoc]] ArlowImageProcessor
+    - preprocess
 
 ## ArlowRMSNorm
+
 [[autodoc]] ArlowRMSNorm
+    - forward
 
-## ArlowPreTrainedModel
-[[autodoc]] ArlowPreTrainedModel
+## ArlowTextModel
 
-## ArlowGroupedQueryAttention
-[[autodoc]] ArlowGroupedQueryAttention
+[[autodoc]] ArlowTextModel
+    - forward
 
-## ArlowFlashTransformerLayer
-[[autodoc]] ArlowFlashTransformerLayer
+## ArlowVLVisionModel
+
+[[autodoc]] ArlowVLVisionModel
+    - forward
+
+## ArlowModel
+
+[[autodoc]] ArlowModel
+    - forward
+
+## ArlowForCausalLM
+
+[[autodoc]] ArlowForCausalLM
+    - forward
+
+## ArlowForConditionalGeneration
+
+[[autodoc]] ArlowForConditionalGeneration
+    - forward
+
+## ArlowForSequenceClassification
+
+[[autodoc]] ArlowForSequenceClassification
+    - forward
+
+## ArlowForTokenClassification
+
+[[autodoc]] ArlowForTokenClassification
+    - forward
+
+## ArlowForQuestionAnswering
+
+[[autodoc]] ArlowForQuestionAnswering
+    - forward
