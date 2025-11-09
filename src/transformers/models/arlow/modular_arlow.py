@@ -1,3 +1,4 @@
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -66,11 +67,17 @@ class ArlowVisionConfig(PreTrainedConfig):
         temporal_patch_size (`int`, *optional*, defaults to 2):
             Temporal patch size for video inputs.
         use_deformable_attention (`bool`, *optional*, defaults to False):
-            Whether to use deformable attention for high-resolution regions. **[Not yet implemented]**
+            Whether to apply deformable attention bias for high-resolution regions.
         use_progressive_patches (`bool`, *optional*, defaults to False):
-            Whether to use progressive patch embeddings for multi-scale. **[Not yet implemented]**
+            Whether to inject progressive multi-scale patch features.
         token_pruning_ratio (`float`, *optional*, defaults to 0.0):
-            Ratio of tokens to prune per region (0.0 means no pruning). **[Not yet implemented]**
+            Ratio of tokens to prune per region (0.0 means no pruning).
+        deformable_attention_window (`float`, *optional*, defaults to 0.25):
+            Normalized radius (in THW coordinates) used to compute deformable attention locality bias.
+        deformable_attention_strength (`float`, *optional*, defaults to 4.0):
+            Scaling factor applied to deformable attention bias.
+        mrope_sections (`list[int]`, *optional*):
+            Multimodal RoPE allocation across [temporal, height, width] (sum must equal head dimension).
         initializer_range (`float`, *optional*, defaults to 0.02):
             Standard deviation for weight initialization.
     """
@@ -93,7 +100,11 @@ class ArlowVisionConfig(PreTrainedConfig):
         use_deformable_attention: bool = False,
         use_progressive_patches: bool = False,
         token_pruning_ratio: float = 0.0,
+        deformable_attention_window: float = 0.25,
+        deformable_attention_strength: float = 4.0,
+        mrope_sections: Optional[list[int]] = None,
         initializer_range: float = 0.02,
+        max_position_embeddings: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -103,6 +114,7 @@ class ArlowVisionConfig(PreTrainedConfig):
         self.hidden_act = hidden_act
         self.mlp_ratio = mlp_ratio
         self.num_heads = num_heads
+        self.num_attention_heads = num_heads
         self.in_channels = in_channels
         self.patch_size = patch_size
         self.spatial_merge_size = spatial_merge_size
@@ -110,17 +122,27 @@ class ArlowVisionConfig(PreTrainedConfig):
         self.use_deformable_attention = use_deformable_attention
         self.use_progressive_patches = use_progressive_patches
         self.token_pruning_ratio = token_pruning_ratio
+        self.deformable_attention_window = deformable_attention_window
+        self.deformable_attention_strength = deformable_attention_strength
         self.initializer_range = initializer_range
+        self.max_position_embeddings = (
+            max_position_embeddings if max_position_embeddings is not None else 4096
+        )
 
-        # Warn if unsupported features are enabled
-        if self.use_deformable_attention:
-            logger.warning("use_deformable_attention is not yet implemented and will be ignored")
-        if self.use_progressive_patches:
-            logger.warning("use_progressive_patches is not yet implemented and will be ignored")
-        if self.token_pruning_ratio > 0.0:
-            logger.warning(
-                f"token_pruning_ratio={self.token_pruning_ratio} is not yet implemented and will be ignored"
-            )
+        head_dim = embed_dim // num_heads
+        if mrope_sections is None:
+            t = max(1, head_dim // 3)
+            h = max(1, (head_dim - t) // 2)
+            w = max(1, head_dim - t - h)
+            if t + h + w != head_dim:
+                w = head_dim - t - h
+            self.mrope_sections = [t, h, w]
+        else:
+            if sum(mrope_sections) != head_dim:
+                raise ValueError(
+                    f"Sum of mrope_sections {mrope_sections} (={sum(mrope_sections)}) must equal head_dim ({head_dim})."
+                )
+            self.mrope_sections = mrope_sections
 
 
 class ArlowTextConfig(PreTrainedConfig):
@@ -441,6 +463,12 @@ class ArlowConfig(PreTrainedConfig):
                 f"must equal head_dim ({self.head_dim})"
             )
 
+        # Keep track of the ratio so we can project it onto the vision head dimension
+        self._mrope_ratio = [section / self.head_dim for section in self.mrope_sections]
+        vision_head_dim = self.vision_config.embed_dim // self.vision_config.num_heads
+        scaled_sections = self._scale_mrope_sections_from_ratio(vision_head_dim, self._mrope_ratio)
+        self.vision_config.mrope_sections = scaled_sections
+
         # Validate rope parameters (ignore M-ROPE specific keys since we use custom M-ROPE)
         if self.rope_parameters is not None and "type" in self.rope_parameters:
             self.rope_parameters["rope_type"] = self.rope_parameters["type"]
@@ -464,6 +492,43 @@ class ArlowConfig(PreTrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+
+    @staticmethod
+    def _scale_mrope_sections_from_ratio(head_dim: int, ratio: list[float]) -> list[int]:
+        if head_dim <= 0:
+            raise ValueError("head_dim must be positive when computing M-ROPE sections.")
+        if len(ratio) != 3:
+            raise ValueError("ratio must contain three entries for [temporal, height, width].")
+
+        raw = [r * head_dim for r in ratio]
+        base = [math.floor(val) for val in raw]
+        remainders = [val - floor for val, floor in zip(raw, base)]
+
+        # Guarantee a minimum allocation of 1 per dimension
+        for i in range(len(base)):
+            if base[i] < 1:
+                base[i] = 1
+                remainders[i] = 0.0
+
+        total = sum(base)
+
+        # Distribute remaining capacity based on largest remainders
+        while total < head_dim:
+            idx = max(range(len(base)), key=lambda i: remainders[i])
+            base[idx] += 1
+            remainders[idx] = 0.0
+            total += 1
+
+        # Trim excess while keeping each section >= 1
+        while total > head_dim:
+            candidates = [i for i in range(len(base)) if base[i] > 1]
+            if not candidates:
+                break
+            idx = min(candidates, key=lambda i: remainders[i])
+            base[idx] -= 1
+            total -= 1
+
+        return base
 
 
 @dataclass
@@ -584,24 +649,25 @@ class ArlowTextRotaryEmbedding(nn.Module):
         inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to(device) / head_dim))
         return inv_freq, 1.0
 
-    def _apply_interleaved_mrope(self, freqs: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
-        """
-        Apply interleaved M-ROPE layout to 3D rotary frequencies.
+    def apply_interleaved_mrope(self, freqs: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
+        """Apply interleaved M-ROPE layout to 3D rotary frequencies.
 
-        Reorganizes from chunked [TTT...HHH...WWW] to interleaved [THTHWHTH...TT],
-        preserving frequency continuity per section.
+        Converts the chunked layout `[TTT...HHH...WWW]` into `[THTHWHTH...TT]` while preserving
+        per-dimension frequency continuity. Mirrors the helper used in Qwen-VL models.
 
         Args:
-            freqs: (3, batch, seq_len, head_dim // 2)
-            mrope_section: [t_dim, h_dim, w_dim]
+            freqs (`torch.Tensor`): Tensor of shape `(3, batch, seq, head_dim // 2)`.
+            mrope_section (`list[int]`): Allocation per [temporal, height, width].
 
         Returns:
-            (batch, seq_len, head_dim // 2) interleaved across dimensions
+            `torch.Tensor`: Interleaved tensor of shape `(batch, seq, head_dim // 2)`.
         """
+
         freqs_t = freqs[0]
-        # Interleave H and W into temporal layout per 3-slot cycle
         for dim, offset in enumerate((1, 2), start=1):
             length = mrope_section[dim] * 3
+            if length <= offset:
+                continue
             idx = slice(offset, length, 3)
             freqs_t[..., idx] = freqs[dim, ..., idx]
         return freqs_t
@@ -638,7 +704,7 @@ class ArlowTextRotaryEmbedding(nn.Module):
         # (3, batch, seq, head_dim//2)
         freqs = (inv_freq_expanded @ position_ids_expanded).transpose(2, 3)
         # Interleave per mrope_sections
-        freqs = self._apply_interleaved_mrope(freqs, self.config.mrope_sections)
+        freqs = self.apply_interleaved_mrope(freqs, self.config.mrope_sections)
         emb = torch.cat((freqs, freqs), dim=-1)
         cos = emb.cos() * self.attention_scaling
         sin = emb.sin() * self.attention_scaling
@@ -721,6 +787,18 @@ class ArlowVLRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = inv_freq
 
+    def apply_interleaved_mrope(self, freqs: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
+        """Apply interleaved M-ROPE layout mirroring Qwen's implementation."""
+
+        freqs_t = freqs[0]
+        for dim, offset in enumerate((1, 2), start=1):
+            length = mrope_section[dim] * 3
+            if length <= offset:
+                continue
+            idx = slice(offset, length, 3)
+            freqs_t[..., idx] = freqs[dim, ..., idx]
+        return freqs_t
+
     def forward(
         self,
         grid_thw: Optional[torch.Tensor] = None,
@@ -782,28 +860,32 @@ class ArlowVLRotaryEmbedding(nn.Module):
         if batch_size is None:
             batch_size = grid_thw.shape[0]
 
+        inv_freq = self.inv_freq.to(device=device, dtype=torch.float32)
         freqs_list: list[torch.Tensor] = []
+        mrope_sections = self.config.mrope_sections
+
         for b in range(batch_size):
-            t, h, w = grid_thw[b].tolist()
-            t = int(t)
-            h = int(h)
-            w = int(w)
-            # Build flattened THW indices in conv3d flatten order (T-major, W fastest)
-            t_index = torch.arange(t, device=device, dtype=dtype).view(-1, 1).expand(-1, h * w).reshape(-1)
-            h_index = torch.arange(h, device=device, dtype=dtype).view(1, -1, 1).expand(t, -1, w).reshape(-1)
-            w_index = torch.arange(w, device=device, dtype=dtype).view(1, 1, -1).expand(t, h, -1).reshape(-1)
+            t, h, w = [int(v) for v in grid_thw[b].tolist()]
+            if t <= 0 or h <= 0 or w <= 0:
+                freqs_list.append(torch.zeros((0, inv_freq.shape[0]), device=device, dtype=torch.float32))
+                continue
 
-            # Compute per-dimension frequencies then interleave sections equally (T,H,W)
-            freqs_t = torch.outer(t_index, self.inv_freq)
-            freqs_h = torch.outer(h_index, self.inv_freq)
-            freqs_w = torch.outer(w_index, self.inv_freq)
+            t_coords = torch.arange(t, device=device, dtype=torch.float32)
+            h_coords = torch.arange(h, device=device, dtype=torch.float32)
+            w_coords = torch.arange(w, device=device, dtype=torch.float32)
 
-            # Simple interleave: average the three components to build a single freq table
-            # (keeps shape while encoding THW; lightweight alternative to full sectioned interleave)
-            freqs_thw = (freqs_t + freqs_h + freqs_w) / 3.0
-            freqs_list.append(freqs_thw)
+            t_index = t_coords[:, None, None].expand(t, h, w).reshape(-1)
+            h_index = h_coords[None, :, None].expand(t, h, w).reshape(-1)
+            w_index = w_coords[None, None, :].expand(t, h, w).reshape(-1)
 
-        return torch.cat(freqs_list, dim=0)
+            position_ids = torch.stack([t_index, h_index, w_index], dim=0)
+            freqs = torch.einsum("ds,f->dsf", position_ids, inv_freq)
+            freqs = freqs[:, None, :, :]
+            freqs = self.apply_interleaved_mrope(freqs, mrope_sections)
+            freqs_list.append(freqs.squeeze(0))
+
+        concatenated = torch.cat(freqs_list, dim=0)
+        return concatenated.to(dtype=dtype)
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -883,6 +965,7 @@ class ArlowAttention(nn.Module):
         past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
+        token_coords: Optional[torch.Tensor] = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         input_shape = hidden_states.shape[:-1]
@@ -1081,6 +1164,7 @@ class ArlowVLAttention(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         cu_seqlens: Optional[torch.Tensor] = None,
+        token_coords: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -1092,6 +1176,8 @@ class ArlowVLAttention(nn.Module):
             hidden_states.shape[0],
             hidden_states.shape[1] if hidden_states.dim() > 2 else hidden_states.shape[0],
         )
+
+        attention_mask = kwargs.get("attention_mask", None)
 
         # Compute Q, K, V
         qkv = self.qkv(hidden_states).reshape(-1, 3, self.num_heads, self.head_dim)
@@ -1116,8 +1202,29 @@ class ArlowVLAttention(nn.Module):
         # Fall back to config if available
         if attn_impl is None:
             attn_impl = getattr(getattr(self, "config", None), "_attn_implementation", "eager")
+        if getattr(self.config, "use_deformable_attention", False):
+            attn_impl = "eager"
         if attn_impl != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[attn_impl]
+
+        bias_mask: Optional[torch.Tensor] = None
+        if getattr(self.config, "use_deformable_attention", False) and token_coords is not None:
+            coords = token_coords.to(query_states.device, dtype=torch.float32)
+            strength = getattr(self.config, "deformable_attention_strength", 4.0)
+            radius = getattr(self.config, "deformable_attention_window", 0.25)
+            penalty = strength * 100.0
+            bias_list: list[torch.Tensor] = []
+            for sample_coords in coords:
+                dist = torch.cdist(sample_coords, sample_coords, p=2)
+                bias = -dist * strength
+                if radius > 0:
+                    bias = torch.where(dist <= radius, bias, bias - penalty)
+                bias_list.append(bias)
+            bias_mask = torch.stack(bias_list, dim=0).unsqueeze(1).to(query_states.dtype)
+            if attention_mask is None:
+                attention_mask = bias_mask
+            else:
+                attention_mask = attention_mask + bias_mask
 
         if attn_impl == "flash_attention_2":
             # FA2 expects int32 cu_seqlens with a leading zero
@@ -1130,7 +1237,7 @@ class ArlowVLAttention(nn.Module):
                 query_states,
                 key_states,
                 value_states,
-                attention_mask=None,
+                attention_mask=attention_mask,
                 scaling=self.scaling,
                 dropout=0.0 if not self.training else self.attention_dropout,
                 cu_seq_lens_q=cu_seqlens,
@@ -1156,7 +1263,7 @@ class ArlowVLAttention(nn.Module):
                     q,
                     k,
                     v,
-                    attention_mask=None,
+                    attention_mask=attention_mask,
                     scaling=self.scaling,
                     dropout=0.0 if not self.training else self.attention_dropout,
                     is_causal=False,
@@ -1192,6 +1299,7 @@ class ArlowVLBlock(GradientCheckpointingLayer):
         hidden_states: torch.Tensor,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         cu_seqlens: Optional[torch.Tensor] = None,
+        token_coords: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         # Self-attention with residual
@@ -1199,6 +1307,7 @@ class ArlowVLBlock(GradientCheckpointingLayer):
             self.norm1(hidden_states),
             position_embeddings=position_embeddings,
             cu_seqlens=cu_seqlens,
+            token_coords=token_coords,
             **kwargs,
         )
         # MLP with residual (inline)
@@ -1263,7 +1372,7 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
 
         # Rotary position embeddings for vision (dim=head_dim)
         head_dim = config.embed_dim // config.num_heads
-        self.rotary_pos_emb = ArlowVLRotaryEmbedding(head_dim)
+        self.rotary_pos_emb = ArlowVLRotaryEmbedding(head_dim, config=config)
 
         # Transformer blocks
         self.blocks = nn.ModuleList([ArlowVLBlock(config) for _ in range(config.depth)])
@@ -1276,6 +1385,10 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
         )
 
         self.gradient_checkpointing = False
+        self.use_progressive_patches = config.use_progressive_patches
+        if self.use_progressive_patches:
+            self.progressive_pool = nn.AvgPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2), ceil_mode=True)
+            self.progressive_proj = nn.Linear(config.embed_dim, config.embed_dim)
 
         self.post_init()
 
@@ -1301,8 +1414,64 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
         # Patch embedding
         hidden_states = self.patch_embed(pixel_values)  # (batch, num_patches, embed_dim)
 
-        # Get grid-aware RoPE embeddings for vision
+        # Prepare normalized token coordinates for deformable attention & progressive patches
+        token_coords: Optional[torch.Tensor] = None
         batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
+        if grid_thw is not None:
+            coord_list: list[torch.Tensor] = []
+            device = hidden_states.device
+            for b in range(len(grid_thw)):
+                t, h, w = [int(v) for v in grid_thw[b].tolist()]
+                if t <= 0 or h <= 0 or w <= 0:
+                    coord_list.append(torch.zeros((seq_len, 3), device=device, dtype=torch.float32))
+                    continue
+                t_range = (
+                    torch.linspace(0, 1, steps=t, device=device, dtype=torch.float32)
+                    if t > 1
+                    else torch.zeros(1, device=device, dtype=torch.float32)
+                )
+                h_range = (
+                    torch.linspace(0, 1, steps=h, device=device, dtype=torch.float32)
+                    if h > 1
+                    else torch.zeros(1, device=device, dtype=torch.float32)
+                )
+                w_range = (
+                    torch.linspace(0, 1, steps=w, device=device, dtype=torch.float32)
+                    if w > 1
+                    else torch.zeros(1, device=device, dtype=torch.float32)
+                )
+                t_grid, h_grid, w_grid = torch.meshgrid(t_range, h_range, w_range, indexing="ij")
+                coords = torch.stack([t_grid, h_grid, w_grid], dim=-1).reshape(-1, 3)
+                coord_list.append(coords)
+            token_coords = torch.stack(coord_list, dim=0)
+
+        # Inject progressive multi-scale patches if enabled
+        if self.use_progressive_patches and grid_thw is not None:
+            updated_states: list[torch.Tensor] = []
+            embed_dim = hidden_states.shape[-1]
+            for b in range(batch_size):
+                t, h, w = [int(v) for v in grid_thw[b].tolist()]
+                tokens = hidden_states[b]
+                total = t * h * w
+                if total == 0:
+                    updated_states.append(tokens)
+                    continue
+                view_tokens = tokens[:total]
+                view_tensor = view_tokens.view(t, h, w, embed_dim).permute(3, 0, 1, 2)  # (embed, T, H, W)
+                pooled = self.progressive_pool(view_tensor.unsqueeze(0))
+                upsampled = F.interpolate(
+                    pooled,
+                    size=(t, h, w),
+                    mode="trilinear",
+                    align_corners=False,
+                ).squeeze(0)
+                refined = self.progressive_proj(upsampled.permute(1, 2, 3, 0).reshape(total, embed_dim)).to(tokens.dtype)
+                tokens = tokens.clone()
+                tokens[:total] = view_tokens + refined
+                updated_states.append(tokens)
+            hidden_states = torch.stack(updated_states, dim=0)
+
+        # Get grid-aware RoPE embeddings for vision
         rotary_pos_emb = self.rotary_pos_emb(grid_thw, batch_size=batch_size, seq_len=seq_len)
         # Robustness: fall back to 1D positions if a mismatch occurs
         total_tokens = batch_size * seq_len
@@ -1321,16 +1490,13 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
         cu_seqlens = torch.tensor([0, total], device=hidden_states.device, dtype=torch.int32)
 
         # Apply transformer blocks
-        for idx, block in enumerate(self.blocks):
-            if self.gradient_checkpointing and self.training:
-                hidden_states = block._gradient_checkpointing_func(
-                    block.__call__,
-                    hidden_states,
-                    position_embeddings,
-                    cu_seqlens,
-                )
-            else:
-                hidden_states = block(hidden_states, position_embeddings, cu_seqlens=cu_seqlens)
+        for block in self.blocks:
+            hidden_states = block(
+                hidden_states,
+                position_embeddings,
+                cu_seqlens,
+                token_coords,
+            )
 
         # Merge patches and project to text dimension
         # Reshape to merge spatial patches: (batch, seq, embed_dim)
@@ -2547,10 +2713,17 @@ class ArlowProcessor(ProcessorMixin):
         video_inputs = {}
         image_grid_thw = None
         video_grid_thw = None
+        image_num_crops: Optional[list[int]] = None
 
         if images is not None:
             image_inputs = self.image_processor(images=images, **output_kwargs["images_kwargs"])
             image_grid_thw = image_inputs.get("image_grid_thw")
+            raw_num_crops = image_inputs.pop("num_crops", None)
+            if raw_num_crops is not None:
+                if isinstance(raw_num_crops, torch.Tensor):
+                    image_num_crops = raw_num_crops.tolist()
+                else:
+                    image_num_crops = list(raw_num_crops)
 
         if videos is not None:
             video_inputs = self.video_processor(videos=videos, **output_kwargs["videos_kwargs"])
@@ -2566,16 +2739,83 @@ class ArlowProcessor(ProcessorMixin):
 
         text = text.copy()  # will edit in-place
 
+        # Inject additional image placeholders for pan-and-scan crops
+        if image_num_crops is not None:
+            placeholder_idx = 0
+            for i, prompt in enumerate(text):
+                if prompt is None:
+                    continue
+                occurrences: list[int] = []
+                start = 0
+                while True:
+                    found = prompt.find(self.image_token, start)
+                    if found == -1:
+                        break
+                    occurrences.append(found)
+                    start = found + len(self.image_token)
+
+                for pos in reversed(occurrences):
+                    if placeholder_idx >= len(image_num_crops):
+                        raise ValueError(
+                            "Mismatch between number of image placeholders in text and image inputs."
+                        )
+                    crops = image_num_crops[placeholder_idx]
+                    if crops > 0:
+                        formatted = (
+                            f"Here is the original image {self.image_token} and here are some crops to help you see better "
+                            + " ".join([self.image_token] * crops)
+                        )
+                        prompt = prompt[:pos] + formatted + prompt[pos + len(self.image_token) :]
+                    placeholder_idx += 1
+                text[i] = prompt
+
+            if placeholder_idx != len(image_num_crops):
+                raise ValueError(
+                    "Mismatch between number of processed images and placeholders after pan-and-scan expansion."
+                )
+
         # Expand image placeholders by computed token budget
         if image_grid_thw is not None:
             merge_len = self.image_processor.merge_size**2 if hasattr(self.image_processor, "merge_size") else 1
             index = 0
+            placeholder_idx = 0
             for i in range(len(text)):
-                while self.image_token in text[i]:
-                    num_image_tokens = image_grid_thw[index].prod() // merge_len
-                    text[i] = text[i].replace(self.image_token, "<|placeholder|>" * num_image_tokens, 1)
-                    index += 1
-                text[i] = text[i].replace("<|placeholder|>", self.image_token)
+                while text[i] is not None and self.image_token in text[i]:
+                    views = 1
+                    if image_num_crops is not None:
+                        if placeholder_idx >= len(image_num_crops):
+                            raise ValueError(
+                                "Mismatch between number of image placeholders and pan-and-scan metadata."
+                            )
+                        views += image_num_crops[placeholder_idx]
+                    placeholder_tokens = ""
+                    for _ in range(views):
+                        if index >= len(image_grid_thw):
+                            raise ValueError(
+                                "Not enough image grid metadata to expand placeholders. "
+                                "Check pan-and-scan configuration."
+                            )
+                        grid_entry = image_grid_thw[index]
+                        if isinstance(grid_entry, torch.Tensor):
+                            num_image_tokens = int(torch.prod(grid_entry).item()) // merge_len
+                        else:
+                            num_image_tokens = int(np.prod(grid_entry)) // merge_len
+                        placeholder_tokens += "<|placeholder|>" * num_image_tokens
+                        index += 1
+                    text[i] = text[i].replace(self.image_token, placeholder_tokens, 1)
+                    placeholder_idx += 1
+                if text[i] is not None:
+                    text[i] = text[i].replace("<|placeholder|>", self.image_token)
+
+            if image_num_crops is not None and placeholder_idx != len(image_num_crops):
+                raise ValueError(
+                    "Mismatch between number of placeholders processed and pan-and-scan metadata entries."
+                )
+            if index != len(image_grid_thw):
+                logger.warning(
+                    "Some image grid metadata entries were unused during placeholder expansion. "
+                    "This may indicate mismatched prompts or preprocessing configuration."
+                )
 
         # Expand video placeholders into per-frame segments with optional timestamps
         if video_grid_thw is not None:

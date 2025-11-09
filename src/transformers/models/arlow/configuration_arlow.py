@@ -4,12 +4,11 @@
 #             the file from the modular. If any change should be done, please apply the change to the
 #                          modular_arlow.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
+import math
+from typing import Optional
+
 from ...configuration_utils import PreTrainedConfig, layer_type_validation
 from ...modeling_rope_utils import rope_config_validation
-from ...utils import logging
-
-
-logger = logging.get_logger(__name__)
 
 
 class ArlowVisionConfig(PreTrainedConfig):
@@ -38,11 +37,17 @@ class ArlowVisionConfig(PreTrainedConfig):
         temporal_patch_size (`int`, *optional*, defaults to 2):
             Temporal patch size for video inputs.
         use_deformable_attention (`bool`, *optional*, defaults to False):
-            Whether to use deformable attention for high-resolution regions. **[Not yet implemented]**
+            Whether to apply deformable attention bias for high-resolution regions.
         use_progressive_patches (`bool`, *optional*, defaults to False):
-            Whether to use progressive patch embeddings for multi-scale. **[Not yet implemented]**
+            Whether to inject progressive multi-scale patch features.
         token_pruning_ratio (`float`, *optional*, defaults to 0.0):
-            Ratio of tokens to prune per region (0.0 means no pruning). **[Not yet implemented]**
+            Ratio of tokens to prune per region (0.0 means no pruning).
+        deformable_attention_window (`float`, *optional*, defaults to 0.25):
+            Normalized radius (in THW coordinates) used to compute deformable attention locality bias.
+        deformable_attention_strength (`float`, *optional*, defaults to 4.0):
+            Scaling factor applied to deformable attention bias.
+        mrope_sections (`list[int]`, *optional*):
+            Multimodal RoPE allocation across [temporal, height, width] (sum must equal head dimension).
         initializer_range (`float`, *optional*, defaults to 0.02):
             Standard deviation for weight initialization.
     """
@@ -65,7 +70,11 @@ class ArlowVisionConfig(PreTrainedConfig):
         use_deformable_attention: bool = False,
         use_progressive_patches: bool = False,
         token_pruning_ratio: float = 0.0,
+        deformable_attention_window: float = 0.25,
+        deformable_attention_strength: float = 4.0,
+        mrope_sections: Optional[list[int]] = None,
         initializer_range: float = 0.02,
+        max_position_embeddings: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -75,6 +84,7 @@ class ArlowVisionConfig(PreTrainedConfig):
         self.hidden_act = hidden_act
         self.mlp_ratio = mlp_ratio
         self.num_heads = num_heads
+        self.num_attention_heads = num_heads
         self.in_channels = in_channels
         self.patch_size = patch_size
         self.spatial_merge_size = spatial_merge_size
@@ -82,17 +92,25 @@ class ArlowVisionConfig(PreTrainedConfig):
         self.use_deformable_attention = use_deformable_attention
         self.use_progressive_patches = use_progressive_patches
         self.token_pruning_ratio = token_pruning_ratio
+        self.deformable_attention_window = deformable_attention_window
+        self.deformable_attention_strength = deformable_attention_strength
         self.initializer_range = initializer_range
+        self.max_position_embeddings = max_position_embeddings if max_position_embeddings is not None else 4096
 
-        # Warn if unsupported features are enabled
-        if self.use_deformable_attention:
-            logger.warning("use_deformable_attention is not yet implemented and will be ignored")
-        if self.use_progressive_patches:
-            logger.warning("use_progressive_patches is not yet implemented and will be ignored")
-        if self.token_pruning_ratio > 0.0:
-            logger.warning(
-                f"token_pruning_ratio={self.token_pruning_ratio} is not yet implemented and will be ignored"
-            )
+        head_dim = embed_dim // num_heads
+        if mrope_sections is None:
+            t = max(1, head_dim // 3)
+            h = max(1, (head_dim - t) // 2)
+            w = max(1, head_dim - t - h)
+            if t + h + w != head_dim:
+                w = head_dim - t - h
+            self.mrope_sections = [t, h, w]
+        else:
+            if sum(mrope_sections) != head_dim:
+                raise ValueError(
+                    f"Sum of mrope_sections {mrope_sections} (={sum(mrope_sections)}) must equal head_dim ({head_dim})."
+                )
+            self.mrope_sections = mrope_sections
 
 
 class ArlowTextConfig(PreTrainedConfig):
@@ -413,6 +431,12 @@ class ArlowConfig(PreTrainedConfig):
                 f"must equal head_dim ({self.head_dim})"
             )
 
+        # Keep track of the ratio so we can project it onto the vision head dimension
+        self._mrope_ratio = [section / self.head_dim for section in self.mrope_sections]
+        vision_head_dim = self.vision_config.embed_dim // self.vision_config.num_heads
+        scaled_sections = self._scale_mrope_sections_from_ratio(vision_head_dim, self._mrope_ratio)
+        self.vision_config.mrope_sections = scaled_sections
+
         # Validate rope parameters (ignore M-ROPE specific keys since we use custom M-ROPE)
         if self.rope_parameters is not None and "type" in self.rope_parameters:
             self.rope_parameters["rope_type"] = self.rope_parameters["type"]
@@ -436,6 +460,43 @@ class ArlowConfig(PreTrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+
+    @staticmethod
+    def _scale_mrope_sections_from_ratio(head_dim: int, ratio: list[float]) -> list[int]:
+        if head_dim <= 0:
+            raise ValueError("head_dim must be positive when computing M-ROPE sections.")
+        if len(ratio) != 3:
+            raise ValueError("ratio must contain three entries for [temporal, height, width].")
+
+        raw = [r * head_dim for r in ratio]
+        base = [math.floor(val) for val in raw]
+        remainders = [val - floor for val, floor in zip(raw, base)]
+
+        # Guarantee a minimum allocation of 1 per dimension
+        for i in range(len(base)):
+            if base[i] < 1:
+                base[i] = 1
+                remainders[i] = 0.0
+
+        total = sum(base)
+
+        # Distribute remaining capacity based on largest remainders
+        while total < head_dim:
+            idx = max(range(len(base)), key=lambda i: remainders[i])
+            base[idx] += 1
+            remainders[idx] = 0.0
+            total += 1
+
+        # Trim excess while keeping each section >= 1
+        while total > head_dim:
+            candidates = [i for i in range(len(base)) if base[i] > 1]
+            if not candidates:
+                break
+            idx = min(candidates, key=lambda i: remainders[i])
+            base[idx] -= 1
+            total -= 1
+
+        return base
 
 
 __all__ = ["ArlowConfig", "ArlowTextConfig", "ArlowVisionConfig"]

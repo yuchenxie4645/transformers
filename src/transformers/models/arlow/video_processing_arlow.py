@@ -11,7 +11,7 @@ from ...image_utils import ChannelDimension, PILImageResampling, SizeDict, get_i
 from ...processing_utils import Unpack, VideosKwargs
 from ...utils import TensorType, add_start_docstrings, logging
 from ...video_processing_utils import BASE_VIDEO_PROCESSOR_DOCSTRING, BaseVideoProcessor
-from ...video_utils import VideoMetadata, group_videos_by_shape, reorder_videos
+from ...video_utils import VideoInput, VideoMetadata, group_videos_by_shape, reorder_videos
 
 
 logger = logging.get_logger(__name__)
@@ -25,6 +25,8 @@ def smart_resize(
     factor: int = 32,
     min_pixels: int = 128 * 128,
     max_pixels: int = 16 * 16 * 2 * 2 * 2 * 6144,
+    max_frames: Optional[int] = None,
+    return_temporal: bool = False,
 ):
     """
     Smart resize for video frames with temporal/spatial constraints.
@@ -35,11 +37,12 @@ def smart_resize(
         width: Frame width
         temporal_factor: Temporal patch size
         factor: Spatial patch size
-        min_pixels: Minimum total pixels allowed
-        max_pixels: Maximum total pixels allowed
+        min_pixels: Minimum volumetric pixels allowed (T × H × W)
+        max_pixels: Maximum volumetric pixels allowed (T × H × W)
+        max_frames: Optional explicit cap on the number of frames
 
     Returns:
-        Tuple of (new_height, new_width)
+        Tuple of (new_num_frames, new_height, new_width)
     """
     if num_frames < temporal_factor:
         raise ValueError(f"num_frames:{num_frames} must be larger than temporal_factor:{temporal_factor}")
@@ -52,17 +55,38 @@ def smart_resize(
 
     h_bar = round(height / factor) * factor
     w_bar = round(width / factor) * factor
-    round(num_frames / temporal_factor) * temporal_factor
+    t_bar = round(num_frames / temporal_factor) * temporal_factor
+    if t_bar <= 0:
+        t_bar = temporal_factor
 
-    # Apply spatial constraints only (tests expect min/max on HxW, not including time)
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
+    # Apply constraints on total volumetric pixels (T × H × W)
+    if t_bar * h_bar * w_bar > max_pixels:
+        beta = math.sqrt((num_frames * height * width) / max_pixels)
         h_bar = max(factor, math.floor(height / beta / factor) * factor)
         w_bar = max(factor, math.floor(width / beta / factor) * factor)
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
+    elif t_bar * h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (num_frames * height * width))
         h_bar = math.ceil(height * beta / factor) * factor
         w_bar = math.ceil(width * beta / factor) * factor
+
+    if max_pixels is not None:
+        # Clamp temporal budget so that (T × H × W) stays within the volumetric cap
+        max_temporal = max_pixels // max(h_bar * w_bar, 1)
+        if max_temporal > 0:
+            max_temporal = (max_temporal // temporal_factor) * temporal_factor
+        if max_temporal <= 0:
+            max_temporal = temporal_factor
+        t_bar = min(t_bar, max_temporal)
+
+    if max_frames is not None:
+        capped_frames = max(max_frames // temporal_factor, 1) * temporal_factor
+        t_bar = min(t_bar, capped_frames)
+
+    # Ensure we never exceed available frames while keeping divisibility
+    t_bar = min(t_bar, (num_frames // temporal_factor) * temporal_factor or temporal_factor)
+
+    if return_temporal:
+        return t_bar, h_bar, w_bar
 
     return h_bar, w_bar
 
@@ -149,6 +173,7 @@ class ArlowVideoProcessor(BaseVideoProcessor):
         size = kwargs.pop("size", None)
         min_pixels = kwargs.pop("min_pixels", None)
         max_pixels = kwargs.pop("max_pixels", None)
+        max_tokens_per_video = kwargs.pop("max_tokens_per_video", None)
         # Start with class default, then override with provided values
         merged_size = dict(self.size) if size is None else {**self.size, **size}
 
@@ -159,10 +184,19 @@ class ArlowVideoProcessor(BaseVideoProcessor):
         if max_pixels is not None:
             merged_size["longest_edge"] = max_pixels
             merged_size.pop("max_pixels", None)
+        if max_tokens_per_video is not None:
+            patch_size = kwargs.get("patch_size", self.patch_size)
+            merge_size = kwargs.get("merge_size", self.merge_size)
+            temporal_patch_size = kwargs.get("temporal_patch_size", self.temporal_patch_size)
+            volumetric_budget = max_tokens_per_video * (patch_size * merge_size) ** 2 * temporal_patch_size
+            merged_size["longest_edge"] = min(merged_size["longest_edge"], volumetric_budget)
         if "shortest_edge" not in merged_size or "longest_edge" not in merged_size:
             raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
 
         super().__init__(size=merged_size, min_pixels=min_pixels, max_pixels=max_pixels, **kwargs)
+        self.max_tokens_per_video = max_tokens_per_video
+        self.max_volume = merged_size["longest_edge"]
+        self._last_selected_frame_indices: list[list[int]] = []
 
     def _further_process_kwargs(
         self,
@@ -262,11 +296,20 @@ class ArlowVideoProcessor(BaseVideoProcessor):
         grouped_videos, grouped_videos_index = group_videos_by_shape(videos)
         resized_videos_grouped = {}
 
+        selected_indices_grouped: dict[tuple[int, int, int], torch.Tensor] = {}
         for shape, stacked_videos in grouped_videos.items():
             B, T, C, H, W = stacked_videos.shape
             num_frames, height, width = T, H, W
+
+            patch_size = patch_size or self.patch_size
+            temporal_patch_size = temporal_patch_size or self.temporal_patch_size
+            merge_size = merge_size or self.merge_size
+
+            target_frames = T
+            resized_height, resized_width = height, width
+
             if do_resize:
-                resized_height, resized_width = smart_resize(
+                target_frames, resized_height, resized_width = smart_resize(
                     num_frames=num_frames,
                     height=height,
                     width=width,
@@ -274,7 +317,10 @@ class ArlowVideoProcessor(BaseVideoProcessor):
                     factor=(patch_size * merge_size),
                     min_pixels=size.shortest_edge,
                     max_pixels=size.longest_edge,
+                    max_frames=self.max_frames,
+                    return_temporal=True,
                 )
+
                 stacked_videos = stacked_videos.view(B * T, C, H, W)
                 stacked_videos = self.resize(
                     stacked_videos,
@@ -282,8 +328,26 @@ class ArlowVideoProcessor(BaseVideoProcessor):
                     interpolation=interpolation,
                 )
                 stacked_videos = stacked_videos.view(B, T, C, resized_height, resized_width)
+
+            if target_frames != T:
+                frame_positions = torch.linspace(
+                    0,
+                    T - 1,
+                    steps=target_frames,
+                    device=stacked_videos.device,
+                    dtype=torch.float32,
+                )
+                frame_indices = torch.clamp(frame_positions.round().long(), 0, T - 1)
+                stacked_videos = stacked_videos.index_select(1, frame_indices)
+            else:
+                frame_indices = torch.arange(T, device=stacked_videos.device)
+
+            selected_indices_grouped[shape] = torch.stack([frame_indices.clone() for _ in range(B)], dim=0)
             resized_videos_grouped[shape] = stacked_videos
+
         resized_videos = reorder_videos(resized_videos_grouped, grouped_videos_index)
+        selected_indices = reorder_videos(selected_indices_grouped, grouped_videos_index)
+        self._last_selected_frame_indices = [indices.detach().cpu().tolist() for indices in selected_indices]
 
         # Group again to ensure homogeneous shapes after resizing
         grouped_videos, grouped_videos_index = group_videos_by_shape(resized_videos)
@@ -309,13 +373,14 @@ class ArlowVideoProcessor(BaseVideoProcessor):
             if patches.shape[1] % temporal_patch_size != 0:
                 repeats = patches[:, -1:].repeat(1, temporal_patch_size - 1, 1, 1, 1)
                 patches = torch.cat([patches, repeats], dim=1)
-            batch_size, grid_t, channel = patches.shape[:3]
-            grid_t = grid_t // temporal_patch_size
+
+            batch_size, temporal_tokens, channel = patches.shape[:3]
+            temporal_groups = temporal_tokens // temporal_patch_size
             grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
 
             patches = patches.view(
                 batch_size,
-                grid_t,
+                temporal_groups,
                 temporal_patch_size,
                 channel,
                 grid_h // merge_size,
@@ -328,12 +393,12 @@ class ArlowVideoProcessor(BaseVideoProcessor):
             patches = patches.permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
             flatten_patches = patches.reshape(
                 batch_size,
-                grid_t * grid_h * grid_w,
+                temporal_groups * grid_h * grid_w,
                 channel * temporal_patch_size * patch_size * patch_size,
             )
 
             processed_videos_grouped[shape] = flatten_patches
-            processed_grids[shape] = [[grid_t, grid_h // merge_size, grid_w // merge_size]] * batch_size
+            processed_grids[shape] = [[temporal_tokens, grid_h, grid_w]] * batch_size
 
         processed_videos = reorder_videos(processed_videos_grouped, grouped_videos_index)
         processed_grids = reorder_videos(processed_grids, grouped_videos_index)
@@ -355,6 +420,21 @@ class ArlowVideoProcessor(BaseVideoProcessor):
         }
 
         return BatchFeature(data=data, tensor_type=return_tensors)
+
+    def preprocess(
+        self,
+        videos: VideoInput,
+        **kwargs: Unpack[VideosKwargs],
+    ) -> BatchFeature:
+        outputs = super().preprocess(videos, **kwargs)
+        if "video_metadata" in outputs and self._last_selected_frame_indices:
+            metadata_list = outputs["video_metadata"]
+            for metadata, indices in zip(metadata_list, self._last_selected_frame_indices):
+                if metadata is None:
+                    continue
+                metadata.frames_indices = np.asarray(indices, dtype=np.int64)
+        self._last_selected_frame_indices = []
+        return outputs
 
 
 class ArlowVideoProcessorFast(ArlowVideoProcessor):

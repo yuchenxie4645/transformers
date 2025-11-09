@@ -53,6 +53,10 @@ class ArlowImageProcessorKwargs(ImagesKwargs, total=False):
     min_pixels: int
     max_pixels: int
     disable_grouping: bool
+    do_pan_and_scan: bool
+    pan_and_scan_min_crop_size: int
+    pan_and_scan_max_num_crops: int
+    pan_and_scan_min_ratio_to_activate: float
 
 
 @add_start_docstrings(
@@ -80,6 +84,10 @@ class ArlowImageProcessor(BaseImageProcessorFast):
     merge_size = 2
     min_pixels = None
     max_pixels = None
+    do_pan_and_scan = False
+    pan_and_scan_min_crop_size = 256
+    pan_and_scan_max_num_crops = 4
+    pan_and_scan_min_ratio_to_activate = 1.6
     valid_kwargs = ArlowImageProcessorKwargs
     model_input_names = ["pixel_values", "image_grid_thw"]
 
@@ -122,6 +130,98 @@ class ArlowImageProcessor(BaseImageProcessorFast):
             size = {**self.size}
 
         return super()._further_process_kwargs(size=size, min_pixels=min_pixels, max_pixels=max_pixels, **kwargs)
+
+    def pan_and_scan(
+        self,
+        image: "torch.Tensor",
+        pan_and_scan_min_crop_size: int,
+        pan_and_scan_max_num_crops: int,
+        pan_and_scan_min_ratio_to_activate: float,
+    ) -> list["torch.Tensor"]:
+        """
+        Generate additional crops for images with extreme aspect ratios following a pan-and-scan strategy.
+
+        Args:
+            image (`torch.Tensor`):
+                Image tensor of shape `(channels, height, width)`.
+            pan_and_scan_min_crop_size (`int`):
+                Minimum size of each crop.
+            pan_and_scan_max_num_crops (`int`):
+                Maximum number of crops to generate.
+            pan_and_scan_min_ratio_to_activate (`float`):
+                Aspect ratio threshold to activate pan-and-scan.
+
+        Returns:
+            `list[torch.Tensor]` containing additional cropped views.
+        """
+
+        height, width = image.shape[-2:]
+        if width >= height:
+            if height == 0 or width / height < pan_and_scan_min_ratio_to_activate:
+                return []
+            num_crops_w = int(math.floor(width / height + 0.5))
+            max_crops_by_size = int(math.floor(width / pan_and_scan_min_crop_size)) if pan_and_scan_min_crop_size else num_crops_w
+            num_crops_w = min(max_crops_by_size, num_crops_w)
+            num_crops_w = max(2, num_crops_w)
+            num_crops_w = min(pan_and_scan_max_num_crops, num_crops_w)
+            num_crops_h = 1
+        else:
+            if width == 0 or height / width < pan_and_scan_min_ratio_to_activate:
+                return []
+            num_crops_h = int(math.floor(height / width + 0.5))
+            max_crops_by_size = int(math.floor(height / pan_and_scan_min_crop_size)) if pan_and_scan_min_crop_size else num_crops_h
+            num_crops_h = min(max_crops_by_size, num_crops_h)
+            num_crops_h = max(2, num_crops_h)
+            num_crops_h = min(pan_and_scan_max_num_crops, num_crops_h)
+            num_crops_w = 1
+
+        crop_size_w = int(math.ceil(width / num_crops_w))
+        crop_size_h = int(math.ceil(height / num_crops_h))
+
+        if min(crop_size_w, crop_size_h) < pan_and_scan_min_crop_size:
+            return []
+
+        crop_positions_w = [min(width - crop_size_w, crop_size_w * i) for i in range(num_crops_w)]
+        crop_positions_h = [min(height - crop_size_h, crop_size_h * i) for i in range(num_crops_h)]
+
+        crops: list["torch.Tensor"] = []
+        for pos_h in crop_positions_h:
+            for pos_w in crop_positions_w:
+                end_h = min(pos_h + crop_size_h, height)
+                end_w = min(pos_w + crop_size_w, width)
+                crops.append(image[..., pos_h:end_h, pos_w:end_w])
+
+        return crops
+
+    def _expand_with_pan_and_scan(
+        self,
+        images: list["torch.Tensor"],
+        do_pan_and_scan: bool,
+        pan_and_scan_min_crop_size: int,
+        pan_and_scan_max_num_crops: int,
+        pan_and_scan_min_ratio_to_activate: float,
+    ) -> tuple[list["torch.Tensor"], list[int]]:
+        """
+        Apply pan-and-scan to a list of images, returning expanded views and per-image crop counts.
+        """
+
+        expanded: list["torch.Tensor"] = []
+        num_crops_per_image: list[int] = []
+
+        for image in images:
+            crops: list["torch.Tensor"] = []
+            if do_pan_and_scan:
+                crops = self.pan_and_scan(
+                    image=image,
+                    pan_and_scan_min_crop_size=pan_and_scan_min_crop_size,
+                    pan_and_scan_max_num_crops=pan_and_scan_max_num_crops,
+                    pan_and_scan_min_ratio_to_activate=pan_and_scan_min_ratio_to_activate,
+                )
+            num_crops_per_image.append(len(crops))
+            expanded.append(image)
+            expanded.extend(crops)
+
+        return expanded, num_crops_per_image
 
     def preprocess(
         self,
@@ -174,8 +274,30 @@ class ArlowImageProcessor(BaseImageProcessorFast):
         return_tensors: Optional[Union[str, TensorType]],
         **kwargs,
     ):
+        do_pan_and_scan = kwargs.pop("do_pan_and_scan", self.do_pan_and_scan)
+        pan_and_scan_min_crop_size = kwargs.pop(
+            "pan_and_scan_min_crop_size", self.pan_and_scan_min_crop_size
+        )
+        pan_and_scan_max_num_crops = kwargs.pop(
+            "pan_and_scan_max_num_crops", self.pan_and_scan_max_num_crops
+        )
+        pan_and_scan_min_ratio_to_activate = kwargs.pop(
+            "pan_and_scan_min_ratio_to_activate", self.pan_and_scan_min_ratio_to_activate
+        )
+
+        # Compute additional views if pan-and-scan is requested
+        expanded_images, num_crops_per_image = self._expand_with_pan_and_scan(
+            images=images,
+            do_pan_and_scan=bool(do_pan_and_scan),
+            pan_and_scan_min_crop_size=pan_and_scan_min_crop_size,
+            pan_and_scan_max_num_crops=pan_and_scan_max_num_crops,
+            pan_and_scan_min_ratio_to_activate=pan_and_scan_min_ratio_to_activate,
+        )
+
         # Group images by size for batched resizing
-        grouped_images, grouped_images_index = group_images_by_shape(images, disable_grouping=disable_grouping)
+        grouped_images, grouped_images_index = group_images_by_shape(
+            expanded_images, disable_grouping=disable_grouping
+        )
         resized_images_grouped = {}
         for shape, stacked_images in grouped_images.items():
             height, width = stacked_images.shape[-2:]
@@ -196,7 +318,9 @@ class ArlowImageProcessor(BaseImageProcessorFast):
         resized_images = reorder_images(resized_images_grouped, grouped_images_index)
 
         # Group again for patchification
-        grouped_images, grouped_images_index = group_images_by_shape(resized_images, disable_grouping=disable_grouping)
+        grouped_images, grouped_images_index = group_images_by_shape(
+            resized_images, disable_grouping=disable_grouping
+        )
         processed_images_grouped = {}
         processed_grids = {}
         for shape, stacked_images in grouped_images.items():
@@ -251,7 +375,12 @@ class ArlowImageProcessor(BaseImageProcessorFast):
         image_grid_thw = torch.tensor(processed_grids)
 
         return BatchFeature(
-            data={"pixel_values": pixel_values, "image_grid_thw": image_grid_thw}, tensor_type=return_tensors
+            data={
+                "pixel_values": pixel_values,
+                "image_grid_thw": image_grid_thw,
+                "num_crops": num_crops_per_image,
+            },
+            tensor_type=return_tensors,
         )
 
     def get_number_of_image_patches(self, height: int, width: int, images_kwargs=None):

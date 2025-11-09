@@ -4,9 +4,10 @@
 #             the file from the modular. If any change should be done, please apply the change to the
 #                          modular_arlow.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
+import torch
 
 from ...feature_extraction_utils import BatchFeature
 from ...image_utils import ImageInput
@@ -99,10 +100,17 @@ class ArlowProcessor(ProcessorMixin):
         video_inputs = {}
         image_grid_thw = None
         video_grid_thw = None
+        image_num_crops: Optional[list[int]] = None
 
         if images is not None:
             image_inputs = self.image_processor(images=images, **output_kwargs["images_kwargs"])
             image_grid_thw = image_inputs.get("image_grid_thw")
+            raw_num_crops = image_inputs.pop("num_crops", None)
+            if raw_num_crops is not None:
+                if isinstance(raw_num_crops, torch.Tensor):
+                    image_num_crops = raw_num_crops.tolist()
+                else:
+                    image_num_crops = list(raw_num_crops)
 
         if videos is not None:
             video_inputs = self.video_processor(videos=videos, **output_kwargs["videos_kwargs"])
@@ -118,16 +126,81 @@ class ArlowProcessor(ProcessorMixin):
 
         text = text.copy()  # will edit in-place
 
+        # Inject additional image placeholders for pan-and-scan crops
+        if image_num_crops is not None:
+            placeholder_idx = 0
+            for i, prompt in enumerate(text):
+                if prompt is None:
+                    continue
+                occurrences: list[int] = []
+                start = 0
+                while True:
+                    found = prompt.find(self.image_token, start)
+                    if found == -1:
+                        break
+                    occurrences.append(found)
+                    start = found + len(self.image_token)
+
+                for pos in reversed(occurrences):
+                    if placeholder_idx >= len(image_num_crops):
+                        raise ValueError("Mismatch between number of image placeholders in text and image inputs.")
+                    crops = image_num_crops[placeholder_idx]
+                    if crops > 0:
+                        formatted = (
+                            f"Here is the original image {self.image_token} and here are some crops to help you see better "
+                            + " ".join([self.image_token] * crops)
+                        )
+                        prompt = prompt[:pos] + formatted + prompt[pos + len(self.image_token) :]
+                    placeholder_idx += 1
+                text[i] = prompt
+
+            if placeholder_idx != len(image_num_crops):
+                raise ValueError(
+                    "Mismatch between number of processed images and placeholders after pan-and-scan expansion."
+                )
+
         # Expand image placeholders by computed token budget
         if image_grid_thw is not None:
             merge_len = self.image_processor.merge_size**2 if hasattr(self.image_processor, "merge_size") else 1
             index = 0
+            placeholder_idx = 0
             for i in range(len(text)):
-                while self.image_token in text[i]:
-                    num_image_tokens = image_grid_thw[index].prod() // merge_len
-                    text[i] = text[i].replace(self.image_token, "<|placeholder|>" * num_image_tokens, 1)
-                    index += 1
-                text[i] = text[i].replace("<|placeholder|>", self.image_token)
+                while text[i] is not None and self.image_token in text[i]:
+                    views = 1
+                    if image_num_crops is not None:
+                        if placeholder_idx >= len(image_num_crops):
+                            raise ValueError(
+                                "Mismatch between number of image placeholders and pan-and-scan metadata."
+                            )
+                        views += image_num_crops[placeholder_idx]
+                    placeholder_tokens = ""
+                    for _ in range(views):
+                        if index >= len(image_grid_thw):
+                            raise ValueError(
+                                "Not enough image grid metadata to expand placeholders. "
+                                "Check pan-and-scan configuration."
+                            )
+                        grid_entry = image_grid_thw[index]
+                        if isinstance(grid_entry, torch.Tensor):
+                            num_image_tokens = int(torch.prod(grid_entry).item()) // merge_len
+                        else:
+                            num_image_tokens = int(np.prod(grid_entry)) // merge_len
+                        placeholder_tokens += "<|placeholder|>" * num_image_tokens
+                        index += 1
+                    text[i] = text[i].replace(self.image_token, placeholder_tokens, 1)
+                    placeholder_idx += 1
+                if text[i] is not None:
+                    text[i] = text[i].replace("<|placeholder|>", self.image_token)
+
+            if image_num_crops is not None and placeholder_idx != len(image_num_crops):
+                raise ValueError(
+                    "Mismatch between number of placeholders processed and pan-and-scan metadata entries."
+                )
+            if index != len(image_grid_thw):
+                logger.warning(
+                    "Some image grid metadata entries were unused during placeholder expansion. "
+                    "This may indicate mismatched prompts or preprocessing configuration."
+                )
 
         # Expand video placeholders into per-frame segments with optional timestamps
         if video_grid_thw is not None:

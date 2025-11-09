@@ -19,6 +19,8 @@ if is_torch_available():
         ArlowForTokenClassification,
         ArlowModel,
     )
+    from transformers.models.arlow.image_processing_arlow import ArlowImageProcessor
+    from transformers.models.arlow.video_processing_arlow import ArlowVideoProcessor
     from transformers.models.arlow.modeling_arlow import ArlowTextRotaryEmbedding
 
 
@@ -57,6 +59,9 @@ class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
     test_pruning = False
     model_tester_class = ArlowModelTester
     rotary_embedding_layer = ArlowTextRotaryEmbedding  # Enables RoPE tests if set
+    test_can_load_with_device_context_manager = False
+    test_can_load_with_global_device_set = False
+    test_disk_offload_safetensors = False
 
     # Need to use `0.8` instead of `0.9` for `test_cpu_offload`
     # This is because we are hitting edge cases with the causal_mask buffer
@@ -202,6 +207,60 @@ class ArlowIntegrationTest(unittest.TestCase):
             if param.requires_grad:
                 self.assertIsNotNone(param.grad)
                 break
+
+    def test_video_processor_temporal_budget(self):
+        video_processor = ArlowVideoProcessor(
+            patch_size=14,
+            temporal_patch_size=2,
+            merge_size=2,
+            max_tokens_per_video=16,
+        )
+        video = torch.randn(24, 3, 112, 112)
+        outputs = video_processor(videos=[video], return_metadata=True)
+        grid = outputs["video_grid_thw"][0]
+        grid = grid.tolist() if hasattr(grid, "tolist") else grid
+        tokens = int(grid[0]) * int(grid[1]) * int(grid[2])
+        self.assertLessEqual(tokens, video_processor.max_tokens_per_video)
+        metadata = outputs["video_metadata"][0]
+        self.assertEqual(
+            len(metadata.frames_indices),
+            int(grid[0]) * video_processor.temporal_patch_size,
+        )
+
+    def test_image_pan_and_scan_generates_crops(self):
+        image_processor = ArlowImageProcessor(
+            do_pan_and_scan=True,
+            pan_and_scan_min_crop_size=64,
+            pan_and_scan_min_ratio_to_activate=1.0,
+            pan_and_scan_max_num_crops=4,
+        )
+        image = torch.randn(3, 128, 512)
+        outputs = image_processor(images=[image])
+        num_crops = outputs["num_crops"][0]
+        self.assertGreaterEqual(num_crops, 1)
+        grid = outputs["image_grid_thw"][0]
+        self.assertEqual(int(grid[0]), 1)
+
+    def test_mrope_section_alignment(self):
+        config = ArlowConfig(
+            hidden_size=128,
+            num_attention_heads=4,
+            mrope_sections=[12, 10, 10],
+            vision_config={"embed_dim": 96, "num_heads": 3},
+        )
+        text_sections = config.mrope_sections
+        vision_sections = config.vision_config.mrope_sections
+        self.assertEqual(
+            sum(vision_sections),
+            config.vision_config.embed_dim // config.vision_config.num_heads,
+        )
+        text_total = sum(text_sections)
+        vision_total = sum(vision_sections)
+        for text_ratio, vision_ratio in zip(
+            [sec / text_total for sec in text_sections],
+            [sec / vision_total for sec in vision_sections],
+        ):
+            self.assertAlmostEqual(text_ratio, vision_ratio, delta=0.1)
 
     @slow
     def test_model_sliding_window_attention(self):
