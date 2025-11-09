@@ -60,23 +60,17 @@ def smart_resize(
         t_bar = temporal_factor
 
     # Apply constraints on total volumetric pixels (T × H × W)
-    if t_bar * h_bar * w_bar > max_pixels:
-        beta = math.sqrt((num_frames * height * width) / max_pixels)
+    frame_pixels = h_bar * w_bar
+    if max_pixels is not None and frame_pixels > max_pixels:
+        beta = math.sqrt((height * width) / max_pixels)
         h_bar = max(factor, math.floor(height / beta / factor) * factor)
         w_bar = max(factor, math.floor(width / beta / factor) * factor)
-    elif t_bar * h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (num_frames * height * width))
+        frame_pixels = h_bar * w_bar
+    if min_pixels is not None and frame_pixels < min_pixels:
+        beta = math.sqrt(min_pixels / (height * width))
         h_bar = math.ceil(height * beta / factor) * factor
         w_bar = math.ceil(width * beta / factor) * factor
-
-    if max_pixels is not None:
-        # Clamp temporal budget so that (T × H × W) stays within the volumetric cap
-        max_temporal = max_pixels // max(h_bar * w_bar, 1)
-        if max_temporal > 0:
-            max_temporal = (max_temporal // temporal_factor) * temporal_factor
-        if max_temporal <= 0:
-            max_temporal = temporal_factor
-        t_bar = min(t_bar, max_temporal)
+        frame_pixels = h_bar * w_bar
 
     if max_frames is not None:
         capped_frames = max(max_frames // temporal_factor, 1) * temporal_factor
@@ -320,14 +314,47 @@ class ArlowVideoProcessor(BaseVideoProcessor):
                     max_frames=self.max_frames,
                     return_temporal=True,
                 )
+            else:
+                resized_height, resized_width = height, width
 
-                stacked_videos = stacked_videos.view(B * T, C, H, W)
-                stacked_videos = self.resize(
-                    stacked_videos,
-                    size=SizeDict(height=resized_height, width=resized_width),
-                    interpolation=interpolation,
-                )
-                stacked_videos = stacked_videos.view(B, T, C, resized_height, resized_width)
+            grid_h_patches = max(resized_height // patch_size, 1)
+            grid_w_patches = max(resized_width // patch_size, 1)
+            grid_h_groups = max(grid_h_patches // merge_size, 1)
+            grid_w_groups = max(grid_w_patches // merge_size, 1)
+
+            temporal_groups = max(1, math.ceil(max(target_frames, 1) / temporal_patch_size))
+            if temporal_groups % temporal_patch_size != 0:
+                temporal_groups = ((temporal_groups + temporal_patch_size - 1) // temporal_patch_size) * temporal_patch_size
+
+            if self.max_tokens_per_video is not None:
+                temporal_groups = min(temporal_groups, max(self.max_tokens_per_video, temporal_patch_size))
+                temporal_groups = max(temporal_groups, temporal_patch_size)
+
+                while (
+                    temporal_groups * grid_h_groups * grid_w_groups > self.max_tokens_per_video
+                    and (temporal_groups > temporal_patch_size or grid_h_groups > 1 or grid_w_groups > 1)
+                ):
+                    if temporal_groups > temporal_patch_size:
+                        temporal_groups -= temporal_patch_size
+                    elif grid_h_groups >= grid_w_groups and grid_h_groups > 1:
+                        grid_h_groups -= 1
+                    elif grid_w_groups > 1:
+                        grid_w_groups -= 1
+                    else:
+                        break
+
+                temporal_groups = max(temporal_groups, temporal_patch_size)
+                grid_h_groups = max(grid_h_groups, 1)
+                grid_w_groups = max(grid_w_groups, 1)
+                resized_height = grid_h_groups * merge_size * patch_size
+                resized_width = grid_w_groups * merge_size * patch_size
+                grid_h_patches = grid_h_groups * merge_size
+                grid_w_patches = grid_w_groups * merge_size
+
+            target_frames = temporal_groups * temporal_patch_size
+            max_groups = max(self.max_frames // temporal_patch_size, 1)
+            target_frames = min(target_frames, max_groups * temporal_patch_size)
+            target_frames = max(target_frames, temporal_patch_size)
 
             if target_frames != T:
                 frame_positions = torch.linspace(
@@ -341,6 +368,16 @@ class ArlowVideoProcessor(BaseVideoProcessor):
                 stacked_videos = stacked_videos.index_select(1, frame_indices)
             else:
                 frame_indices = torch.arange(T, device=stacked_videos.device)
+
+            if do_resize:
+                frame_count = stacked_videos.shape[1]
+                stacked_videos = stacked_videos.view(B * frame_count, C, H, W)
+                stacked_videos = self.resize(
+                    stacked_videos,
+                    size=SizeDict(height=resized_height, width=resized_width),
+                    interpolation=interpolation,
+                )
+                stacked_videos = stacked_videos.view(B, frame_count, C, resized_height, resized_width)
 
             selected_indices_grouped[shape] = torch.stack([frame_indices.clone() for _ in range(B)], dim=0)
             resized_videos_grouped[shape] = stacked_videos
@@ -376,29 +413,32 @@ class ArlowVideoProcessor(BaseVideoProcessor):
 
             batch_size, temporal_tokens, channel = patches.shape[:3]
             temporal_groups = temporal_tokens // temporal_patch_size
-            grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
+            grid_h_patches = max(resized_height // patch_size, 1)
+            grid_w_patches = max(resized_width // patch_size, 1)
+            grid_h_groups = max(grid_h_patches // merge_size, 1)
+            grid_w_groups = max(grid_w_patches // merge_size, 1)
 
             patches = patches.view(
                 batch_size,
                 temporal_groups,
                 temporal_patch_size,
                 channel,
-                grid_h // merge_size,
+                grid_h_groups,
                 merge_size,
                 patch_size,
-                grid_w // merge_size,
+                grid_w_groups,
                 merge_size,
                 patch_size,
             )
             patches = patches.permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
             flatten_patches = patches.reshape(
                 batch_size,
-                temporal_groups * grid_h * grid_w,
-                channel * temporal_patch_size * patch_size * patch_size,
+                temporal_groups * grid_h_groups * grid_w_groups,
+                channel * temporal_patch_size * merge_size * merge_size * patch_size * patch_size,
             )
 
             processed_videos_grouped[shape] = flatten_patches
-            processed_grids[shape] = [[temporal_tokens, grid_h, grid_w]] * batch_size
+            processed_grids[shape] = [[temporal_groups, grid_h_groups, grid_w_groups]] * batch_size
 
         processed_videos = reorder_videos(processed_videos_grouped, grouped_videos_index)
         processed_grids = reorder_videos(processed_grids, grouped_videos_index)

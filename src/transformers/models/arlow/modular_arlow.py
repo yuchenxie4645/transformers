@@ -1992,10 +1992,16 @@ class ArlowModel(ArlowPreTrainedModel):
             t_in = image_grid_thw[:, 0]
             h = image_grid_thw[:, 1]
             w = image_grid_thw[:, 2]
-            base_per_item = (h // spm) * (w // spm)
+            base_per_item = torch.maximum(h * w, torch.ones_like(h))
             total_len = image_embeds.shape[0]
             # Candidate 1: assume t already patched
             counts1 = (t_in * base_per_item).sum().item()
+            if counts1 != total_len:
+                base_alt = torch.maximum(h // spm, torch.ones_like(h)) * torch.maximum(w // spm, torch.ones_like(w))
+                counts_alt = (t_in * base_alt).sum().item()
+                if counts_alt == total_len:
+                    base_per_item = base_alt
+                    counts1 = counts_alt
             if counts1 == total_len:
                 t_use = t_in
             else:
@@ -2006,13 +2012,17 @@ class ArlowModel(ArlowPreTrainedModel):
                 if counts2 == total_len:
                     t_use = t2
                 else:
-                    # Fallback: greedy infer per-item t to match total_len
-                    t_use_list = []
+                    base_per_item = torch.ones_like(h)
+                    t_use_list: list[int] = []
                     remaining = total_len
-                    for base in base_per_item.tolist():
-                        guess = max(1, remaining // max(base, 1))
-                        t_use_list.append(guess)
-                        remaining -= guess * base
+                    items_left = len(t_in)
+                    for _ in range(items_left):
+                        size = max(1, remaining // max(items_left, 1))
+                        t_use_list.append(size)
+                        remaining -= size
+                        items_left -= 1
+                    if remaining > 0:
+                        t_use_list[-1] += remaining
                     t_use = torch.tensor(t_use_list, device=image_grid_thw.device)
 
             split_sizes = (t_use * base_per_item).tolist()
@@ -2045,10 +2055,16 @@ class ArlowModel(ArlowPreTrainedModel):
             t_in = video_grid_thw[:, 0]
             h = video_grid_thw[:, 1]
             w = video_grid_thw[:, 2]
-            base_per_item = (h // spm) * (w // spm)
+            base_per_item = torch.maximum(h * w, torch.ones_like(h))
             total_len = video_embeds.shape[0]
             # Candidate 1: assume t already patched
             counts1 = (t_in * base_per_item).sum().item()
+            if counts1 != total_len:
+                base_alt = torch.maximum(h // spm, torch.ones_like(h)) * torch.maximum(w // spm, torch.ones_like(w))
+                counts_alt = (t_in * base_alt).sum().item()
+                if counts_alt == total_len:
+                    base_per_item = base_alt
+                    counts1 = counts_alt
             if counts1 == total_len:
                 t_use = t_in
             else:
@@ -2059,13 +2075,17 @@ class ArlowModel(ArlowPreTrainedModel):
                 if counts2 == total_len:
                     t_use = t2
                 else:
-                    # Fallback: greedy infer per-item t to match total_len
-                    t_use_list = []
+                    base_per_item = torch.ones_like(h)
+                    t_use_list: list[int] = []
                     remaining = total_len
-                    for base in base_per_item.tolist():
-                        guess = max(1, remaining // max(base, 1))
-                        t_use_list.append(guess)
-                        remaining -= guess * base
+                    items_left = len(t_in)
+                    for _ in range(items_left):
+                        size = max(1, remaining // max(items_left, 1))
+                        t_use_list.append(size)
+                        remaining -= size
+                        items_left -= 1
+                    if remaining > 0:
+                        t_use_list[-1] += remaining
                     t_use = torch.tensor(t_use_list, device=video_grid_thw.device)
 
             split_sizes = (t_use * base_per_item).tolist()
