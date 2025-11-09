@@ -1,0 +1,80 @@
+{
+  "architectures": [
+    "ArlowForSequenceClassification"
+  ],
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "dtype": "float32",
+  "dynamic_resolution": true,
+  "frame_separator_token_id": null,
+  "gated_cross_attention_start_layer": null,
+  "head_dim": 8,
+  "hidden_act": "silu",
+  "hidden_size": 32,
+  "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1",
+    "2": "LABEL_2"
+  },
+  "image_token_id": null,
+  "initializer_range": 0.02,
+  "intermediate_size": 64,
+  "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1,
+    "LABEL_2": 2
+  },
+  "layer_types": [
+    "full_attention",
+    "full_attention"
+  ],
+  "max_position_embeddings": 2048,
+  "max_window_layers": 28,
+  "mlp_dropout": 0.0,
+  "mm_tokens_per_image": 256,
+  "mm_tokens_per_video": 128,
+  "model_type": "arlow",
+  "mrope_sections": [
+    2,
+    3,
+    3
+  ],
+  "num_attention_heads": 4,
+  "num_hidden_layers": 2,
+  "num_key_value_heads": 4,
+  "pan_and_scan": false,
+  "resid_dropout": 0.0,
+  "rms_norm_eps": 1e-06,
+  "rope_parameters": null,
+  "rope_theta": 100000.0,
+  "sliding_window": null,
+  "tie_word_embeddings": false,
+  "timestamp_alignment": false,
+  "transformers_version": "5.0.0.dev0",
+  "use_cache": true,
+  "use_gated_cross_attention": false,
+  "use_sliding_window": false,
+  "video_max_frames": 64,
+  "video_sample_strategy": "uniform",
+  "video_token_id": null,
+  "vision_config": {
+    "depth": 2,
+    "embed_dim": 32,
+    "hidden_act": "gelu_pytorch_tanh",
+    "hidden_size": 64,
+    "in_channels": 3,
+    "initializer_range": 0.02,
+    "mlp_ratio": 4,
+    "model_type": "arlow",
+    "num_heads": 4,
+    "patch_size": 14,
+    "spatial_merge_size": 2,
+    "temporal_patch_size": 2,
+    "token_pruning_ratio": 0.0,
+    "use_deformable_attention": false,
+    "use_progressive_patches": false
+  },
+  "vision_end_token_id": null,
+  "vision_start_token_id": null,
+  "vocab_size": 131072
+}

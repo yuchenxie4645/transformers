@@ -1748,6 +1748,29 @@ class ArlowModel(ArlowPreTrainedModel):
     _checkpoint_conversion_mapping = {"^model": "model.language_model"}
     accepts_loss_kwargs = False
 
+    @staticmethod
+    def _fix_state_dict_key_on_load(key: str) -> tuple[str, bool]:
+        """
+        Align checkpoints saved from task heads (prefixed with `model.`) to the base architecture layout.
+
+        This ensures that loading a head checkpoint into the base model surfaces true shape mismatches
+        instead of silently reinitializing missing weights.
+        """
+        new_key, changed = PreTrainedModel._fix_state_dict_key_on_load(key)
+
+        # Head checkpoints save the text backbone under `model.*`. Strip that prefix and remap to
+        # the base model's `language_model.*` namespace while leaving vision weights untouched.
+        if new_key.startswith("model.language_model."):
+            return new_key, True
+
+        if new_key.startswith("model."):
+            suffix = new_key[len("model.") :]
+            # Only remap text-backbone weights; skip other modules like `visual`
+            if not suffix.startswith("visual."):
+                return f"model.language_model.{suffix}", True
+
+        return new_key, changed
+
     def __init__(self, config: ArlowConfig):
         super().__init__(config)
 
