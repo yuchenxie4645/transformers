@@ -1166,6 +1166,19 @@ class ArlowTextModel(ArlowPreTrainedModel):
         self.rotary_emb = ArlowTextRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
+        self.visual_gates: Optional[torch.nn.Parameter] = None
+        self._gated_cross_attention_start_layer: Optional[int] = None
+        if getattr(config, "use_gated_cross_attention", False):
+            deepstack_indexes: list[int] = []
+            if hasattr(config, "vision_config") and config.vision_config is not None:
+                deepstack_indexes = getattr(config.vision_config, "deepstack_visual_indexes", [])
+
+            start_layer = config.gated_cross_attention_start_layer
+            if start_layer is None:
+                start_layer = min(deepstack_indexes) if len(deepstack_indexes) > 0 else config.num_hidden_layers - 1
+            self._gated_cross_attention_start_layer = max(0, min(start_layer, config.num_hidden_layers - 1))
+            self.visual_gates = nn.Parameter(torch.zeros(config.num_hidden_layers))
+
         self.post_init()
 
     # emb getters
@@ -1322,11 +1335,21 @@ class ArlowTextModel(ArlowPreTrainedModel):
                 visual_pos_masks is not None
                 and deepstack_visual_embeds is not None
                 and layer_idx < len(deepstack_visual_embeds)
-                and deepstack_visual_embeds[layer_idx] is not None
             ):
                 deepstack_layer = deepstack_visual_embeds[layer_idx]
-                if deepstack_layer.numel() > 0:
-                    hidden_states = self._deepstack_process(hidden_states, visual_pos_masks, deepstack_layer)
+                if deepstack_layer is not None and deepstack_layer.numel() > 0:
+                    deepstack_layer = deepstack_layer.to(hidden_states.device, hidden_states.dtype)
+                    apply_layer = True
+                    if getattr(self.config, "use_gated_cross_attention", False):
+                        start_layer = self._gated_cross_attention_start_layer or 0
+                        apply_layer = layer_idx >= start_layer
+                    if apply_layer:
+                        if self.visual_gates is not None:
+                            gate = torch.sigmoid(self.visual_gates[layer_idx]).to(
+                                dtype=hidden_states.dtype, device=hidden_states.device
+                            )
+                            deepstack_layer = deepstack_layer * gate
+                        hidden_states = self._deepstack_process(hidden_states, visual_pos_masks, deepstack_layer)
 
             if all_self_attns is not None and isinstance(layer_outputs, tuple) and len(layer_outputs) > 1:
                 all_self_attns += (layer_outputs[1],)
@@ -2110,12 +2133,15 @@ class ArlowModel(ArlowPreTrainedModel):
                                 feature = torch.zeros(1, hidden_dim, device=device, dtype=dtype)
                             deepstack_lists[layer_idx].append(feature.squeeze(0))
 
-                deepstack_visual_embeds = [
-                    torch.stack(layer_feats, dim=0)
-                    if len(layer_feats) > 0
-                    else torch.zeros(0, hidden_dim, device=device, dtype=dtype)
-                    for layer_feats in deepstack_lists
-                ]
+                mapped_deepstack: list[Optional[torch.Tensor]] = [None] * self.config.num_hidden_layers
+                vision_layer_indexes = getattr(self.config.vision_config, "deepstack_visual_indexes", [])
+                for slot_idx, layer_id in enumerate(vision_layer_indexes):
+                    if layer_id >= self.config.num_hidden_layers:
+                        continue
+                    layer_feats = deepstack_lists[slot_idx]
+                    if len(layer_feats) > 0:
+                        mapped_deepstack[layer_id] = torch.stack(layer_feats, dim=0)
+                deepstack_visual_embeds = mapped_deepstack
         if deepstack_visual_embeds is not None and not bool(visual_pos_mask.any()):
             deepstack_visual_embeds = None
 

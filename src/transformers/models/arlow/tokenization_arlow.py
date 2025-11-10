@@ -205,6 +205,15 @@ class ArlowTokenizer(PreTrainedTokenizer):
             # Be permissive if adding tokens is not supported in some contexts
             pass
 
+        self.image_token_id = self.convert_tokens_to_ids("<image>")
+        self.video_token_id = self.convert_tokens_to_ids("<video>")
+        self.vision_start_token_id = self.convert_tokens_to_ids("<|vision_start|>")
+        self.vision_end_token_id = self.convert_tokens_to_ids("<|vision_end|>")
+        self.init_kwargs["image_token_id"] = self.image_token_id
+        self.init_kwargs["video_token_id"] = self.video_token_id
+        self.init_kwargs["vision_start_token_id"] = self.vision_start_token_id
+        self.init_kwargs["vision_end_token_id"] = self.vision_end_token_id
+
     @property
     def vocab_size(self) -> int:
         return len(self.encoder)

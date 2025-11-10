@@ -349,13 +349,13 @@ class ArlowConfig(PreTrainedConfig):
             Whether to use gated cross-attention in upper layers.
         gated_cross_attention_start_layer (`int`, *optional*):
             Layer index to start gated cross-attention (if enabled).
-        image_token_id (`int`, *optional*):
+        image_token_id (`int`, *optional*, defaults to 131072):
             Token ID for image placeholders.
-        video_token_id (`int`, *optional*):
+        video_token_id (`int`, *optional*, defaults to 131073):
             Token ID for video placeholders.
-        vision_start_token_id (`int`, *optional*):
+        vision_start_token_id (`int`, *optional*, defaults to 131074):
             Token ID marking start of vision input.
-        vision_end_token_id (`int`, *optional*):
+        vision_end_token_id (`int`, *optional*, defaults to 131075):
             Token ID marking end of vision input.
         frame_separator_token_id (`int`, *optional*):
             Token ID for separating video frames.
@@ -408,10 +408,10 @@ class ArlowConfig(PreTrainedConfig):
         timestamp_alignment=False,
         use_gated_cross_attention=False,
         gated_cross_attention_start_layer=None,
-        image_token_id=None,
-        video_token_id=None,
-        vision_start_token_id=None,
-        vision_end_token_id=None,
+        image_token_id=131072,
+        video_token_id=131073,
+        vision_start_token_id=131074,
+        vision_end_token_id=131075,
         frame_separator_token_id=None,
         mrope_sections=None,
         **kwargs,
@@ -1675,6 +1675,19 @@ class ArlowTextModel(ArlowPreTrainedModel):
         self.rotary_emb = ArlowTextRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
+        self.visual_gates: Optional[torch.nn.Parameter] = None
+        self._gated_cross_attention_start_layer: Optional[int] = None
+        if getattr(config, "use_gated_cross_attention", False):
+            deepstack_indexes: list[int] = []
+            if hasattr(config, "vision_config") and config.vision_config is not None:
+                deepstack_indexes = getattr(config.vision_config, "deepstack_visual_indexes", [])
+
+            start_layer = config.gated_cross_attention_start_layer
+            if start_layer is None:
+                start_layer = min(deepstack_indexes) if len(deepstack_indexes) > 0 else config.num_hidden_layers - 1
+            self._gated_cross_attention_start_layer = max(0, min(start_layer, config.num_hidden_layers - 1))
+            self.visual_gates = nn.Parameter(torch.zeros(config.num_hidden_layers))
+
         self.post_init()
 
     # emb getters
@@ -1831,11 +1844,21 @@ class ArlowTextModel(ArlowPreTrainedModel):
                 visual_pos_masks is not None
                 and deepstack_visual_embeds is not None
                 and layer_idx < len(deepstack_visual_embeds)
-                and deepstack_visual_embeds[layer_idx] is not None
             ):
                 deepstack_layer = deepstack_visual_embeds[layer_idx]
-                if deepstack_layer.numel() > 0:
-                    hidden_states = self._deepstack_process(hidden_states, visual_pos_masks, deepstack_layer)
+                if deepstack_layer is not None and deepstack_layer.numel() > 0:
+                    deepstack_layer = deepstack_layer.to(hidden_states.device, hidden_states.dtype)
+                    apply_layer = True
+                    if getattr(self.config, "use_gated_cross_attention", False):
+                        start_layer = self._gated_cross_attention_start_layer or 0
+                        apply_layer = layer_idx >= start_layer
+                    if apply_layer:
+                        if self.visual_gates is not None:
+                            gate = torch.sigmoid(self.visual_gates[layer_idx]).to(
+                                dtype=hidden_states.dtype, device=hidden_states.device
+                            )
+                            deepstack_layer = deepstack_layer * gate
+                        hidden_states = self._deepstack_process(hidden_states, visual_pos_masks, deepstack_layer)
 
             if all_self_attns is not None and isinstance(layer_outputs, tuple) and len(layer_outputs) > 1:
                 all_self_attns += (layer_outputs[1],)
@@ -2611,10 +2634,15 @@ class ArlowModel(ArlowPreTrainedModel):
                                 feature = torch.zeros(1, hidden_dim, device=device, dtype=dtype)
                             deepstack_lists[layer_idx].append(feature.squeeze(0))
 
-                deepstack_visual_embeds = [
-                    torch.stack(layer_feats, dim=0) if len(layer_feats) > 0 else torch.zeros(0, hidden_dim, device=device, dtype=dtype)
-                    for layer_feats in deepstack_lists
-                ]
+                mapped_deepstack: list[Optional[torch.Tensor]] = [None] * self.config.num_hidden_layers
+                vision_layer_indexes = getattr(self.config.vision_config, "deepstack_visual_indexes", [])
+                for slot_idx, layer_id in enumerate(vision_layer_indexes):
+                    if layer_id >= self.config.num_hidden_layers:
+                        continue
+                    layer_feats = deepstack_lists[slot_idx]
+                    if len(layer_feats) > 0:
+                        mapped_deepstack[layer_id] = torch.stack(layer_feats, dim=0)
+                deepstack_visual_embeds = mapped_deepstack
         if deepstack_visual_embeds is not None and not bool(visual_pos_mask.any()):
             deepstack_visual_embeds = None
 
@@ -2934,6 +2962,7 @@ class ArlowProcessor(ProcessorMixin):
         tokenizer: Required tokenizer (`ArlowTokenizer` or `ArlowTokenizerFast`).
         video_processor: Required video processor for video support.
         chat_template: Optional chat template string.
+        timestamp_alignment: Whether to inject timestamp prompts for video frames. Defaults to `False`.
     """
 
     attributes = ["image_processor", "tokenizer", "video_processor"]
@@ -2941,7 +2970,15 @@ class ArlowProcessor(ProcessorMixin):
     video_processor_class = "AutoVideoProcessor"
     tokenizer_class = ("ArlowTokenizer", "ArlowTokenizerFast")
 
-    def __init__(self, image_processor=None, tokenizer=None, video_processor=None, chat_template=None, **kwargs):
+    def __init__(
+        self,
+        image_processor=None,
+        tokenizer=None,
+        video_processor=None,
+        chat_template=None,
+        timestamp_alignment: Optional[bool] = None,
+        **kwargs,
+    ):
         # multimodal special tokens
         self.image_token = "<image>" if not hasattr(tokenizer, "image_token") else tokenizer.image_token
         self.video_token = "<video>" if not hasattr(tokenizer, "video_token") else tokenizer.video_token
@@ -2975,6 +3012,14 @@ class ArlowProcessor(ProcessorMixin):
             else tokenizer.convert_tokens_to_ids(self.vision_end_token)
         )
 
+        if timestamp_alignment is None:
+            timestamp_alignment = getattr(video_processor, "timestamp_alignment", None)
+        if timestamp_alignment is None:
+            timestamp_alignment = getattr(tokenizer, "timestamp_alignment", None)
+        if timestamp_alignment is None and hasattr(tokenizer, "init_kwargs"):
+            timestamp_alignment = tokenizer.init_kwargs.get("timestamp_alignment")
+        self.timestamp_alignment = bool(timestamp_alignment) if timestamp_alignment is not None else False
+
     def __call__(
         self,
         images: ImageInput | None = None,
@@ -2982,6 +3027,8 @@ class ArlowProcessor(ProcessorMixin):
         videos: VideoInput | None = None,
         **kwargs: Unpack[ArlowProcessorKwargs],
     ) -> BatchFeature:
+        override_timestamp_alignment = kwargs.pop("timestamp_alignment", None)
+
         output_kwargs = self._merge_kwargs(
             ArlowProcessorKwargs,
             tokenizer_init_kwargs=self.tokenizer.init_kwargs,
@@ -3010,6 +3057,9 @@ class ArlowProcessor(ProcessorMixin):
                 else:
                     image_num_crops = list(raw_num_crops)
 
+        videos_kwargs = output_kwargs["videos_kwargs"]
+        videos_timestamp_alignment = videos_kwargs.pop("timestamp_alignment", None)
+
         if videos is not None:
             video_inputs = self.video_processor(videos=videos, **output_kwargs["videos_kwargs"])
             video_grid_thw = video_inputs.get("video_grid_thw")
@@ -3018,6 +3068,13 @@ class ArlowProcessor(ProcessorMixin):
                 video_metadata = video_inputs.pop("video_metadata")
             else:
                 video_metadata = video_inputs.get("video_metadata")
+
+        if override_timestamp_alignment is not None:
+            timestamp_alignment_flag = bool(override_timestamp_alignment)
+        elif videos_timestamp_alignment is not None:
+            timestamp_alignment_flag = bool(videos_timestamp_alignment)
+        else:
+            timestamp_alignment_flag = self.timestamp_alignment
 
         if not isinstance(text, list):
             text = [text]
@@ -3114,7 +3171,7 @@ class ArlowProcessor(ProcessorMixin):
 
                     # compute timestamps if metadata exists, otherwise just omit
                     curr_timestamps = None
-                    if video_metadata is not None:
+                    if timestamp_alignment_flag and video_metadata is not None:
                         metadata = video_metadata[index]
                         if getattr(metadata, "fps", None) is None:
                             logger.warning_once(

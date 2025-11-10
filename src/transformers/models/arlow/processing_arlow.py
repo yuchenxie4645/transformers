@@ -42,6 +42,7 @@ class ArlowProcessor(ProcessorMixin):
         tokenizer: Required tokenizer (`ArlowTokenizer` or `ArlowTokenizerFast`).
         video_processor: Required video processor for video support.
         chat_template: Optional chat template string.
+        timestamp_alignment: Whether to inject timestamp prompts for video frames. Defaults to `False`.
     """
 
     attributes = ["image_processor", "tokenizer", "video_processor"]
@@ -49,7 +50,15 @@ class ArlowProcessor(ProcessorMixin):
     video_processor_class = "AutoVideoProcessor"
     tokenizer_class = ("ArlowTokenizer", "ArlowTokenizerFast")
 
-    def __init__(self, image_processor=None, tokenizer=None, video_processor=None, chat_template=None, **kwargs):
+    def __init__(
+        self,
+        image_processor=None,
+        tokenizer=None,
+        video_processor=None,
+        chat_template=None,
+        timestamp_alignment: Optional[bool] = None,
+        **kwargs,
+    ):
         # multimodal special tokens
         self.image_token = "<image>" if not hasattr(tokenizer, "image_token") else tokenizer.image_token
         self.video_token = "<video>" if not hasattr(tokenizer, "video_token") else tokenizer.video_token
@@ -83,6 +92,14 @@ class ArlowProcessor(ProcessorMixin):
             else tokenizer.convert_tokens_to_ids(self.vision_end_token)
         )
 
+        if timestamp_alignment is None:
+            timestamp_alignment = getattr(video_processor, "timestamp_alignment", None)
+        if timestamp_alignment is None:
+            timestamp_alignment = getattr(tokenizer, "timestamp_alignment", None)
+        if timestamp_alignment is None and hasattr(tokenizer, "init_kwargs"):
+            timestamp_alignment = tokenizer.init_kwargs.get("timestamp_alignment")
+        self.timestamp_alignment = bool(timestamp_alignment) if timestamp_alignment is not None else False
+
     def __call__(
         self,
         images: ImageInput | None = None,
@@ -90,6 +107,8 @@ class ArlowProcessor(ProcessorMixin):
         videos: VideoInput | None = None,
         **kwargs: Unpack[ArlowProcessorKwargs],
     ) -> BatchFeature:
+        override_timestamp_alignment = kwargs.pop("timestamp_alignment", None)
+
         output_kwargs = self._merge_kwargs(
             ArlowProcessorKwargs,
             tokenizer_init_kwargs=self.tokenizer.init_kwargs,
@@ -118,6 +137,9 @@ class ArlowProcessor(ProcessorMixin):
                 else:
                     image_num_crops = list(raw_num_crops)
 
+        videos_kwargs = output_kwargs["videos_kwargs"]
+        videos_timestamp_alignment = videos_kwargs.pop("timestamp_alignment", None)
+
         if videos is not None:
             video_inputs = self.video_processor(videos=videos, **output_kwargs["videos_kwargs"])
             video_grid_thw = video_inputs.get("video_grid_thw")
@@ -126,6 +148,13 @@ class ArlowProcessor(ProcessorMixin):
                 video_metadata = video_inputs.pop("video_metadata")
             else:
                 video_metadata = video_inputs.get("video_metadata")
+
+        if override_timestamp_alignment is not None:
+            timestamp_alignment_flag = bool(override_timestamp_alignment)
+        elif videos_timestamp_alignment is not None:
+            timestamp_alignment_flag = bool(videos_timestamp_alignment)
+        else:
+            timestamp_alignment_flag = self.timestamp_alignment
 
         if not isinstance(text, list):
             text = [text]
@@ -220,7 +249,7 @@ class ArlowProcessor(ProcessorMixin):
 
                     # compute timestamps if metadata exists, otherwise just omit
                     curr_timestamps = None
-                    if video_metadata is not None:
+                    if timestamp_alignment_flag and video_metadata is not None:
                         metadata = video_metadata[index]
                         if getattr(metadata, "fps", None) is None:
                             logger.warning_once(

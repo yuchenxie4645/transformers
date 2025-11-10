@@ -109,6 +109,25 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
             pad_token=pad_token,
             **kwargs,
         )
+        additional_specials = [
+            "<image>",
+            "<video>",
+            "<|vision_start|>",
+            "<|vision_end|>",
+        ]
+        try:
+            self.add_special_tokens({"additional_special_tokens": additional_specials})
+        except Exception:
+            pass
+
+        self.image_token_id = self.convert_tokens_to_ids("<image>")
+        self.video_token_id = self.convert_tokens_to_ids("<video>")
+        self.vision_start_token_id = self.convert_tokens_to_ids("<|vision_start|>")
+        self.vision_end_token_id = self.convert_tokens_to_ids("<|vision_end|>")
+        self.init_kwargs["image_token_id"] = self.image_token_id
+        self.init_kwargs["video_token_id"] = self.video_token_id
+        self.init_kwargs["vision_start_token_id"] = self.vision_start_token_id
+        self.init_kwargs["vision_end_token_id"] = self.vision_end_token_id
 
     # Copied from transformers.models.qwen2.tokenization_qwen2_fast.Qwen2TokenizerFast.save_vocabulary
     def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str, ...]:

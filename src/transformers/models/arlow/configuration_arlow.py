@@ -317,13 +317,13 @@ class ArlowConfig(PreTrainedConfig):
             Whether to use gated cross-attention in upper layers.
         gated_cross_attention_start_layer (`int`, *optional*):
             Layer index to start gated cross-attention (if enabled).
-        image_token_id (`int`, *optional*):
+        image_token_id (`int`, *optional*, defaults to 131072):
             Token ID for image placeholders.
-        video_token_id (`int`, *optional*):
+        video_token_id (`int`, *optional*, defaults to 131073):
             Token ID for video placeholders.
-        vision_start_token_id (`int`, *optional*):
+        vision_start_token_id (`int`, *optional*, defaults to 131074):
             Token ID marking start of vision input.
-        vision_end_token_id (`int`, *optional*):
+        vision_end_token_id (`int`, *optional*, defaults to 131075):
             Token ID marking end of vision input.
         frame_separator_token_id (`int`, *optional*):
             Token ID for separating video frames.
@@ -376,10 +376,10 @@ class ArlowConfig(PreTrainedConfig):
         timestamp_alignment=False,
         use_gated_cross_attention=False,
         gated_cross_attention_start_layer=None,
-        image_token_id=None,
-        video_token_id=None,
-        vision_start_token_id=None,
-        vision_end_token_id=None,
+        image_token_id=131072,
+        video_token_id=131073,
+        vision_start_token_id=131074,
+        vision_end_token_id=131075,
         frame_separator_token_id=None,
         mrope_sections=None,
         **kwargs,
