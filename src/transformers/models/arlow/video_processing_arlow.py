@@ -1,17 +1,26 @@
 """Video processor class for Arlow multimodal models."""
 
 import math
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import numpy as np
 import torch
 
 from ...feature_extraction_utils import BatchFeature
+from ...image_processing_utils import get_size_dict
 from ...image_utils import ChannelDimension, PILImageResampling, SizeDict, get_image_size
 from ...processing_utils import Unpack, VideosKwargs
 from ...utils import TensorType, add_start_docstrings, logging
 from ...video_processing_utils import BASE_VIDEO_PROCESSOR_DOCSTRING, BaseVideoProcessor
-from ...video_utils import VideoInput, VideoMetadata, group_videos_by_shape, reorder_videos
+from ...video_utils import (
+    VideoInput,
+    VideoMetadata,
+    group_videos_by_shape,
+    is_valid_video,
+    make_batched_metadata,
+    make_batched_videos,
+    reorder_videos,
+)
 
 
 logger = logging.get_logger(__name__)
@@ -127,6 +136,7 @@ class ArlowVideoProcessorInitKwargs(VideosKwargs, total=False):
     min_frames: int
     max_frames: int
     sample_strategy: str
+    motion_threshold: float
 
 
 @add_start_docstrings(
@@ -157,9 +167,10 @@ class ArlowVideoProcessor(BaseVideoProcessor):
     merge_size = 2
     fps = None
     min_frames = 4
-    max_frames = 64  # Default from config
+    max_frames = 768  # Increased default to match high-throughput configs
     do_sample_frames = True
     sample_strategy = "uniform"  # Can be "uniform", "motion_adaptive", "fps_based"
+    motion_threshold = 0.1
     valid_kwargs = ArlowVideoProcessorInitKwargs
     model_input_names = ["pixel_values_videos", "video_grid_thw"]
 
@@ -168,8 +179,23 @@ class ArlowVideoProcessor(BaseVideoProcessor):
         min_pixels = kwargs.pop("min_pixels", None)
         max_pixels = kwargs.pop("max_pixels", None)
         max_tokens_per_video = kwargs.pop("max_tokens_per_video", None)
+        motion_threshold = kwargs.pop("motion_threshold", None)
+
+        def _size_to_dict(size_value):
+            if size_value is None:
+                return {}
+            if isinstance(size_value, SizeDict):
+                return {key: value for key, value in vars(size_value).items() if value is not None}
+            if isinstance(size_value, dict):
+                return {key: value for key, value in size_value.items() if value is not None}
+
+            converted = get_size_dict(size_value, default_to_square=False, param_name="size_override")
+            return {key: value for key, value in converted.items() if value is not None}
+
+        base_size = _size_to_dict(self.size)
+        override_size = _size_to_dict(size) if size is not None else None
         # Start with class default, then override with provided values
-        merged_size = dict(self.size) if size is None else {**self.size, **size}
+        merged_size = base_size if override_size is None else {**base_size, **override_size}
 
         # backward compatibility: override size with min_pixels and max_pixels if they are provided
         if min_pixels is not None:
@@ -190,6 +216,8 @@ class ArlowVideoProcessor(BaseVideoProcessor):
         super().__init__(size=merged_size, min_pixels=min_pixels, max_pixels=max_pixels, **kwargs)
         self.max_tokens_per_video = max_tokens_per_video
         self.max_volume = merged_size["longest_edge"]
+        if motion_threshold is not None:
+            self.motion_threshold = motion_threshold
         self._last_selected_frame_indices: list[list[int]] = []
 
     def _further_process_kwargs(
@@ -216,12 +244,44 @@ class ArlowVideoProcessor(BaseVideoProcessor):
 
         return super()._further_process_kwargs(size=size, min_pixels=min_pixels, max_pixels=max_pixels, **kwargs)
 
+    def _decode_and_sample_videos(
+        self,
+        videos: VideoInput,
+        video_metadata: Union[VideoMetadata, dict],
+        do_sample_frames: Optional[bool] = None,
+        sample_indices_fn: Optional[Callable] = None,
+    ) -> tuple[list["torch.Tensor"], list[VideoMetadata]]:
+        videos = make_batched_videos(videos)
+        video_metadata = make_batched_metadata(videos, video_metadata=video_metadata)
+
+        if is_valid_video(videos[0]) and do_sample_frames and sample_indices_fn is not None:
+            sampled_videos = []
+            sampled_metadata = []
+            for video, metadata in zip(videos, video_metadata):
+                indices = sample_indices_fn(metadata=metadata, video_frames=video)
+                indices = torch.as_tensor(indices, dtype=torch.int64, device=video.device if isinstance(video, torch.Tensor) else None)
+                metadata.frames_indices = indices
+                sampled_videos.append(video[indices])
+                sampled_metadata.append(metadata)
+            videos = sampled_videos
+            video_metadata = sampled_metadata
+            return videos, video_metadata
+
+        return super()._decode_and_sample_videos(
+            videos,
+            video_metadata=video_metadata,
+            do_sample_frames=do_sample_frames,
+            sample_indices_fn=sample_indices_fn,
+        )
+
     def sample_frames(
         self,
         metadata: VideoMetadata,
         num_frames: Optional[int] = None,
         fps: Optional[Union[int, float]] = None,
         sample_strategy: Optional[str] = None,
+        video_frames: Optional[Union[np.ndarray, torch.Tensor]] = None,
+        motion_threshold: Optional[float] = None,
         **kwargs,
     ):
         """
@@ -259,14 +319,37 @@ class ArlowVideoProcessor(BaseVideoProcessor):
             # Use only fps for fps-based sampling
             return super().sample_frames(metadata, num_frames=None, fps=fps, **kwargs)
 
-        # Motion-adaptive sampling requires accessing frames; fall back to uniform safely
-        logger.warning("Motion-adaptive sampling requires frame data access. Falling back to uniform sampling.")
-        # Default fallback to uniform with safe clamping
-        effective_num_frames = num_frames
-        if effective_num_frames is None:
-            effective_num_frames = metadata.total_num_frames
+        effective_num_frames = num_frames or self.max_frames or metadata.total_num_frames
         effective_num_frames = min(effective_num_frames, metadata.total_num_frames)
-        return super().sample_frames(metadata, num_frames=effective_num_frames, fps=None, **kwargs)
+
+        if video_frames is None:
+            logger.warning(
+                "Motion-adaptive sampling requested but raw frames were not provided. Falling back to uniform sampling."
+            )
+            return super().sample_frames(metadata, num_frames=effective_num_frames, fps=None, **kwargs)
+
+        if isinstance(video_frames, torch.Tensor):
+            frames_np = video_frames.detach().cpu()
+            if frames_np.dim() == 4:
+                frames_np = frames_np.permute(0, 2, 3, 1)
+            frames_np = frames_np.numpy()
+        elif isinstance(video_frames, np.ndarray):
+            frames_np = video_frames
+        else:
+            logger.warning(
+                "Unsupported video_frames type (%s) for motion-adaptive sampling. Falling back to uniform.",
+                type(video_frames),
+            )
+            return super().sample_frames(metadata, num_frames=effective_num_frames, fps=None, **kwargs)
+
+        threshold = self.motion_threshold if motion_threshold is None else motion_threshold
+        try:
+            indices = motion_adaptive_sampling(frames_np, target_frames=effective_num_frames, threshold=threshold)
+        except Exception as err:
+            logger.warning("Motion-adaptive sampling failed (%s). Falling back to uniform.", err)
+            return super().sample_frames(metadata, num_frames=effective_num_frames, fps=None, **kwargs)
+
+        return torch.as_tensor(indices, dtype=torch.int64)
 
     def _preprocess(
         self,

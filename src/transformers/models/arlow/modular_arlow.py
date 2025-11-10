@@ -18,7 +18,7 @@ from ...generation import GenerationMixin
 from ...image_utils import ImageInput
 from ...integrations import use_kernel_forward_from_hub
 from ...masking_utils import create_causal_mask, create_sliding_window_causal_mask
-from ...modeling_flash_attention_utils import is_flash_attn_available
+from ...modeling_flash_attention_utils import FlashAttentionKwargs, is_flash_attn_available
 from ...modeling_layers import (
     GenericForQuestionAnswering,
     GenericForSequenceClassification,
@@ -30,7 +30,7 @@ from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update, rop
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import MultiModalData, ProcessingKwargs, ProcessorMixin, Unpack
 from ...tokenization_utils_base import PreTokenizedInput, TextInput
-from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
+from ...utils import auto_docstring, can_return_tuple, logging
 from ...utils.import_utils import get_torch_version
 from ...video_utils import VideoInput
 
@@ -76,6 +76,9 @@ class ArlowVisionConfig(PreTrainedConfig):
             Normalized radius (in THW coordinates) used to compute deformable attention locality bias.
         deformable_attention_strength (`float`, *optional*, defaults to 4.0):
             Scaling factor applied to deformable attention bias.
+        deepstack_visual_indexes (`list[int]`, *optional*):
+            Vision block indexes from which to capture DeepStack skip features. Defaults to a
+            depth-aware spread when unset (empty when depth < 6).
         mrope_sections (`list[int]`, *optional*):
             Multimodal RoPE allocation across [temporal, height, width] (sum must equal head dimension).
         initializer_range (`float`, *optional*, defaults to 0.02):
@@ -102,6 +105,7 @@ class ArlowVisionConfig(PreTrainedConfig):
         token_pruning_ratio: float = 0.0,
         deformable_attention_window: float = 0.25,
         deformable_attention_strength: float = 4.0,
+        deepstack_visual_indexes: Optional[list[int]] = None,
         mrope_sections: Optional[list[int]] = None,
         initializer_range: float = 0.02,
         max_position_embeddings: Optional[int] = None,
@@ -126,8 +130,21 @@ class ArlowVisionConfig(PreTrainedConfig):
         self.deformable_attention_strength = deformable_attention_strength
         self.initializer_range = initializer_range
         self.max_position_embeddings = (
-            max_position_embeddings if max_position_embeddings is not None else 4096
+            max_position_embeddings if max_position_embeddings is not None else 32768
         )
+        if deepstack_visual_indexes is None:
+            if depth >= 6:
+                approx = {
+                    max(0, depth // 4),
+                    max(0, depth // 2),
+                    max(0, depth - 4),
+                }
+                deepstack_visual_indexes = sorted(idx for idx in approx if 0 <= idx < depth)
+            else:
+                deepstack_visual_indexes = []
+        else:
+            deepstack_visual_indexes = sorted(set(idx for idx in deepstack_visual_indexes if 0 <= idx < depth))
+        self.deepstack_visual_indexes = deepstack_visual_indexes
 
         head_dim = embed_dim // num_heads
         if mrope_sections is None:
@@ -164,7 +181,7 @@ class ArlowTextConfig(PreTrainedConfig):
         num_attention_heads=24,
         num_key_value_heads=4,
         hidden_act="silu",
-        max_position_embeddings=2048,
+        max_position_embeddings=32768,
         initializer_range=0.02,
         rms_norm_eps=1e-6,
         use_cache=True,
@@ -360,7 +377,7 @@ class ArlowConfig(PreTrainedConfig):
         num_attention_heads=24,
         num_key_value_heads=4,
         hidden_act="silu",
-        max_position_embeddings=2048,
+        max_position_embeddings=32768,
         initializer_range=0.02,
         rms_norm_eps=1e-6,
         use_cache=True,
@@ -382,9 +399,9 @@ class ArlowConfig(PreTrainedConfig):
         layer_types=None,
         # Multimodal parameters
         vision_config=None,
-        mm_tokens_per_image=256,
-        mm_tokens_per_video=128,
-        video_max_frames=64,
+        mm_tokens_per_image=512,
+        mm_tokens_per_video=1024,
+        video_max_frames=768,
         video_sample_strategy="uniform",
         dynamic_resolution=True,
         pan_and_scan=False,
@@ -904,7 +921,7 @@ def eager_attention_forward(
     attention_mask: Optional[torch.Tensor],
     scaling: float,
     dropout: float = 0.0,
-    **kwargs: Unpack[TransformersKwargs],
+    **kwargs: Unpack[FlashAttentionKwargs],
 ):
     key_states = repeat_kv(key, module.num_key_value_groups)
     value_states = repeat_kv(value, module.num_key_value_groups)
@@ -966,7 +983,7 @@ class ArlowAttention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         token_coords: Optional[torch.Tensor] = None,
-        **kwargs: Unpack[TransformersKwargs],
+        **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         input_shape = hidden_states.shape[:-1]
         q_shape = (*input_shape, self.num_heads, self.head_dim)
@@ -1052,7 +1069,7 @@ class ArlowDecoderLayer(nn.Module):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-        **kwargs: Unpack[TransformersKwargs],
+        **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -1390,6 +1407,22 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
             self.progressive_pool = nn.AvgPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2), ceil_mode=True)
             self.progressive_proj = nn.Linear(config.embed_dim, config.embed_dim)
 
+        self.deepstack_visual_indexes = list(config.deepstack_visual_indexes)
+        self.enable_deepstack = len(self.deepstack_visual_indexes) > 0
+        if self.enable_deepstack:
+            self.deepstack_mergers = nn.ModuleList(
+                [
+                    ArlowVLPatchMerger(
+                        dim=config.hidden_size,
+                        context_dim=config.embed_dim,
+                        spatial_merge_size=config.spatial_merge_size,
+                    )
+                    for _ in self.deepstack_visual_indexes
+                ]
+            )
+        else:
+            self.deepstack_mergers = None
+
         self.post_init()
 
     def get_dtype(self) -> torch.dtype:
@@ -1397,6 +1430,100 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
 
     def get_device(self) -> torch.device:
         return self.blocks[0].fc2.weight.device
+
+    def _reshape_for_merger(self, hidden_states: torch.Tensor, grid_thw: Optional[torch.LongTensor]) -> torch.Tensor:
+        """
+        Reshape block outputs into grouped patches ready for spatial merging / projection.
+        """
+        batch_size, seq_len, embed_dim = hidden_states.shape
+        spatial_merge_size = self.config.spatial_merge_size
+
+        if grid_thw is not None:
+            # grid_thw may contain inconsistent temporal values (pre- or post-temporal patching).
+            temporal_patch = getattr(self.patch_embed, "temporal_patch_size", 1)
+            t_in = grid_thw[:, 0]
+            h_patched = grid_thw[:, 1]
+            w_patched = grid_thw[:, 2]
+
+            counts1 = (t_in * h_patched * w_patched).sum().item()
+            if counts1 == seq_len:
+                temporal_patched = t_in
+            else:
+                temporal_patched2 = (t_in + temporal_patch - 1) // temporal_patch
+                counts2 = (temporal_patched2 * h_patched * w_patched).sum().item()
+                if counts2 == seq_len:
+                    temporal_patched = temporal_patched2
+                else:
+                    per_item_base = (h_patched * w_patched).tolist()
+                    temporal_guess: list[int] = []
+                    remaining = seq_len
+                    for base in per_item_base:
+                        t_guess = max(1, remaining // max(base, 1))
+                        temporal_guess.append(t_guess)
+                        remaining -= t_guess * base
+                    if remaining > 0 and temporal_guess:
+                        temporal_guess[-1] += remaining
+                    temporal_patched = torch.tensor(temporal_guess, device=grid_thw.device)
+
+            all_embeddings: list[torch.Tensor] = []
+            start_idx = 0
+            for i in range(len(grid_thw)):
+                t = int(temporal_patched[i].item())
+                h = int(h_patched[i].item())
+                w = int(w_patched[i].item())
+                num_patches_per_frame = max(1, h * w)
+                total_patches = min(seq_len - start_idx, t * num_patches_per_frame)
+
+                img_patches = hidden_states[:, start_idx : start_idx + total_patches, :]
+                start_idx += total_patches
+
+                if num_patches_per_frame == 0:
+                    all_embeddings.append(torch.zeros(batch_size, 0, spatial_merge_size**2 * embed_dim, device=hidden_states.device, dtype=hidden_states.dtype))
+                    continue
+
+                img_patches = img_patches.reshape(batch_size, t, h, w, embed_dim)
+                merged_h = max(1, h // spatial_merge_size)
+                merged_w = max(1, w // spatial_merge_size)
+                img_patches = img_patches.reshape(
+                    batch_size,
+                    t,
+                    merged_h,
+                    spatial_merge_size,
+                    merged_w,
+                    spatial_merge_size,
+                    embed_dim,
+                )
+                img_patches = img_patches.permute(0, 1, 2, 4, 3, 5, 6)
+                img_patches = img_patches.reshape(
+                    batch_size,
+                    t,
+                    merged_h,
+                    merged_w,
+                    spatial_merge_size**2 * embed_dim,
+                )
+                img_patches = img_patches.reshape(
+                    batch_size,
+                    t * merged_h * merged_w,
+                    spatial_merge_size**2 * embed_dim,
+                )
+                all_embeddings.append(img_patches)
+
+            if all_embeddings:
+                hidden_states = torch.cat(all_embeddings, dim=1)
+            else:
+                hidden_states = hidden_states.reshape(batch_size, 0, embed_dim)
+        else:
+            num_merged_patches = seq_len // (spatial_merge_size**2)
+            if num_merged_patches * (spatial_merge_size**2) == seq_len and num_merged_patches > 0:
+                hidden_states = hidden_states.reshape(
+                    batch_size,
+                    num_merged_patches,
+                    spatial_merge_size**2 * embed_dim,
+                )
+            else:
+                hidden_states = hidden_states.reshape(batch_size, seq_len, embed_dim)
+
+        return hidden_states.reshape(-1, hidden_states.shape[-1])
 
     def forward(
         self,
@@ -1489,111 +1616,37 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
         total = hidden_states.shape[1]
         cu_seqlens = torch.tensor([0, total], device=hidden_states.device, dtype=torch.int32)
 
+        deepstack_feature_lists: list[torch.Tensor] = []
+        deepstack_idx = 0
+
         # Apply transformer blocks
-        for block in self.blocks:
+        for layer_idx, block in enumerate(self.blocks):
             hidden_states = block(
                 hidden_states,
                 position_embeddings,
                 cu_seqlens,
                 token_coords,
             )
+            if (
+                self.enable_deepstack
+                and deepstack_idx < len(self.deepstack_visual_indexes)
+                and layer_idx == self.deepstack_visual_indexes[deepstack_idx]
+            ):
+                reshaped = self._reshape_for_merger(hidden_states, grid_thw)
+                deepstack_feature_lists.append(self.deepstack_mergers[deepstack_idx](reshaped))
+                deepstack_idx += 1
 
-        # Merge patches and project to text dimension
-        # Reshape to merge spatial patches: (batch, seq, embed_dim)
-        batch_size, seq_len, embed_dim = hidden_states.shape
-        
-        # Calculate merged dimensions
-        spatial_merge_size = self.config.spatial_merge_size
-        
-        # Need to reshape patches for spatial merging respecting temporal structure
-        if grid_thw is not None:
-            # grid_thw may contain inconsistent temporal values (pre- or post-temporal patching).
-            # Derive a robust temporal_patched that matches the actual seq_len from patch_embed.
-            t_in = grid_thw[:, 0]
-            h_patched = grid_thw[:, 1]
-            w_patched = grid_thw[:, 2]
-            temporal_patch = getattr(self.patch_embed, "temporal_patch_size", 1)
+        merged_tokens = self._reshape_for_merger(hidden_states, grid_thw)
+        vision_embeddings = self.merger(merged_tokens)
 
-            # Candidate 1: assume t already patched
-            counts1 = (t_in * h_patched * w_patched).sum().item()
-            if counts1 == seq_len:
-                temporal_patched = t_in
-            else:
-                # Candidate 2: patch temporal dimension
-                temporal_patched2 = (t_in + temporal_patch - 1) // temporal_patch
-                counts2 = (temporal_patched2 * h_patched * w_patched).sum().item()
-                if counts2 == seq_len:
-                    temporal_patched = temporal_patched2
-                else:
-                    # Fallback: infer per-item temporal from remaining tokens
-                    # Works well for single-item inputs in tests
-                    per_item_base = (h_patched * w_patched).tolist()
-                    temporal_patched = []
-                    remaining = seq_len
-                    for base in per_item_base:
-                        t_guess = max(1, remaining // base)
-                        temporal_patched.append(t_guess)
-                        remaining -= t_guess * base
-                    temporal_patched = torch.tensor(temporal_patched, device=grid_thw.device)
-
-            # Process each image/video in the batch separately
-            all_embeddings = []
-            start_idx = 0
-            for i in range(len(grid_thw)):
-                t, h, w = int(temporal_patched[i].item()), int(h_patched[i].item()), int(w_patched[i].item())
-                num_patches_per_frame = h * w
-                total_patches = t * num_patches_per_frame
-                
-                # Extract patches for this image/video
-                img_patches = hidden_states[:, start_idx:start_idx + total_patches, :]  # [batch, total_patches, embed_dim]
-                
-                # Reshape to separate temporal and spatial dimensions
-                # [batch, t, h, w, embed_dim]
-                img_patches = img_patches.reshape(batch_size, t, h, w, embed_dim)
-                
-                # Merge spatial patches: group into (spatial_merge_size x spatial_merge_size) blocks
-                merged_h = h // spatial_merge_size
-                merged_w = w // spatial_merge_size
-                
-                # Reshape to group spatial patches
-                # [batch, t, merged_h, spatial_merge_size, merged_w, spatial_merge_size, embed_dim]
-                img_patches = img_patches.reshape(batch_size, t, merged_h, spatial_merge_size, merged_w, spatial_merge_size, embed_dim)
-                
-                # Permute and reshape to merge the spatial_merge_size dimensions
-                # [batch, t, merged_h, merged_w, spatial_merge_size, spatial_merge_size, embed_dim]
-                img_patches = img_patches.permute(0, 1, 2, 4, 3, 5, 6)
-                
-                # Flatten the spatial merge dimensions
-                # [batch, t, merged_h, merged_w, spatial_merge_size^2 * embed_dim]
-                img_patches = img_patches.reshape(batch_size, t, merged_h, merged_w, spatial_merge_size ** 2 * embed_dim)
-                
-                # Flatten to sequence: [batch, t * merged_h * merged_w, spatial_merge_size^2 * embed_dim]
-                img_patches = img_patches.reshape(batch_size, t * merged_h * merged_w, spatial_merge_size ** 2 * embed_dim)
-                
-                all_embeddings.append(img_patches)
-                start_idx += total_patches
-            
-            # Concatenate all images/videos: [batch, total_merged_patches, spatial_merge_size^2 * embed_dim]
-            hidden_states = torch.cat(all_embeddings, dim=1)
-        else:
-            # No grid info, apply simple spatial merging
-            num_merged_patches = seq_len // (spatial_merge_size ** 2)
-            if num_merged_patches * (spatial_merge_size ** 2) == seq_len:
-                # Reshape to group patches: (batch, num_merged, spatial_merge_size^2 * embed_dim)
-                hidden_states = hidden_states.reshape(batch_size, num_merged_patches, spatial_merge_size ** 2 * embed_dim)
-            else:
-                # If not evenly divisible, just flatten without merging
-                hidden_states = hidden_states.reshape(-1, embed_dim)
-                # Still need to match expected input dim for merger
-                if hidden_states.shape[-1] != spatial_merge_size ** 2 * embed_dim:
-                    # Pad or repeat to match expected dimension
-                    hidden_states = hidden_states.reshape(batch_size, seq_len, embed_dim)
-        
-        # Flatten batch dimension for merger: [total_merged_patches, spatial_merge_size^2 * embed_dim]
-        hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
-        
-        vision_embeddings = self.merger(hidden_states)
-
+        if self.enable_deepstack:
+            if len(deepstack_feature_lists) < len(self.deepstack_visual_indexes):
+                feature_dim = vision_embeddings.shape[-1]
+                dtype = vision_embeddings.dtype
+                device = vision_embeddings.device
+                for _ in range(len(self.deepstack_visual_indexes) - len(deepstack_feature_lists)):
+                    deepstack_feature_lists.append(torch.zeros(0, feature_dim, device=device, dtype=dtype))
+            return vision_embeddings, deepstack_feature_lists
         return vision_embeddings
 
 
@@ -1631,6 +1684,20 @@ class ArlowTextModel(ArlowPreTrainedModel):
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 
+    def _deepstack_process(
+        self,
+        hidden_states: torch.Tensor,
+        visual_pos_masks: torch.Tensor,
+        visual_embeds: torch.Tensor,
+    ) -> torch.Tensor:
+        if visual_embeds.numel() == 0:
+            return hidden_states
+        visual_pos_masks = visual_pos_masks.to(hidden_states.device)
+        visual_embeds = visual_embeds.to(hidden_states.device, hidden_states.dtype)
+        updated = hidden_states.clone()
+        updated[visual_pos_masks, :] = updated[visual_pos_masks, :] + visual_embeds
+        return updated
+
     @can_return_tuple
     def forward(
         self,
@@ -1642,7 +1709,9 @@ class ArlowTextModel(ArlowPreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-        **kwargs: Unpack[TransformersKwargs],
+        visual_pos_masks: Optional[torch.Tensor] = None,
+        deepstack_visual_embeds: Optional[list[torch.Tensor]] = None,
+        **kwargs: Unpack[FlashAttentionKwargs],
     ) -> BaseModelOutputWithPast:
         # Handle input_ids vs inputs_embeds
         if input_ids is None and inputs_embeds is None:
@@ -1744,7 +1813,7 @@ class ArlowTextModel(ArlowPreTrainedModel):
         if all_hidden_states is not None:
             all_hidden_states += (hidden_states,)
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask_mapping[decoder_layer.attention_type],
@@ -1757,6 +1826,16 @@ class ArlowTextModel(ArlowPreTrainedModel):
             )
 
             hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
+
+            if (
+                visual_pos_masks is not None
+                and deepstack_visual_embeds is not None
+                and layer_idx < len(deepstack_visual_embeds)
+                and deepstack_visual_embeds[layer_idx] is not None
+            ):
+                deepstack_layer = deepstack_visual_embeds[layer_idx]
+                if deepstack_layer.numel() > 0:
+                    hidden_states = self._deepstack_process(hidden_states, visual_pos_masks, deepstack_layer)
 
             if all_self_attns is not None and isinstance(layer_outputs, tuple) and len(layer_outputs) > 1:
                 all_self_attns += (layer_outputs[1],)
@@ -1803,7 +1882,7 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
-        **kwargs: Unpack[TransformersKwargs],
+        **kwargs: Unpack[FlashAttentionKwargs],
     ) -> CausalLMOutputWithPast:
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
@@ -1817,7 +1896,10 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs.last_hidden_state
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        if isinstance(logits_to_keep, int):
+            slice_indices = slice(None) if logits_to_keep <= 0 else slice(-logits_to_keep, None)
+        else:
+            slice_indices = logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         loss = None
@@ -1976,17 +2058,29 @@ class ArlowModel(ArlowPreTrainedModel):
         self,
         pixel_values: torch.FloatTensor,
         image_grid_thw: Optional[torch.LongTensor] = None,
-    ) -> torch.FloatTensor:
-        """Extract image features from vision encoder."""
+        return_deepstack: bool = False,
+    ) -> Union[list[torch.Tensor], tuple[list[torch.Tensor], Optional[list[list[torch.Tensor]]]]]:
+        """Extract image features from the vision encoder.
+
+        Args:
+            pixel_values: Batched images already tensorized.
+            image_grid_thw: Grid metadata for each image.
+            return_deepstack: If True, also returns per-layer deepstack projections aligned to placeholders.
+        """
 
         # Get dtype from vision model, fallback to float32
         target_dtype = self.visual.get_dtype() if hasattr(self.visual, "get_dtype") else torch.float32
         pixel_values = pixel_values.to(dtype=target_dtype)
 
-        image_embeds = self.visual(pixel_values, image_grid_thw)
-        
-        # Calculate split sizes based on what the vision model produces
-        # Robustly infer temporal patching so that the split sizes sum to the actual length
+        visual_outputs = self.visual(pixel_values, image_grid_thw)
+        if isinstance(visual_outputs, tuple):
+            image_embeds, deepstack_tokens = visual_outputs
+        else:
+            image_embeds = visual_outputs
+            deepstack_tokens = None
+
+        split_sizes: list[int] = []
+
         if image_grid_thw is not None:
             spm = self.config.vision_config.spatial_merge_size
             t_in = image_grid_thw[:, 0]
@@ -2027,29 +2121,73 @@ class ArlowModel(ArlowPreTrainedModel):
 
             split_sizes = (t_use * base_per_item).tolist()
         else:
-            # If no grid info, just return as-is
-            return image_embeds
+            split_sizes = [image_embeds.shape[0]]
 
-        image_embeds = torch.split(image_embeds, split_sizes)
-        # Pool per placeholder to a single token to match one placeholder token in text
-        image_embeds = [emb.mean(dim=0, keepdim=True) if emb.dim() > 1 else emb.unsqueeze(0) for emb in image_embeds]
-        return image_embeds
+        pooled_embeds: list[torch.Tensor] = []
+        for segment in torch.split(image_embeds, split_sizes):
+            if segment.numel() == 0:
+                pooled_embeds.append(
+                    torch.zeros(
+                        1,
+                        self.config.hidden_size,
+                        device=image_embeds.device,
+                        dtype=image_embeds.dtype,
+                    )
+                )
+            elif segment.dim() == 1:
+                pooled_embeds.append(segment.unsqueeze(0))
+            else:
+                pooled_embeds.append(segment.mean(dim=0, keepdim=True))
+
+        deepstack_pooled: Optional[list[list[torch.Tensor]]] = None
+        if return_deepstack and deepstack_tokens is not None and len(deepstack_tokens) > 0:
+            deepstack_pooled = []
+            for layer_tokens in deepstack_tokens:
+                layer_segments = torch.split(layer_tokens, split_sizes)
+                layer_outputs: list[torch.Tensor] = []
+                for segment in layer_segments:
+                    if segment.numel() == 0:
+                        layer_outputs.append(
+                            torch.zeros(
+                                1,
+                                self.config.hidden_size,
+                                device=layer_tokens.device,
+                                dtype=layer_tokens.dtype,
+                            )
+                        )
+                    elif segment.dim() == 1:
+                        layer_outputs.append(segment.unsqueeze(0))
+                    else:
+                        layer_outputs.append(segment.mean(dim=0, keepdim=True))
+                deepstack_pooled.append(layer_outputs)
+
+        if return_deepstack:
+            return pooled_embeds, deepstack_pooled
+
+        return pooled_embeds
 
     def get_video_features(
         self,
         pixel_values_videos: torch.FloatTensor,
         video_grid_thw: Optional[torch.LongTensor] = None,
-    ) -> torch.FloatTensor:
-        """Extract video features from vision encoder (same as images with temporal dim)."""
+        return_deepstack: bool = False,
+    ) -> Union[list[torch.Tensor], tuple[list[torch.Tensor], Optional[list[list[torch.Tensor]]]]]:
+        """Extract video features from the vision encoder (same as images with temporal dim)."""
 
         # Get dtype from vision model, fallback to float32
         target_dtype = self.visual.get_dtype() if hasattr(self.visual, "get_dtype") else torch.float32
         pixel_values_videos = pixel_values_videos.to(dtype=target_dtype)
 
-        video_embeds = self.visual(pixel_values_videos, video_grid_thw)
+        visual_outputs = self.visual(pixel_values_videos, video_grid_thw)
+        if isinstance(visual_outputs, tuple):
+            video_embeds, deepstack_tokens = visual_outputs
+        else:
+            video_embeds = visual_outputs
+            deepstack_tokens = None
 
         # Calculate split sizes based on what the vision model produces
         # Robustly infer temporal patching so that the split sizes sum to the actual length
+        split_sizes: list[int] = []
         if video_grid_thw is not None:
             spm = self.config.vision_config.spatial_merge_size
             t_in = video_grid_thw[:, 0]
@@ -2089,14 +2227,51 @@ class ArlowModel(ArlowPreTrainedModel):
                     t_use = torch.tensor(t_use_list, device=video_grid_thw.device)
 
             split_sizes = (t_use * base_per_item).tolist()
-            video_embeds = torch.split(video_embeds, split_sizes)
-            # Pool per placeholder to a single token to match one placeholder token in text
-            video_embeds = [emb.mean(dim=0, keepdim=True) if emb.dim() > 1 else emb.unsqueeze(0) for emb in video_embeds]
         else:
-            # If no grid info, return as-is
-            pass
-        
-        return video_embeds
+            split_sizes = [video_embeds.shape[0]]
+
+        pooled_embeds: list[torch.Tensor] = []
+        for segment in torch.split(video_embeds, split_sizes):
+            if segment.numel() == 0:
+                pooled_embeds.append(
+                    torch.zeros(
+                        1,
+                        self.config.hidden_size,
+                        device=video_embeds.device,
+                        dtype=video_embeds.dtype,
+                    )
+                )
+            elif segment.dim() == 1:
+                pooled_embeds.append(segment.unsqueeze(0))
+            else:
+                pooled_embeds.append(segment.mean(dim=0, keepdim=True))
+
+        deepstack_pooled: Optional[list[list[torch.Tensor]]] = None
+        if return_deepstack and deepstack_tokens is not None and len(deepstack_tokens) > 0:
+            deepstack_pooled = []
+            for layer_tokens in deepstack_tokens:
+                layer_segments = torch.split(layer_tokens, split_sizes)
+                layer_outputs: list[torch.Tensor] = []
+                for segment in layer_segments:
+                    if segment.numel() == 0:
+                        layer_outputs.append(
+                            torch.zeros(
+                                1,
+                                self.config.hidden_size,
+                                device=layer_tokens.device,
+                                dtype=layer_tokens.dtype,
+                            )
+                        )
+                    elif segment.dim() == 1:
+                        layer_outputs.append(segment.unsqueeze(0))
+                    else:
+                        layer_outputs.append(segment.mean(dim=0, keepdim=True))
+                deepstack_pooled.append(layer_outputs)
+
+        if return_deepstack:
+            return pooled_embeds, deepstack_pooled
+
+        return pooled_embeds
 
     def get_placeholder_mask(
         self,
@@ -2331,7 +2506,7 @@ class ArlowModel(ArlowPreTrainedModel):
         rope_deltas: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
-        **kwargs: Unpack[TransformersKwargs],
+        **kwargs: Unpack[FlashAttentionKwargs],
     ) -> ArlowMultimodalModelOutputWithPast:
         """
         Forward pass combining vision and text modalities.
@@ -2351,46 +2526,129 @@ class ArlowModel(ArlowPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
 
+        vision_deepstack_enabled = getattr(self.visual, "enable_deepstack", False)
+        batch_size, seq_len, hidden_dim = inputs_embeds.shape
+        device = inputs_embeds.device
+        dtype = inputs_embeds.dtype
+
+        image_token_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=device)
+        video_token_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=device)
+        image_deepstack_layers: Optional[list[list[torch.Tensor]]] = None
+        video_deepstack_layers: Optional[list[list[torch.Tensor]]] = None
+
         # Process vision inputs if provided using masked_scatter
         if pixel_values is not None:
-            image_embeds = self.get_image_features(pixel_values, image_grid_thw)
-            image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
-            image_mask, _ = self.get_placeholder_mask(
-                input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
+            image_outputs = self.get_image_features(
+                pixel_values,
+                image_grid_thw,
+                return_deepstack=vision_deepstack_enabled,
             )
-            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+            if isinstance(image_outputs, tuple):
+                image_embeds_list, image_deepstack_layers = image_outputs
+            else:
+                image_embeds_list = image_outputs
+
+            image_features_tensor = (
+                torch.cat(image_embeds_list, dim=0) if len(image_embeds_list) > 0 else torch.zeros(0, hidden_dim, device=device, dtype=dtype)
+            ).to(device=device, dtype=dtype)
+
+            image_mask, _ = self.get_placeholder_mask(
+                input_ids,
+                inputs_embeds=inputs_embeds,
+                image_features=image_features_tensor,
+            )
+            image_token_mask = image_mask[..., 0]
+            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_features_tensor)
 
         if pixel_values_videos is not None:
-            video_embeds = self.get_video_features(pixel_values_videos, video_grid_thw)
-            video_embeds = torch.cat(video_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
-            _, video_mask = self.get_placeholder_mask(
-                input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
+            video_outputs = self.get_video_features(
+                pixel_values_videos,
+                video_grid_thw,
+                return_deepstack=vision_deepstack_enabled,
             )
-            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+            if isinstance(video_outputs, tuple):
+                video_embeds_list, video_deepstack_layers = video_outputs
+            else:
+                video_embeds_list = video_outputs
+
+            video_features_tensor = (
+                torch.cat(video_embeds_list, dim=0) if len(video_embeds_list) > 0 else torch.zeros(0, hidden_dim, device=device, dtype=dtype)
+            ).to(device=device, dtype=dtype)
+
+            _, video_mask = self.get_placeholder_mask(
+                input_ids,
+                inputs_embeds=inputs_embeds,
+                video_features=video_features_tensor,
+            )
+            video_token_mask = video_mask[..., 0]
+            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_features_tensor)
+
+        visual_pos_mask = image_token_mask | video_token_mask
+        deepstack_visual_embeds: Optional[list[torch.Tensor]] = None
+        if vision_deepstack_enabled:
+            layer_count = len(self.config.vision_config.deepstack_visual_indexes)
+            if layer_count > 0:
+                deepstack_lists: list[list[torch.Tensor]] = [[] for _ in range(layer_count)]
+                image_layer_indices = [0] * layer_count
+                video_layer_indices = [0] * layer_count
+                for b in range(batch_size):
+                    for s in range(seq_len):
+                        if not visual_pos_mask[b, s]:
+                            continue
+                        use_image = image_token_mask[b, s]
+                        source_layers = image_deepstack_layers if use_image else video_deepstack_layers
+                        layer_indices = image_layer_indices if use_image else video_layer_indices
+                        for layer_idx in range(layer_count):
+                            feature: torch.Tensor
+                            if source_layers and len(source_layers) > layer_idx:
+                                layer_list = source_layers[layer_idx]
+                            else:
+                                layer_list = None
+                            if layer_list and layer_indices[layer_idx] < len(layer_list):
+                                feature = layer_list[layer_indices[layer_idx]].to(device=device, dtype=dtype)
+                                layer_indices[layer_idx] += 1
+                            else:
+                                feature = torch.zeros(1, hidden_dim, device=device, dtype=dtype)
+                            deepstack_lists[layer_idx].append(feature.squeeze(0))
+
+                deepstack_visual_embeds = [
+                    torch.stack(layer_feats, dim=0) if len(layer_feats) > 0 else torch.zeros(0, hidden_dim, device=device, dtype=dtype)
+                    for layer_feats in deepstack_lists
+                ]
+        if deepstack_visual_embeds is not None and not bool(visual_pos_mask.any()):
+            deepstack_visual_embeds = None
 
         # Compute position_ids with M-ROPE if needed
         if position_ids is None:
-            if (
+            need_new_rope = (
                 not hasattr(self, "rope_deltas")
                 or self.rope_deltas is None
                 or cache_position is None
                 or cache_position[0] == 0
-            ):
+            )
+            if need_new_rope:
                 position_ids, rope_deltas = self.get_rope_index(
                     input_ids, image_grid_thw, video_grid_thw, attention_mask
                 )
                 self.rope_deltas = rope_deltas
-            # Use cached rope_deltas for subsequent steps
             else:
                 batch_size, seq_length, _ = inputs_embeds.shape
                 position_ids = torch.arange(seq_length, device=inputs_embeds.device)
                 position_ids = position_ids.view(1, 1, -1).expand(3, batch_size, -1)
-                if cache_position is not None:
-                    delta = (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
-                else:
-                    delta = torch.zeros((batch_size, seq_length), device=inputs_embeds.device)
-                delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+
+                delta = (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
+                if delta.ndim == 1:
+                    delta = delta.unsqueeze(0)
+                if delta.shape[0] != batch_size:
+                    repeat_factor = max(1, math.ceil(batch_size / delta.shape[0]))
+                    delta = delta.repeat_interleave(repeat_factor, dim=0)[:batch_size]
+
                 position_ids = position_ids + delta.to(position_ids.device)
+
+        language_extra_kwargs = {}
+        if deepstack_visual_embeds is not None:
+            language_extra_kwargs["visual_pos_masks"] = visual_pos_mask
+            language_extra_kwargs["deepstack_visual_embeds"] = deepstack_visual_embeds
 
         outputs = self.language_model(
             input_ids=None,  # We're using inputs_embeds instead
@@ -2401,6 +2659,7 @@ class ArlowModel(ArlowPreTrainedModel):
             cache_position=cache_position,
             use_cache=use_cache,
             position_embeddings=None,
+            **language_extra_kwargs,
             **kwargs,
         )
 
@@ -2485,7 +2744,7 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         use_cache: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
-        **kwargs: Unpack[TransformersKwargs],
+        **kwargs: Unpack[FlashAttentionKwargs],
     ) -> ArlowMultimodalCausalLMOutputWithPast:
         """
         Forward pass for multimodal conditional generation.
@@ -2742,6 +3001,12 @@ class ArlowProcessor(ProcessorMixin):
             if raw_num_crops is not None:
                 if isinstance(raw_num_crops, torch.Tensor):
                     image_num_crops = raw_num_crops.tolist()
+                elif isinstance(raw_num_crops, (list, tuple)):
+                    image_num_crops = list(raw_num_crops)
+                elif isinstance(raw_num_crops, int):
+                    image_num_crops = [raw_num_crops]
+                elif np.isscalar(raw_num_crops):
+                    image_num_crops = [int(raw_num_crops)]
                 else:
                     image_num_crops = list(raw_num_crops)
 

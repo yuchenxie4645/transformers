@@ -46,6 +46,9 @@ class ArlowVisionConfig(PreTrainedConfig):
             Normalized radius (in THW coordinates) used to compute deformable attention locality bias.
         deformable_attention_strength (`float`, *optional*, defaults to 4.0):
             Scaling factor applied to deformable attention bias.
+        deepstack_visual_indexes (`list[int]`, *optional*):
+            Vision block indexes from which to capture DeepStack skip features. Defaults to a
+            depth-aware spread when unset (empty when depth < 6).
         mrope_sections (`list[int]`, *optional*):
             Multimodal RoPE allocation across [temporal, height, width] (sum must equal head dimension).
         initializer_range (`float`, *optional*, defaults to 0.02):
@@ -72,6 +75,7 @@ class ArlowVisionConfig(PreTrainedConfig):
         token_pruning_ratio: float = 0.0,
         deformable_attention_window: float = 0.25,
         deformable_attention_strength: float = 4.0,
+        deepstack_visual_indexes: Optional[list[int]] = None,
         mrope_sections: Optional[list[int]] = None,
         initializer_range: float = 0.02,
         max_position_embeddings: Optional[int] = None,
@@ -95,7 +99,20 @@ class ArlowVisionConfig(PreTrainedConfig):
         self.deformable_attention_window = deformable_attention_window
         self.deformable_attention_strength = deformable_attention_strength
         self.initializer_range = initializer_range
-        self.max_position_embeddings = max_position_embeddings if max_position_embeddings is not None else 4096
+        self.max_position_embeddings = max_position_embeddings if max_position_embeddings is not None else 32768
+        if deepstack_visual_indexes is None:
+            if depth >= 6:
+                approx = {
+                    max(0, depth // 4),
+                    max(0, depth // 2),
+                    max(0, depth - 4),
+                }
+                deepstack_visual_indexes = sorted(idx for idx in approx if 0 <= idx < depth)
+            else:
+                deepstack_visual_indexes = []
+        else:
+            deepstack_visual_indexes = sorted(set(idx for idx in deepstack_visual_indexes if 0 <= idx < depth))
+        self.deepstack_visual_indexes = deepstack_visual_indexes
 
         head_dim = embed_dim // num_heads
         if mrope_sections is None:
@@ -132,7 +149,7 @@ class ArlowTextConfig(PreTrainedConfig):
         num_attention_heads=24,
         num_key_value_heads=4,
         hidden_act="silu",
-        max_position_embeddings=2048,
+        max_position_embeddings=32768,
         initializer_range=0.02,
         rms_norm_eps=1e-6,
         use_cache=True,
@@ -328,7 +345,7 @@ class ArlowConfig(PreTrainedConfig):
         num_attention_heads=24,
         num_key_value_heads=4,
         hidden_act="silu",
-        max_position_embeddings=2048,
+        max_position_embeddings=32768,
         initializer_range=0.02,
         rms_norm_eps=1e-6,
         use_cache=True,
@@ -350,9 +367,9 @@ class ArlowConfig(PreTrainedConfig):
         layer_types=None,
         # Multimodal parameters
         vision_config=None,
-        mm_tokens_per_image=256,
-        mm_tokens_per_video=128,
-        video_max_frames=64,
+        mm_tokens_per_image=512,
+        mm_tokens_per_video=1024,
+        video_max_frames=768,
         video_sample_strategy="uniform",
         dynamic_resolution=True,
         pan_and_scan=False,

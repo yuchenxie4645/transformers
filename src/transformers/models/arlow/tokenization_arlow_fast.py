@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Tuple
 
 from transformers.models.arlow.tokenization_arlow import ArlowTokenizer
 from transformers.tokenization_utils import AddedToken
@@ -111,9 +111,9 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
         )
 
     # Copied from transformers.models.qwen2.tokenization_qwen2_fast.Qwen2TokenizerFast.save_vocabulary
-    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> tuple[str]:
+    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str, ...]:
         files = self._tokenizer.model.save(save_directory, name=filename_prefix)
-        return tuple(files)
+        return tuple(str(file_path) for file_path in files)
 
 
 __all__ = ["ArlowTokenizerFast"]

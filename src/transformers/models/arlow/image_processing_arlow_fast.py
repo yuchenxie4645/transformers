@@ -4,6 +4,7 @@ from typing import Optional, Union
 import torch
 
 from ...feature_extraction_utils import BatchFeature
+from ...image_processing_utils import get_size_dict
 from ...image_processing_utils_fast import BaseImageProcessorFast, group_images_by_shape, reorder_images
 from ...image_utils import (
     IMAGENET_STANDARD_MEAN,
@@ -86,17 +87,31 @@ class ArlowImageProcessorFast(BaseImageProcessorFast):
         size = kwargs.pop("size", None)
         min_pixels = kwargs.pop("min_pixels", None)
         max_pixels = kwargs.pop("max_pixels", None)
-        size = self.size if size is None else size
+
+        def _size_to_dict(size_value):
+            if size_value is None:
+                return {}
+            if isinstance(size_value, SizeDict):
+                return {key: value for key, value in vars(size_value).items() if value is not None}
+            if isinstance(size_value, dict):
+                return {key: value for key, value in size_value.items() if value is not None}
+            converted = get_size_dict(size_value, default_to_square=False, param_name="size_override")
+            return {key: value for key, value in converted.items() if value is not None}
+
+        base_size = _size_to_dict(self.size)
+        override_size = _size_to_dict(size) if size is not None else None
+        merged_size = base_size if override_size is None else {**base_size, **override_size}
+
         if min_pixels is not None:
-            size["shortest_edge"] = min_pixels
-            size.pop("min_pixels", None)
+            merged_size["shortest_edge"] = min_pixels
+            merged_size.pop("min_pixels", None)
         if max_pixels is not None:
-            size["longest_edge"] = max_pixels
-            size.pop("max_pixels", None)
-        if "shortest_edge" not in size or "longest_edge" not in size:
+            merged_size["longest_edge"] = max_pixels
+            merged_size.pop("max_pixels", None)
+        if "shortest_edge" not in merged_size or "longest_edge" not in merged_size:
             raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
 
-        super().__init__(size=size, min_pixels=min_pixels, max_pixels=max_pixels, **kwargs)
+        super().__init__(size=merged_size, min_pixels=min_pixels, max_pixels=max_pixels, **kwargs)
 
     def _further_process_kwargs(
         self,
@@ -108,6 +123,7 @@ class ArlowImageProcessorFast(BaseImageProcessorFast):
         if min_pixels is not None and max_pixels is not None:
             size = {"shortest_edge": min_pixels, "longest_edge": max_pixels}
         elif size is not None:
+            size = {**self.size, **size}
             if "shortest_edge" not in size or "longest_edge" not in size:
                 raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
             min_pixels = size["shortest_edge"]

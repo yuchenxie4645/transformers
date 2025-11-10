@@ -6,6 +6,7 @@ from typing import Optional, Union
 import torch
 
 from ...feature_extraction_utils import BatchFeature
+from ...image_processing_utils import get_size_dict
 from ...image_processing_utils_fast import BaseImageProcessorFast, group_images_by_shape, reorder_images
 from ...image_utils import (
     IMAGENET_STANDARD_MEAN,
@@ -96,7 +97,19 @@ class ArlowImageProcessor(BaseImageProcessorFast):
         min_pixels = kwargs.pop("min_pixels", None)
         max_pixels = kwargs.pop("max_pixels", None)
         # Start with class default, then override with provided values
-        merged_size = dict(self.size) if size is None else {**self.size, **size}
+        def _size_to_dict(size_value):
+            if size_value is None:
+                return {}
+            if isinstance(size_value, SizeDict):
+                return {key: value for key, value in vars(size_value).items() if value is not None}
+            if isinstance(size_value, dict):
+                return {key: value for key, value in size_value.items() if value is not None}
+            converted = get_size_dict(size_value, default_to_square=False, param_name="size_override")
+            return {key: value for key, value in converted.items() if value is not None}
+
+        base_size = _size_to_dict(self.size)
+        override_size = _size_to_dict(size) if size is not None else None
+        merged_size = base_size if override_size is None else {**base_size, **override_size}
 
         # backward compatibility: override size with min_pixels and max_pixels if they are provided
         if min_pixels is not None:

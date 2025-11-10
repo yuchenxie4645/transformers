@@ -9,6 +9,7 @@ from ...causal_lm_tester import CausalLMModelTest, CausalLMModelTester
 
 
 if is_torch_available():
+    import numpy as np
     import torch
 
     from transformers import (
@@ -69,6 +70,16 @@ class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
 
     # used in `test_torch_compile_for_training`
     _torch_compile_train_cls = ArlowForCausalLM if is_torch_available() else None
+
+    def test_config_multimodal_defaults(self):
+        config = ArlowConfig()
+        self.assertEqual(config.max_position_embeddings, 32768)
+        self.assertEqual(config.mm_tokens_per_image, 512)
+        self.assertEqual(config.mm_tokens_per_video, 1024)
+        self.assertEqual(config.video_max_frames, 768)
+        vision_config = config.vision_config
+        self.assertTrue(hasattr(vision_config, "deepstack_visual_indexes"))
+        self.assertIsInstance(vision_config.deepstack_visual_indexes, list)
 
 
 @require_torch
@@ -227,6 +238,31 @@ class ArlowIntegrationTest(unittest.TestCase):
             int(grid[0]) * video_processor.temporal_patch_size,
         )
 
+    def test_video_processor_motion_adaptive_sampling(self):
+        np.random.seed(0)
+        max_frames = 12
+        video_processor = ArlowVideoProcessor(
+            sample_strategy="motion_adaptive",
+            max_frames=max_frames,
+        )
+        # Build a video with abrupt change to emphasize motion-heavy frames
+        video = torch.zeros(max_frames, 3, 56, 56)
+        video[max_frames // 2 :] = 5.0
+        outputs = video_processor(
+            videos=[video],
+            num_frames=6,
+            return_metadata=True,
+            do_resize=False,
+            do_rescale=False,
+            do_normalize=False,
+        )
+        metadata = outputs["video_metadata"][0]
+        indices = np.asarray(metadata.frames_indices)
+        self.assertGreaterEqual(len(indices), 6)
+        self.assertEqual(len(indices) % video_processor.temporal_patch_size, 0)
+        self.assertTrue(np.all(indices[:-1] <= indices[1:]))
+        self.assertTrue(np.all((indices >= 0) & (indices < max_frames)))
+
     def test_image_pan_and_scan_generates_crops(self):
         image_processor = ArlowImageProcessor(
             do_pan_and_scan=True,
@@ -295,6 +331,53 @@ class ArlowIntegrationTest(unittest.TestCase):
         # Test generation with sliding window
         generated = model.generate(input_ids[:, :10], max_new_tokens=20, do_sample=False)
         self.assertEqual(generated.shape[1], 30)  # original 10 + 20 new tokens
+
+    def test_model_visual_deepstack_outputs(self):
+        from transformers import ArlowVisionConfig
+
+        config = ArlowConfig(
+            vocab_size=256,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=128,
+            image_token_id=10,
+            vision_start_token_id=11,
+            vision_end_token_id=12,
+            head_dim=16,
+            mrope_sections=[4, 6, 6],
+            vision_config=ArlowVisionConfig(
+                depth=2,
+                embed_dim=32,
+                hidden_size=64,
+                num_heads=4,
+                patch_size=14,
+                spatial_merge_size=2,
+                temporal_patch_size=2,
+                deepstack_visual_indexes=[0],
+            ),
+        )
+
+        model = ArlowModel(config).to(torch_device).eval()
+        self.assertTrue(model.visual.enable_deepstack)
+
+        pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
+        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+
+        pooled, deepstack = model.get_image_features(
+            pixel_values,
+            image_grid_thw=image_grid_thw,
+            return_deepstack=True,
+        )
+
+        self.assertEqual(len(pooled), 1)
+        self.assertEqual(pooled[0].shape, (1, config.hidden_size))
+        self.assertIsNotNone(deepstack)
+        self.assertEqual(len(deepstack), len(config.vision_config.deepstack_visual_indexes))
+        self.assertEqual(len(deepstack[0]), 1)
+        self.assertEqual(deepstack[0][0].shape, (1, config.hidden_size))
 
     @slow
     def test_model_sliding_window_vs_full_attention(self):

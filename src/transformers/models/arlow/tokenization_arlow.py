@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import ast
 import json
 import os
 import unicodedata
 from functools import lru_cache
-from typing import Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 import regex as re
 
@@ -24,16 +26,18 @@ PRETOKENIZE_REGEX = r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p
 
 
 @lru_cache
-def bytes_to_unicode() -> dict[int, str]:
+def bytes_to_unicode() -> Dict[int, str]:
     """
     GPT-2 / ByteLevel BPE uses a list of utf-8 bytes and a corresponding list of unicode strings.
     The reversible bpe codes work on unicode strings. This function and the reversible bpe codes
     allow us to simulate 'byte-level' subwords in purely unicode space.
     """
-    bs = (
-        list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
+    bs: List[int] = (
+        list(range(ord("!"), ord("~") + 1))
+        + list(range(ord("¡"), ord("¬") + 1))
+        + list(range(ord("®"), ord("ÿ") + 1))
     )
-    cs = bs[:]
+    cs = bs.copy()
     n = 0
     for b in range(2**8):
         if b not in bs:
@@ -44,7 +48,7 @@ def bytes_to_unicode() -> dict[int, str]:
     return dict(zip(bs, cs))
 
 
-def get_pairs(word: list[str]) -> set:
+def get_pairs(word: List[str]) -> Set[Tuple[str, str]]:
     """Return set of symbol pairs in a word."""
     pairs = set()
     prev_char = word[0]
@@ -164,7 +168,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
                 if (i == 0 and line.startswith("#version:")) or not line:
                     continue
                 bpe_merges.append(tuple(line.split()))
-        self.bpe_ranks = dict(zip(bpe_merges, range(len(bpe_merges))))
+        self.bpe_ranks = {merge: rank for rank, merge in enumerate(bpe_merges)}
 
         # Byte-level mapping (GPT-2 style)
         self.byte_encoder = bytes_to_unicode()
@@ -205,15 +209,17 @@ class ArlowTokenizer(PreTrainedTokenizer):
     def vocab_size(self) -> int:
         return len(self.encoder)
 
-    def get_vocab(self) -> dict[str, int]:
-        return dict(self.encoder, **self.added_tokens_encoder)
+    def get_vocab(self) -> Dict[str, int]:
+        vocab = dict(self.encoder)
+        vocab.update(self.added_tokens_encoder)
+        return vocab
 
     @lru_cache(maxsize=4096)
     def bpe(self, token: str) -> str:
         """
         Given a 'word' in the ByteLevel space, perform BPE merges according to self.bpe_ranks.
         """
-        word = tuple(token)
+        word: Tuple[str, ...] = tuple(token)
         pairs = get_pairs(word)
         if not pairs:
             return token
@@ -253,7 +259,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
         word = " ".join(word)
         return word
 
-    def _tokenize(self, text: str) -> list[str]:
+    def _tokenize(self, text: str) -> List[str]:
         """
         Tokenize the text into ByteLevel subwords, then apply BPE merges.
         """
@@ -274,7 +280,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
     def _convert_id_to_token(self, index: int) -> str:
         return self.decoder.get(index, self.unk_token)
 
-    def convert_tokens_to_string(self, tokens: list[str]) -> str:
+    def convert_tokens_to_string(self, tokens: List[str]) -> str:
         """
         Reconstructs the text by reversing the ByteLevel encoding. We map each subword
         back to original bytes, then decode to UTF-8.
@@ -321,8 +327,8 @@ class ArlowTokenizer(PreTrainedTokenizer):
         )
 
     def build_inputs_with_special_tokens(
-        self, token_ids_0: list[int], token_ids_1: Optional[list[int]] = None
-    ) -> list[int]:
+        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
+    ) -> List[int]:
         """
         Build model inputs from a sequence or a pair of sequences for sequence classification tasks by concatenating and
         adding special tokens. An Arlow sequence has the following format:
@@ -362,7 +368,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
             writer.write("#version: 0.2\n")
             # Sort merges by their BPE rank
             merges_sorted = sorted(self.bpe_ranks.items(), key=lambda kv: kv[1])
-            for i, ((first, second), rank) in enumerate(merges_sorted):
+            for i, ((first, second), _) in enumerate(merges_sorted):
                 if i > 0:
                     writer.write("\n")
                 writer.write(f"{first} {second}")

@@ -109,6 +109,12 @@ class ArlowProcessor(ProcessorMixin):
             if raw_num_crops is not None:
                 if isinstance(raw_num_crops, torch.Tensor):
                     image_num_crops = raw_num_crops.tolist()
+                elif isinstance(raw_num_crops, (list, tuple)):
+                    image_num_crops = list(raw_num_crops)
+                elif isinstance(raw_num_crops, int):
+                    image_num_crops = [raw_num_crops]
+                elif np.isscalar(raw_num_crops):
+                    image_num_crops = [int(raw_num_crops)]
                 else:
                     image_num_crops = list(raw_num_crops)
 
