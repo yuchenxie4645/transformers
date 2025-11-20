@@ -20,6 +20,7 @@ from ...processing_utils import ImagesKwargs, Unpack
 from ...utils import TensorType, add_start_docstrings
 
 
+# Inspired by transformers.models.qwen2_vl.image_processing_qwen2_vl.smart_resize
 def smart_resize(
     height: int, width: int, factor: int = 28, min_pixels: int = 56 * 56, max_pixels: int = 28 * 28 * 1280
 ):
@@ -60,6 +61,7 @@ class ArlowImageProcessorKwargs(ImagesKwargs, total=False):
     pan_and_scan_min_ratio_to_activate: float
 
 
+# Inspired by transformers.models.qwen2_vl.image_processing_qwen2_vl.Qwen2VLImageProcessor
 @add_start_docstrings(
     "Constructs an Arlow image processor that dynamically resizes images and outputs grid metadata.",
     """

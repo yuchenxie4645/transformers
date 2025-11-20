@@ -58,6 +58,7 @@ def get_pairs(word: List[str]) -> Set[Tuple[str, str]]:
     return pairs
 
 
+# Inspired by transformers.models.qwen2.tokenization_qwen2.Qwen2Tokenizer
 class ArlowTokenizer(PreTrainedTokenizer):
     """
     Construct an Arlow tokenizer. Based on byte-level Byte-Pair-Encoding.

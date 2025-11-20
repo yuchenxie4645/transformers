@@ -17,6 +17,7 @@ VOCAB_FILES_NAMES = {
 MAX_MODEL_INPUT_SIZES = {"arlow": 131072}
 
 
+# Inspired by transformers.models.qwen2.tokenization_qwen2_fast.Qwen2TokenizerFast
 class ArlowTokenizerFast(PreTrainedTokenizerFast):
     """
     Construct a "fast" Arlow tokenizer (backed by HuggingFace's *tokenizers* library). Based on byte-level

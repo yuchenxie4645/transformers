@@ -9,18 +9,58 @@
 
 ## Overview
 
-Arlow is a vision-language model that combines a visual encoder with a text decoder for multimodal understanding and generation. The model is built on the Transformer architecture with several key features:
+Arlow is a multimodal generative model that blends a Qwen2/3-VL style vision stack with a Gemma-like decoder and tooling
+adapted from the Qwen processors. The source code highlights these direct inspirations with `Inspired by transformers.models.*`
+comments on every copied or closely adapted block so it stays obvious which upstream implementation informed Arlow.
 
-- **Vision Encoder**: Processes images and videos through a vision transformer with rotary position embeddings (RoPE)
-- **Text Decoder**: Decoder-only architecture with grouped query attention (GQA), RoPE, and sliding window attention support
-- **Multimodal Integration**: Seamlessly fuses vision and text modalities using M-ROPE (Multimodal Rotary Position Embedding)
-- **Flexible Usage**: Supports both text-only (ArlowForCausalLM) and multimodal (ArlowForConditionalGeneration) tasks
+At a high level Arlow offers:
 
-The model can handle:
-- Single and multiple images
-- Video inputs with temporal understanding
-- Pure text generation
-- Mixed multimodal conversations
+- **Vision encoder (Qwen2-VL inspired)** that patchifies images & videos with rotary-aware attention, deformable biasing, DeepStack skips, and token budgets.
+- **Text decoder (Gemma + Qwen2 blend)** with grouped-query attention, RoPE / M-ROPE, sliding-window layers, and optional gated visual fusion.
+- **Multimodal bridge** that projects vision tokens into the text space, tracks rope deltas, and can inject DeepStack or timestamp-aligned hints.
+- **Processor & tokenizer tooling (Qwen3-VL inspired)** that expands `<image>` / `<video>` placeholders, supports pan-and-scan crops, adaptive video sampling, and multimodal chat templates.
+
+The model natively handles:
+
+- Single or batched conversations that mix pure text, images, and/or long-form videos.
+- Fine-grained visual prompts such as pan-and-scan crops or timestamp-aligned descriptions.
+- Text-only workloads by instantiating `ArlowForCausalLM` with the same checkpoints.
+
+### Architecture Walkthrough
+
+#### Text decoder
+- Uses the Gemma-style RMSNorm/MLP stack with grouped-query attention borrowed from Qwen2.
+- Supports mixed full/sliding attention via `layer_types`, configurable RoPE scaling, and gating hooks that can blend DeepStack features back into selected layers.
+- Keeps cache- and FlashAttention-friendly APIs (rope-aware cache positions, causal mask factory, SDPA/Flash2 dispatch).
+
+#### Vision encoder
+- Reuses the Qwen2-VL patch embed → rotary-attention → MLP block pipeline with optional deformable biasing and progressive patching.
+- Tracks DeepStack layers so intermediate vision features can be re-injected into the decoder (either always or via learned gates).
+- Provides helpers such as `get_image_features`/`get_video_features` that map placeholder metadata back to token slices.
+
+#### Multimodal bridge
+- `ArlowModel` aligns the modalities by projecting vision tokens to the text hidden size, concatenating them with prompt embeddings, then computing joint positional ids (M-ROPE for vision, text RoPE for language).
+- Rope deltas are cached so assisted decoding or multi-image prompts reuse the expensive indexing work.
+
+#### Pre/Post-processing
+- `ArlowProcessor` mirrors the Qwen3-VL processor: it expands `<image>` / `<video>` placeholders into the exact number of required tokens, injects timestamp hints, and supports batch mixes of media types.
+- `ArlowImageProcessor(Fast)` performs dynamic resizing, optional pan-and-scan crops, patch merging, and emits `image_grid_thw` metadata that the model needs.
+- `ArlowVideoProcessor` adds several sampling strategies (`uniform`, `fps_based`, `motion_adaptive`) plus safeguards for volumetric token budgets.
+
+### Input Preparation & Special Tokens
+
+- Text prompts should use `<image>` / `<video>` markers (or the tokenizer’s equivalent special ids). The processor expands each marker into `<|vision_start|> ... <|vision_end|>` spans sized to match the actual grid metadata.
+- Videos can optionally receive timestamp supervision: when `timestamp_alignment=True`, each frame placeholder is preceded by `<{time} seconds>` tokens so the decoder can ground outputs.
+- When pan-and-scan is enabled, additional `<image>` markers get injected automatically so croppings share the original context sentence.
+
+### Processor knobs you might care about
+
+- **Dynamic resolution**: `images_kwargs={"size": {...}, "disable_grouping": False}` allows heterogeneous aspect ratios without wasting tokens.
+- **Pan-and-Scan**: set `do_pan_and_scan=True` plus the `pan_and_scan_*` thresholds to capture tall/ultra-wide content while respecting the mm token budget.
+- **Video sampling**: choose between uniform sampling (`sample_strategy="uniform"`), deterministic FPS-based sampling (`"fps_based"`), or motion-adaptive sampling (provide raw frames to favor segments with action).
+- **Token budgeting**: `mm_tokens_per_image` / `mm_tokens_per_video` in `ArlowConfig` and `max_tokens_per_video` in the processor guard against prompt explosions.
+
+These knobs pair tightly with the `image_grid_thw` / `video_grid_thw` metadata that the processor returns—always forward them to the model alongside `pixel_values`/`pixel_values_videos`.
 
 ## Usage Examples
 
@@ -221,6 +261,18 @@ model = ArlowForConditionalGeneration.from_pretrained(
     device_map="auto"
 )
 ```
+
+### Position IDs, Cache & FA2 Packing
+
+- Always pass `cache_position` from `generate` into manual forward calls if you override `prepare_inputs_for_generation`. The text model differentiates between prefill vs. decode steps based on that tensor.
+- When using FlashAttention-2 the model expects packed `position_ids` of shape `[4, batch, seq]` (text row + 3 M-ROPE rows). The processor handles this automatically; if you craft inputs manually ensure you concatenate `[text_positions; vision_positions]`.
+- Mixed-modal batches can skip re-feeding `pixel_values` during decoding. `ArlowForConditionalGeneration.prepare_inputs_for_generation` already clears them when `cache_position[0] != 0`, so copy that behavior in custom loops.
+
+### Processor Debugging Tips
+
+- Call `processor._get_num_multimodal_tokens(...)` to sanity-check that the token budget matches your prompt before invoking the heavy image/video preprocessing.
+- Set `return_mm_token_type_ids=True` to obtain a mask of multimodal placeholder positions. This is handy when computing loss masks or when you want to inject DeepStack features selectively.
+- Enable `timestamp_alignment` only when your video metadata includes fps/frame indices; otherwise the processor will warn and fall back to a default FPS of 24.
 
 ## ArlowConfig
 

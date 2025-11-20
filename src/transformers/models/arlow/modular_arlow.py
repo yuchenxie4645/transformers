@@ -25,12 +25,19 @@ from ...modeling_layers import (
     GenericForTokenClassification,
     GradientCheckpointingLayer,
 )
-from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast, ModelOutput
+from ...modeling_outputs import (
+    BaseModelOutputWithPast,
+    CausalLMOutputWithPast,
+    ModelOutput,
+    QuestionAnsweringModelOutput,
+    SequenceClassifierOutputWithPast,
+    TokenClassifierOutput,
+)
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update, rope_config_validation
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import MultiModalData, ProcessingKwargs, ProcessorMixin, Unpack
 from ...tokenization_utils_base import PreTokenizedInput, TextInput
-from ...utils import auto_docstring, can_return_tuple, logging
+from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
 from ...utils.import_utils import get_torch_version
 from ...video_utils import VideoInput
 
@@ -589,6 +596,7 @@ class ArlowMultimodalCausalLMOutputWithPast(ModelOutput):
 
 if version.parse(get_torch_version()) >= version.parse("2.3.0"):
 
+    # Inspired by transformers.models.gemma.modeling_gemma.GemmaRMSNorm
     class ArlowRMSNorm(nn.RMSNorm):
         def __init__(self, hidden_size: int, eps: float = 1e-6):
             super().__init__(normalized_shape=hidden_size, eps=eps, elementwise_affine=True)
@@ -596,6 +604,7 @@ if version.parse(get_torch_version()) >= version.parse("2.3.0"):
 else:
 
     @use_kernel_forward_from_hub("RMSNorm")
+    # Inspired by transformers.models.gemma.modeling_gemma.GemmaRMSNorm
     class ArlowRMSNorm(nn.Module):
         def __init__(self, hidden_size: int, eps: float = 1e-6):
             super().__init__()
@@ -612,7 +621,7 @@ else:
         def extra_repr(self):
             return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
-
+# Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLRotaryEmbedding
 class ArlowTextRotaryEmbedding(nn.Module):
     def __init__(self, config: ArlowConfig, device=None):
         super().__init__()
@@ -727,14 +736,14 @@ class ArlowTextRotaryEmbedding(nn.Module):
         sin = emb.sin() * self.attention_scaling
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
-
+# Inspired by transformers.models.llama.modeling_llama.rotate_half
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
     # Interleave even/odd features: (-x_odd, x_even)
     x_even = x[..., ::2]
     x_odd = x[..., 1::2]
     return torch.stack((-x_odd, x_even), dim=-1).reshape_as(x)
 
-
+# Inspired by transformers.models.gemma.modeling_gemma.apply_rotary_pos_emb
 def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     cos = cos.unsqueeze(unsqueeze_dim)
     sin = sin.unsqueeze(unsqueeze_dim)
@@ -742,7 +751,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
-
+# Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.apply_rotary_pos_emb_vision
 def apply_rotary_pos_emb_vision(
     q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -757,7 +766,7 @@ def apply_rotary_pos_emb_vision(
     k_embed = k_embed.to(orig_k_dtype)
     return q_embed, k_embed
 
-
+# Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.VisionRotaryEmbedding
 class ArlowVLRotaryEmbedding(nn.Module):
     """Grid-aware rotary position embeddings for vision transformer (THW)."""
 
@@ -904,7 +913,7 @@ class ArlowVLRotaryEmbedding(nn.Module):
         concatenated = torch.cat(freqs_list, dim=0)
         return concatenated.to(dtype=dtype)
 
-
+# Inspired by transformers.models.gemma.modeling_gemma.repeat_kv
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
@@ -912,7 +921,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
-
+# Inspired by transformers.models.gemma.modeling_gemma.eager_attention_forward
 def eager_attention_forward(
     module: nn.Module,
     query: torch.Tensor,
@@ -938,7 +947,7 @@ def eager_attention_forward(
 
     return attn_output, attn_weights
 
-
+# Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLAttention and transformers.models.gemma.modeling_gemma.GemmaAttention
 class ArlowAttention(nn.Module):
     def __init__(self, config: ArlowConfig, layer_idx: int):
         super().__init__()
@@ -1032,7 +1041,7 @@ class ArlowAttention(nn.Module):
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
-
+# Inspired by transformers.models.gemma.modeling_gemma.GemmaMLP
 class ArlowVLMLP(nn.Module):
     def __init__(self, config: ArlowConfig):
         super().__init__()
@@ -1049,8 +1058,8 @@ class ArlowVLMLP(nn.Module):
         output = self.dropout(x)
         return output
 
-
-class ArlowDecoderLayer(nn.Module):
+# Inspired by transformers.models.gemma.modeling_gemma.GemmaDecoderLayer and transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLDecoderLayer
+class ArlowDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: ArlowConfig, layer_idx: int):
         super().__init__()
         self.attention_type = config.layer_types[layer_idx]
@@ -1095,7 +1104,7 @@ class ArlowDecoderLayer(nn.Module):
 
         return (hidden_states,)
 
-
+# Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.PatchEmbed
 class ArlowVLPatchEmbed(nn.Module):
     """Convert images/videos to patch embeddings."""
 
@@ -1119,17 +1128,52 @@ class ArlowVLPatchEmbed(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            hidden_states: (batch * num_tiles, channels, temporal, height, width)
+            hidden_states:
+                - `(batch, seq_len, patch_dim)` flattened patches from the processor, or
+                - `(batch, channels, temporal, height, width)` raw clips/images.
         Returns:
-            embeddings: (batch * num_tiles, embed_dim, T, H, W) -> flattened to (total_tokens, embed_dim)
+            embeddings: `(batch, num_tokens, embed_dim)`
         """
-        hidden_states = self.proj(hidden_states)
-        # Flatten spatial dimensions: (B, C, T, H, W) -> (B, T*H*W, C)
-        batch_size = hidden_states.shape[0]
-        hidden_states = hidden_states.reshape(batch_size, self.embed_dim, -1).transpose(1, 2)
-        return hidden_states
+        patch_shape_info: Optional[tuple[int, int]] = None
 
+        if hidden_states.dim() == 3:
+            batch_size, seq_len, patch_dim = hidden_states.shape
+            expected_dim = (
+                self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size
+            )
+            if patch_dim != expected_dim:
+                raise ValueError(
+                    f"Expected flattened patch dimension {expected_dim}, but received {patch_dim}."
+                )
+            hidden_states = hidden_states.reshape(
+                batch_size * seq_len,
+                self.in_channels,
+                self.temporal_patch_size,
+                self.patch_size,
+                self.patch_size,
+            )
+            patch_shape_info = (batch_size, seq_len)
+        else:
+            if hidden_states.dim() == 4:
+                # Images without explicit temporal dimension
+                hidden_states = hidden_states.unsqueeze(2)
+            if hidden_states.dim() != 5:
+                raise ValueError(
+                    "ArlowVLPatchEmbed expects flattened patches with 3 dims or image/video tensors with "
+                    f"4/5 dims. Received shape: {tuple(hidden_states.shape)}"
+                )
 
+        projected = self.proj(hidden_states)
+
+        if patch_shape_info is not None:
+            batch_size, seq_len = patch_shape_info
+            return projected.reshape(batch_size, seq_len, self.embed_dim)
+
+        batch_size = projected.shape[0]
+        projected = projected.reshape(batch_size, self.embed_dim, -1).transpose(1, 2)
+        return projected
+
+# Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.PatchMerger
 class ArlowVLPatchMerger(nn.Module):
     """Merge vision patches and project to text model dimension."""
 
@@ -1157,7 +1201,7 @@ class ArlowVLPatchMerger(nn.Module):
         output = self.mlp(x)
         return output
 
-
+# Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.VisionAttention
 class ArlowVLAttention(nn.Module):
     """Vision self-attention with RoPE."""
 
@@ -1296,7 +1340,7 @@ class ArlowVLAttention(nn.Module):
 
         return attn_output
 
-
+# Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLVisionBlock
 class ArlowVLBlock(GradientCheckpointingLayer):
     """Vision transformer block with attention and MLP."""
 
@@ -1361,7 +1405,7 @@ class ArlowPreTrainedModel(PreTrainedModel):
         elif isinstance(module, ArlowRMSNorm):
             nn.init.ones_(module.weight)
 
-
+# Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLVisionModel
 class ArlowVLVisionModel(ArlowPreTrainedModel):
     """
     Vision encoder for Arlow vision-language models.
@@ -1649,7 +1693,7 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
             return vision_embeddings, deepstack_feature_lists
         return vision_embeddings
 
-
+# Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLTextModel
 class ArlowTextModel(ArlowPreTrainedModel):
     """
     Text-only decoder model for Arlow.
@@ -1874,7 +1918,7 @@ class ArlowTextModel(ArlowPreTrainedModel):
             attentions=all_self_attns,
         )
 
-
+# Inspired by transformers.models.gemma.modeling_gemma.GemmaForCausalLM
 class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
     """
     Arlow model for causal language modeling (text-only, no vision).
@@ -1883,7 +1927,7 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
     For multimodal (vision + text) tasks, use ArlowForConditionalGeneration instead.
     """
 
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
     def __init__(self, config: ArlowTextConfig):
         super().__init__(config)
@@ -1997,7 +2041,7 @@ class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
             past_key_values.reorder_cache(beam_idx)
         return past_key_values
 
-
+# Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLForConditionalGeneration
 class ArlowModel(ArlowPreTrainedModel):
     """
     Main Arlow vision-language model (VLM) combining vision encoder and text decoder.
@@ -2701,6 +2745,7 @@ class ArlowModel(ArlowPreTrainedModel):
 
 
 @auto_docstring
+# Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLForConditionalGeneration
 class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
     """
     Arlow model for conditional generation with vision-language inputs (VLM).
@@ -2730,7 +2775,7 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         ```
     """
 
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = {"lm_head.weight": "model.language_model.embed_tokens.weight"}
 
     def __init__(self, config: ArlowConfig):
         super().__init__(config)
@@ -2952,6 +2997,7 @@ class ArlowProcessorKwargs(ProcessingKwargs, total=False):
     }
 
 
+# Inspired by transformers.models.qwen3_vl.processing_qwen3_vl.Qwen3VLProcessor
 class ArlowProcessor(ProcessorMixin):
     r"""
     Constructs an Arlow processor which wraps an image processor, a tokenizer, and a video processor into a single
@@ -3260,49 +3306,188 @@ class ArlowProcessor(ProcessorMixin):
         return timestamps
 
 
-class ArlowForSequenceClassification(GenericForSequenceClassification, ArlowPreTrainedModel):
-    # Override to use the text-only backbone to avoid unused vision params during text classification.
-    def __init__(self, config):
-        # Initialize PreTrainedModel machinery
-        ArlowPreTrainedModel.__init__(self, config)
+class ArlowForSequenceClassification(ArlowPreTrainedModel):
+    """
+    Sequence classification head that always runs on the text-only `ArlowTextModel` backbone.
+
+    When initialized with an `ArlowConfig`, the text decoder is materialized via `_from_config` so that the unused
+    vision modules are never instantiated, mirroring the approach taken by other VLMs such as Gemma and Qwen.
+    """
+
+    input_modalities = "text"
+
+    def __init__(self, config: Union[ArlowConfig, ArlowTextConfig]):
+        super().__init__(config)
         self.num_labels = config.num_labels
-        # Use text-only backbone for classification
         self.model = ArlowTextModel._from_config(config)
-        # Classification head
         self.score = nn.Linear(config.hidden_size, self.num_labels, bias=False)
-        # Finalize
+
+        if getattr(config, "gradient_checkpointing", False):
+            self.gradient_checkpointing_enable()
+
         self.post_init()
+
     def get_input_embeddings(self):
-        return getattr(self, self.base_model_prefix).get_input_embeddings()
+        return self.model.get_input_embeddings()
 
     def set_input_embeddings(self, value):
-        getattr(self, self.base_model_prefix).set_input_embeddings(value)
+        self.model.set_input_embeddings(value)
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> SequenceClassifierOutputWithPast:
+        transformer_outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            **kwargs,
+        )
+        hidden_states = transformer_outputs.last_hidden_state
+        logits = self.score(hidden_states)
+
+        if input_ids is not None:
+            batch_size = input_ids.shape[0]
+        elif inputs_embeds is not None:
+            batch_size = inputs_embeds.shape[0]
+        else:
+            raise ValueError("You must provide either `input_ids` or `inputs_embeds`.")
+
+        if self.config.pad_token_id is None and batch_size != 1:
+            raise ValueError("Cannot handle batch sizes > 1 if no padding token is defined.")
+        if self.config.pad_token_id is None:
+            last_non_pad_token = -1
+        elif input_ids is not None:
+            non_pad_mask = (input_ids != self.config.pad_token_id).to(logits.device, torch.int32)
+            token_indices = torch.arange(input_ids.shape[-1], device=logits.device, dtype=torch.int32)
+            last_non_pad_token = (token_indices * non_pad_mask).argmax(-1)
+        else:
+            last_non_pad_token = -1
+            logger.warning_once(
+                f"{self.__class__.__name__} will not detect padding tokens in `inputs_embeds`. Results may be "
+                "unexpected if using padding tokens in conjunction with `inputs_embeds.`"
+            )
+
+        pooled_logits = logits[torch.arange(batch_size, device=logits.device), last_non_pad_token]
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(logits=logits, labels=labels, pooled_logits=pooled_logits, config=self.config)
+
+        return SequenceClassifierOutputWithPast(
+            loss=loss,
+            logits=pooled_logits,
+            past_key_values=transformer_outputs.past_key_values,
+            hidden_states=transformer_outputs.hidden_states,
+            attentions=transformer_outputs.attentions,
+        )
 
 
-class ArlowForQuestionAnswering(GenericForQuestionAnswering, ArlowPreTrainedModel):
-    # Override to use the text-only backbone
-    def __init__(self, config):
-        ArlowPreTrainedModel.__init__(self, config)
-        # Use text-only backbone
+class ArlowTextForSequenceClassification(GenericForSequenceClassification, ArlowPreTrainedModel):
+    """
+    Text-only sequence classification head that mirrors `GenericForSequenceClassification` for `ArlowTextConfig`.
+    """
+
+    config: ArlowTextConfig
+    input_modalities = "text"
+
+
+class ArlowForQuestionAnswering(ArlowPreTrainedModel):
+    """
+    Question answering head that runs purely on the Arlow text decoder, avoiding unnecessary multimodal modules.
+    """
+
+    input_modalities = "text"
+
+    def __init__(self, config: Union[ArlowConfig, ArlowTextConfig]):
+        super().__init__(config)
         self.model = ArlowTextModel._from_config(config)
-        # QA head
         self.qa_outputs = nn.Linear(config.hidden_size, 2)
+
+        if getattr(config, "gradient_checkpointing", False):
+            self.gradient_checkpointing_enable()
+
         self.post_init()
+
     def get_input_embeddings(self):
-        return getattr(self, self.base_model_prefix).get_input_embeddings()
+        return self.model.get_input_embeddings()
 
     def set_input_embeddings(self, value):
-        getattr(self, self.base_model_prefix).set_input_embeddings(value)
+        self.model.set_input_embeddings(value)
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        start_positions: Optional[torch.LongTensor] = None,
+        end_positions: Optional[torch.LongTensor] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> QuestionAnsweringModelOutput:
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            **kwargs,
+        )
+
+        sequence_output = outputs.last_hidden_state
+        logits = self.qa_outputs(sequence_output)
+        start_logits, end_logits = logits.split(1, dim=-1)
+        start_logits = start_logits.squeeze(-1).contiguous()
+        end_logits = end_logits.squeeze(-1).contiguous()
+
+        loss = None
+        if start_positions is not None and end_positions is not None:
+            loss = self.loss_function(start_logits, end_logits, start_positions, end_positions, **kwargs)
+
+        return QuestionAnsweringModelOutput(
+            loss=loss,
+            start_logits=start_logits,
+            end_logits=end_logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
 
-class ArlowForTokenClassification(GenericForTokenClassification, ArlowPreTrainedModel):
-    # Override to use the text-only backbone
-    def __init__(self, config):
-        ArlowPreTrainedModel.__init__(self, config)
+class ArlowTextForQuestionAnswering(GenericForQuestionAnswering, ArlowPreTrainedModel):
+    """
+    Text-only question answering head leveraging the generic QA mixin for `ArlowTextConfig`.
+    """
+
+    config: ArlowTextConfig
+    input_modalities = "text"
+
+
+class ArlowForTokenClassification(ArlowPreTrainedModel):
+    """
+    Token classification head that uses the text backbone directly.
+    """
+
+    input_modalities = "text"
+
+    def __init__(self, config: Union[ArlowConfig, ArlowTextConfig]):
+        super().__init__(config)
         self.num_labels = config.num_labels
-        # Use text-only backbone
         self.model = ArlowTextModel._from_config(config)
-        # Token classification head
         if getattr(config, "classifier_dropout", None) is not None:
             classifier_dropout = config.classifier_dropout
         elif getattr(config, "hidden_dropout", None) is not None:
@@ -3311,12 +3496,63 @@ class ArlowForTokenClassification(GenericForTokenClassification, ArlowPreTrained
             classifier_dropout = 0.1
         self.dropout = nn.Dropout(classifier_dropout)
         self.score = nn.Linear(config.hidden_size, config.num_labels)
+
+        if getattr(config, "gradient_checkpointing", False):
+            self.gradient_checkpointing_enable()
+
         self.post_init()
+
     def get_input_embeddings(self):
-        return getattr(self, self.base_model_prefix).get_input_embeddings()
+        return self.model.get_input_embeddings()
 
     def set_input_embeddings(self, value):
-        getattr(self, self.base_model_prefix).set_input_embeddings(value)
+        self.model.set_input_embeddings(value)
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> TokenClassifierOutput:
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            **kwargs,
+        )
+        sequence_output = outputs.last_hidden_state
+        sequence_output = self.dropout(sequence_output)
+        logits = self.score(sequence_output)
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(logits, labels, self.config)
+
+        return TokenClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+class ArlowTextForTokenClassification(GenericForTokenClassification, ArlowPreTrainedModel):
+    """
+    Text-only token classification head for `ArlowTextConfig`.
+    """
+
+    config: ArlowTextConfig
+    input_modalities = "text"
 
 
 __all__ = [
@@ -3331,6 +3567,9 @@ __all__ = [
     "ArlowVLVisionModel",
     "ArlowProcessor",
     "ArlowForSequenceClassification",
+    "ArlowTextForSequenceClassification",
     "ArlowForQuestionAnswering",
+    "ArlowTextForQuestionAnswering",
     "ArlowForTokenClassification",
+    "ArlowTextForTokenClassification",
 ]

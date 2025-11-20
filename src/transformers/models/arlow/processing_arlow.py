@@ -32,6 +32,7 @@ class ArlowProcessorKwargs(ProcessingKwargs, total=False):
     }
 
 
+# Inspired by transformers.models.qwen3_vl.processing_qwen3_vl.Qwen3VLProcessor
 class ArlowProcessor(ProcessorMixin):
     r"""
     Constructs an Arlow processor which wraps an image processor, a tokenizer, and a video processor into a single

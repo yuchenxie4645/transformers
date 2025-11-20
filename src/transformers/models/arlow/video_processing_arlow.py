@@ -26,6 +26,7 @@ from ...video_utils import (
 logger = logging.get_logger(__name__)
 
 
+# Inspired by transformers.models.qwen3_vl.video_processing_qwen3_vl.smart_resize
 def smart_resize(
     num_frames: int,
     height: int,
@@ -94,6 +95,7 @@ def smart_resize(
     return h_bar, w_bar
 
 
+# Inspired by transformers.models.qwen3_vl.video_processing_qwen3_vl.motion_adaptive_sampling
 def motion_adaptive_sampling(frames: np.ndarray, target_frames: int, threshold: float = 0.1):
     """
     Sample frames adaptively based on motion detection.
@@ -139,6 +141,7 @@ class ArlowVideoProcessorInitKwargs(VideosKwargs, total=False):
     motion_threshold: float
 
 
+# Inspired by transformers.models.qwen3_vl.video_processing_qwen3_vl.Qwen3VLVideoProcessor
 @add_start_docstrings(
     "Constructs an Arlow video processor with adaptive sampling and dynamic resizing.",
     BASE_VIDEO_PROCESSOR_DOCSTRING,
