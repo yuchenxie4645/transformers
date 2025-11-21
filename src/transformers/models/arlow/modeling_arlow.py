@@ -896,6 +896,31 @@ class ArlowPreTrainedModel(PreTrainedModel):
             nn.init.ones_(module.weight)
 
 
+class ArlowTextPreTrainedModel(PreTrainedModel):
+    config_class = ArlowTextConfig
+    base_model_prefix = "model"
+    supports_gradient_checkpointing = True
+    _no_split_modules = ["ArlowDecoderLayer"]
+    _skip_keys_device_placement = ["past_key_values", "rotary_emb.inv_freq"]
+    _supports_flash_attn = True
+    _supports_sdpa = True
+    _supports_attention_backend = True
+    _can_record_outputs = {}
+
+    def _init_weights(self, module: nn.Module):
+        std = self.config.initializer_range
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=std)
+            if module.padding_idx is not None:
+                nn.init.zeros_(module.weight[module.padding_idx])
+        elif isinstance(module, ArlowRMSNorm):
+            nn.init.ones_(module.weight)
+
+
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLVisionModel
 class ArlowVLVisionModel(ArlowPreTrainedModel):
     """
@@ -1196,7 +1221,7 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
 
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLTextModel
-class ArlowTextModel(ArlowPreTrainedModel):
+class ArlowTextModel(ArlowTextPreTrainedModel):
     """
     Text-only decoder model for Arlow.
 
@@ -1422,7 +1447,7 @@ class ArlowTextModel(ArlowPreTrainedModel):
 
 
 # Inspired by transformers.models.gemma.modeling_gemma.GemmaForCausalLM
-class ArlowForCausalLM(ArlowPreTrainedModel, GenerationMixin):
+class ArlowForCausalLM(ArlowTextPreTrainedModel, GenerationMixin):
     """
     Arlow model for causal language modeling (text-only, no vision).
 
@@ -2586,7 +2611,7 @@ class ArlowForSequenceClassification(ArlowPreTrainedModel):
         )
 
 
-class ArlowTextForSequenceClassification(GenericForSequenceClassification, ArlowPreTrainedModel):
+class ArlowTextForSequenceClassification(GenericForSequenceClassification, ArlowTextPreTrainedModel):
     """
     Text-only sequence classification head that mirrors `GenericForSequenceClassification` for `ArlowTextConfig`.
     """
@@ -2659,7 +2684,7 @@ class ArlowForQuestionAnswering(ArlowPreTrainedModel):
         )
 
 
-class ArlowTextForQuestionAnswering(GenericForQuestionAnswering, ArlowPreTrainedModel):
+class ArlowTextForQuestionAnswering(GenericForQuestionAnswering, ArlowTextPreTrainedModel):
     """
     Text-only question answering head leveraging the generic QA mixin for `ArlowTextConfig`.
     """
@@ -2737,7 +2762,7 @@ class ArlowForTokenClassification(ArlowPreTrainedModel):
         )
 
 
-class ArlowTextForTokenClassification(GenericForTokenClassification, ArlowPreTrainedModel):
+class ArlowTextForTokenClassification(GenericForTokenClassification, ArlowTextPreTrainedModel):
     """
     Text-only token classification head for `ArlowTextConfig`.
     """
