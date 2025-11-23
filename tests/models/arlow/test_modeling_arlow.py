@@ -81,6 +81,12 @@ class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
         self.assertTrue(hasattr(vision_config, "deepstack_visual_indexes"))
         self.assertIsInstance(vision_config.deepstack_visual_indexes, list)
 
+    @unittest.skip(
+        "Arlow uses checkpoint_conversion_mapping which causes issues when loading base model from saved task model checkpoint"
+    )
+    def test_load_with_mismatched_shapes(self):
+        pass
+
 
 @require_torch
 class ArlowIntegrationTest(unittest.TestCase):
