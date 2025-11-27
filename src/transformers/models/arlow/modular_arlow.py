@@ -675,29 +675,6 @@ class ArlowTextRotaryEmbedding(nn.Module):
         inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float().to(device) / head_dim))
         return inv_freq, 1.0
 
-    def apply_interleaved_mrope(self, freqs: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
-        """Apply interleaved M-ROPE layout to 3D rotary frequencies.
-
-        Converts the chunked layout `[TTT...HHH...WWW]` into `[THTHWHTH...TT]` while preserving
-        per-dimension frequency continuity. Mirrors the helper used in Qwen-VL models.
-
-        Args:
-            freqs (`torch.Tensor`): Tensor of shape `(3, batch, seq, head_dim // 2)`.
-            mrope_section (`list[int]`): Allocation per [temporal, height, width].
-
-        Returns:
-            `torch.Tensor`: Interleaved tensor of shape `(batch, seq, head_dim // 2)`.
-        """
-
-        freqs_t = freqs[0]
-        for dim, offset in enumerate((1, 2), start=1):
-            length = mrope_section[dim] * 3
-            if length <= offset:
-                continue
-            idx = slice(offset, length, 3)
-            freqs_t[..., idx] = freqs[dim, ..., idx]
-        return freqs_t
-
     @torch.no_grad()
     @dynamic_rope_update
     def forward(self, x: torch.Tensor, position_ids: torch.LongTensor):
@@ -730,7 +707,7 @@ class ArlowTextRotaryEmbedding(nn.Module):
         # (3, batch, seq, head_dim//2)
         freqs = (inv_freq_expanded @ position_ids_expanded).transpose(2, 3)
         # Interleave per mrope_sections
-        freqs = self.apply_interleaved_mrope(freqs, self.config.mrope_sections)
+        freqs = apply_interleaved_mrope(freqs, self.config.mrope_sections)
         emb = torch.cat((freqs, freqs), dim=-1)
         cos = emb.cos() * self.attention_scaling
         sin = emb.sin() * self.attention_scaling
@@ -742,6 +719,29 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
     x_even = x[..., ::2]
     x_odd = x[..., 1::2]
     return torch.stack((-x_odd, x_even), dim=-1).reshape_as(x)
+
+
+def apply_interleaved_mrope(freqs: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
+    """Apply interleaved M-ROPE layout to 3D rotary frequencies.
+
+    Converts the chunked layout `[TTT...HHH...WWW]` into `[THTHWHTH...TT]` while preserving
+    per-dimension frequency continuity. Mirrors the helper used in Qwen-VL models.
+
+    Args:
+        freqs (`torch.Tensor`): Tensor of shape `(3, batch, seq, head_dim // 2)`.
+        mrope_section (`list[int]`): Allocation per [temporal, height, width].
+
+    Returns:
+        `torch.Tensor`: Interleaved tensor of shape `(batch, seq, head_dim // 2)`.
+    """
+    freqs_t = freqs[0]
+    for dim, offset in enumerate((1, 2), start=1):
+        length = mrope_section[dim] * 3
+        if length <= offset:
+            continue
+        idx = slice(offset, length, 3)
+        freqs_t[..., idx] = freqs[dim, ..., idx]
+    return freqs_t
 
 # Inspired by transformers.models.gemma.modeling_gemma.apply_rotary_pos_emb
 def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
@@ -812,18 +812,6 @@ class ArlowVLRotaryEmbedding(nn.Module):
             self.attention_scaling = 1.0
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.original_inv_freq = inv_freq
-
-    def apply_interleaved_mrope(self, freqs: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
-        """Apply interleaved M-ROPE layout mirroring Qwen's implementation."""
-
-        freqs_t = freqs[0]
-        for dim, offset in enumerate((1, 2), start=1):
-            length = mrope_section[dim] * 3
-            if length <= offset:
-                continue
-            idx = slice(offset, length, 3)
-            freqs_t[..., idx] = freqs[dim, ..., idx]
-        return freqs_t
 
     def forward(
         self,
@@ -907,7 +895,7 @@ class ArlowVLRotaryEmbedding(nn.Module):
             position_ids = torch.stack([t_index, h_index, w_index], dim=0)
             freqs = torch.einsum("ds,f->dsf", position_ids, inv_freq)
             freqs = freqs[:, None, :, :]
-            freqs = self.apply_interleaved_mrope(freqs, mrope_sections)
+            freqs = apply_interleaved_mrope(freqs, mrope_sections)
             freqs_list.append(freqs.squeeze(0))
 
         concatenated = torch.cat(freqs_list, dim=0)
@@ -1406,29 +1394,10 @@ class ArlowPreTrainedModel(PreTrainedModel):
             nn.init.ones_(module.weight)
 
 
-class ArlowTextPreTrainedModel(PreTrainedModel):
-    config_class = ArlowTextConfig
-    base_model_prefix = "model"
-    supports_gradient_checkpointing = True
-    _no_split_modules = ["ArlowDecoderLayer"]
-    _skip_keys_device_placement = ["past_key_values", "rotary_emb.inv_freq"]
-    _supports_flash_attn = True
-    _supports_sdpa = True
-    _supports_attention_backend = True
-    _can_record_outputs = {}
+class ArlowTextPreTrainedModel(ArlowPreTrainedModel):
+    """PreTrainedModel for text-only Arlow models. Inherits _init_weights from ArlowPreTrainedModel."""
 
-    def _init_weights(self, module: nn.Module):
-        std = self.config.initializer_range
-        if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=std)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=std)
-            if module.padding_idx is not None:
-                nn.init.zeros_(module.weight[module.padding_idx])
-        elif isinstance(module, ArlowRMSNorm):
-            nn.init.ones_(module.weight)
+    config_class = ArlowTextConfig
 
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLVisionModel
@@ -2147,41 +2116,41 @@ class ArlowModel(ArlowPreTrainedModel):
     def embed_tokens(self, value):
         self.set_input_embeddings(value)
 
-    def get_image_features(
+    def _get_visual_features(
         self,
         pixel_values: torch.FloatTensor,
-        image_grid_thw: Optional[torch.LongTensor] = None,
+        grid_thw: Optional[torch.LongTensor] = None,
         return_deepstack: bool = False,
     ) -> Union[list[torch.Tensor], tuple[list[torch.Tensor], Optional[list[list[torch.Tensor]]]]]:
-        """Extract image features from the vision encoder.
+        """Shared helper to extract visual features from the vision encoder.
 
         Args:
-            pixel_values: Batched images already tensorized.
-            image_grid_thw: Grid metadata for each image.
-            return_deepstack: If True, also returns per-layer deepstack projections aligned to placeholders.
+            pixel_values: Batched images or videos already tensorized.
+            grid_thw: Grid metadata (temporal, height, width) for each input.
+            return_deepstack: If True, also returns per-layer deepstack projections.
         """
-
         # Get dtype from vision model, fallback to float32
         target_dtype = self.visual.get_dtype() if hasattr(self.visual, "get_dtype") else torch.float32
         pixel_values = pixel_values.to(dtype=target_dtype)
 
-        visual_outputs = self.visual(pixel_values, image_grid_thw)
+        visual_outputs = self.visual(pixel_values, grid_thw)
         if isinstance(visual_outputs, tuple):
-            image_embeds, deepstack_tokens = visual_outputs
+            embeds, deepstack_tokens = visual_outputs
         else:
-            image_embeds = visual_outputs
+            embeds = visual_outputs
             deepstack_tokens = None
 
+        # Compute split sizes based on grid metadata
         split_sizes: list[int] = []
-
-        if image_grid_thw is not None:
+        if grid_thw is not None:
             spm = self.config.vision_config.spatial_merge_size
-            t_in = image_grid_thw[:, 0]
-            h = image_grid_thw[:, 1]
-            w = image_grid_thw[:, 2]
+            t_in = grid_thw[:, 0]
+            h = grid_thw[:, 1]
+            w = grid_thw[:, 2]
             base_per_item = torch.maximum(h * w, torch.ones_like(h))
-            total_len = image_embeds.shape[0]
-            # Candidate 1: assume t already patched
+            total_len = embeds.shape[0]
+
+            # Try candidate 1: assume t already patched
             counts1 = (t_in * base_per_item).sum().item()
             if counts1 != total_len:
                 base_alt = torch.maximum(h // spm, torch.ones_like(h)) * torch.maximum(w // spm, torch.ones_like(w))
@@ -2189,16 +2158,18 @@ class ArlowModel(ArlowPreTrainedModel):
                 if counts_alt == total_len:
                     base_per_item = base_alt
                     counts1 = counts_alt
+
             if counts1 == total_len:
                 t_use = t_in
             else:
-                # Candidate 2: temporal patched by temporal_patch_size
+                # Try candidate 2: temporal patched by temporal_patch_size
                 t_patch = self.config.vision_config.temporal_patch_size
                 t2 = (t_in + t_patch - 1) // t_patch
                 counts2 = (t2 * base_per_item).sum().item()
                 if counts2 == total_len:
                     t_use = t2
                 else:
+                    # Fallback: distribute tokens evenly
                     base_per_item = torch.ones_like(h)
                     t_use_list: list[int] = []
                     remaining = total_len
@@ -2210,28 +2181,25 @@ class ArlowModel(ArlowPreTrainedModel):
                         items_left -= 1
                     if remaining > 0:
                         t_use_list[-1] += remaining
-                    t_use = torch.tensor(t_use_list, device=image_grid_thw.device)
+                    t_use = torch.tensor(t_use_list, device=grid_thw.device)
 
             split_sizes = (t_use * base_per_item).tolist()
         else:
-            split_sizes = [image_embeds.shape[0]]
+            split_sizes = [embeds.shape[0]]
 
+        # Pool embeddings per segment
         pooled_embeds: list[torch.Tensor] = []
-        for segment in torch.split(image_embeds, split_sizes):
+        for segment in torch.split(embeds, split_sizes):
             if segment.numel() == 0:
                 pooled_embeds.append(
-                    torch.zeros(
-                        1,
-                        self.config.hidden_size,
-                        device=image_embeds.device,
-                        dtype=image_embeds.dtype,
-                    )
+                    torch.zeros(1, self.config.hidden_size, device=embeds.device, dtype=embeds.dtype)
                 )
             elif segment.dim() == 1:
                 pooled_embeds.append(segment.unsqueeze(0))
             else:
                 pooled_embeds.append(segment.mean(dim=0, keepdim=True))
 
+        # Pool deepstack tokens if requested
         deepstack_pooled: Optional[list[list[torch.Tensor]]] = None
         if return_deepstack and deepstack_tokens is not None and len(deepstack_tokens) > 0:
             deepstack_pooled = []
@@ -2241,12 +2209,7 @@ class ArlowModel(ArlowPreTrainedModel):
                 for segment in layer_segments:
                     if segment.numel() == 0:
                         layer_outputs.append(
-                            torch.zeros(
-                                1,
-                                self.config.hidden_size,
-                                device=layer_tokens.device,
-                                dtype=layer_tokens.dtype,
-                            )
+                            torch.zeros(1, self.config.hidden_size, device=layer_tokens.device, dtype=layer_tokens.dtype)
                         )
                     elif segment.dim() == 1:
                         layer_outputs.append(segment.unsqueeze(0))
@@ -2256,8 +2219,16 @@ class ArlowModel(ArlowPreTrainedModel):
 
         if return_deepstack:
             return pooled_embeds, deepstack_pooled
-
         return pooled_embeds
+
+    def get_image_features(
+        self,
+        pixel_values: torch.FloatTensor,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        return_deepstack: bool = False,
+    ) -> Union[list[torch.Tensor], tuple[list[torch.Tensor], Optional[list[list[torch.Tensor]]]]]:
+        """Extract image features from the vision encoder."""
+        return self._get_visual_features(pixel_values, image_grid_thw, return_deepstack)
 
     def get_video_features(
         self,
@@ -2266,105 +2237,7 @@ class ArlowModel(ArlowPreTrainedModel):
         return_deepstack: bool = False,
     ) -> Union[list[torch.Tensor], tuple[list[torch.Tensor], Optional[list[list[torch.Tensor]]]]]:
         """Extract video features from the vision encoder (same as images with temporal dim)."""
-
-        # Get dtype from vision model, fallback to float32
-        target_dtype = self.visual.get_dtype() if hasattr(self.visual, "get_dtype") else torch.float32
-        pixel_values_videos = pixel_values_videos.to(dtype=target_dtype)
-
-        visual_outputs = self.visual(pixel_values_videos, video_grid_thw)
-        if isinstance(visual_outputs, tuple):
-            video_embeds, deepstack_tokens = visual_outputs
-        else:
-            video_embeds = visual_outputs
-            deepstack_tokens = None
-
-        # Calculate split sizes based on what the vision model produces
-        # Robustly infer temporal patching so that the split sizes sum to the actual length
-        split_sizes: list[int] = []
-        if video_grid_thw is not None:
-            spm = self.config.vision_config.spatial_merge_size
-            t_in = video_grid_thw[:, 0]
-            h = video_grid_thw[:, 1]
-            w = video_grid_thw[:, 2]
-            base_per_item = torch.maximum(h * w, torch.ones_like(h))
-            total_len = video_embeds.shape[0]
-            # Candidate 1: assume t already patched
-            counts1 = (t_in * base_per_item).sum().item()
-            if counts1 != total_len:
-                base_alt = torch.maximum(h // spm, torch.ones_like(h)) * torch.maximum(w // spm, torch.ones_like(w))
-                counts_alt = (t_in * base_alt).sum().item()
-                if counts_alt == total_len:
-                    base_per_item = base_alt
-                    counts1 = counts_alt
-            if counts1 == total_len:
-                t_use = t_in
-            else:
-                # Candidate 2: temporal patched by temporal_patch_size
-                t_patch = self.config.vision_config.temporal_patch_size
-                t2 = (t_in + t_patch - 1) // t_patch
-                counts2 = (t2 * base_per_item).sum().item()
-                if counts2 == total_len:
-                    t_use = t2
-                else:
-                    base_per_item = torch.ones_like(h)
-                    t_use_list: list[int] = []
-                    remaining = total_len
-                    items_left = len(t_in)
-                    for _ in range(items_left):
-                        size = max(1, remaining // max(items_left, 1))
-                        t_use_list.append(size)
-                        remaining -= size
-                        items_left -= 1
-                    if remaining > 0:
-                        t_use_list[-1] += remaining
-                    t_use = torch.tensor(t_use_list, device=video_grid_thw.device)
-
-            split_sizes = (t_use * base_per_item).tolist()
-        else:
-            split_sizes = [video_embeds.shape[0]]
-
-        pooled_embeds: list[torch.Tensor] = []
-        for segment in torch.split(video_embeds, split_sizes):
-            if segment.numel() == 0:
-                pooled_embeds.append(
-                    torch.zeros(
-                        1,
-                        self.config.hidden_size,
-                        device=video_embeds.device,
-                        dtype=video_embeds.dtype,
-                    )
-                )
-            elif segment.dim() == 1:
-                pooled_embeds.append(segment.unsqueeze(0))
-            else:
-                pooled_embeds.append(segment.mean(dim=0, keepdim=True))
-
-        deepstack_pooled: Optional[list[list[torch.Tensor]]] = None
-        if return_deepstack and deepstack_tokens is not None and len(deepstack_tokens) > 0:
-            deepstack_pooled = []
-            for layer_tokens in deepstack_tokens:
-                layer_segments = torch.split(layer_tokens, split_sizes)
-                layer_outputs: list[torch.Tensor] = []
-                for segment in layer_segments:
-                    if segment.numel() == 0:
-                        layer_outputs.append(
-                            torch.zeros(
-                                1,
-                                self.config.hidden_size,
-                                device=layer_tokens.device,
-                                dtype=layer_tokens.dtype,
-                            )
-                        )
-                    elif segment.dim() == 1:
-                        layer_outputs.append(segment.unsqueeze(0))
-                    else:
-                        layer_outputs.append(segment.mean(dim=0, keepdim=True))
-                deepstack_pooled.append(layer_outputs)
-
-        if return_deepstack:
-            return pooled_embeds, deepstack_pooled
-
-        return pooled_embeds
+        return self._get_visual_features(pixel_values_videos, video_grid_thw, return_deepstack)
 
     def get_placeholder_mask(
         self,

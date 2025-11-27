@@ -1,9 +1,9 @@
 from typing import Optional, Tuple
 
-from transformers.models.arlow.tokenization_arlow import ArlowTokenizer
-from transformers.tokenization_utils import AddedToken
-from transformers.tokenization_utils_fast import PreTrainedTokenizerFast
-from transformers.utils import logging
+from .tokenization_arlow import ArlowTokenizer
+from ...tokenization_utils_base import AddedToken
+from ...tokenization_utils_tokenizers import PreTrainedTokenizerFast
+from ...utils import logging
 
 
 logger = logging.get_logger(__name__)

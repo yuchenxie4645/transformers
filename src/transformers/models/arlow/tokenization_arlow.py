@@ -9,8 +9,9 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import regex as re
 
-from transformers.tokenization_utils import AddedToken, PreTrainedTokenizer
-from transformers.utils import logging
+from ...tokenization_python import PreTrainedTokenizer
+from ...tokenization_utils_base import AddedToken
+from ...utils import logging
 
 
 logger = logging.get_logger(__name__)
