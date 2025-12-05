@@ -297,6 +297,9 @@ class ArlowConfig(PreTrainedConfig):
             Number of layers using full attention before switching to sliding window.
         layer_types (`list`, *optional*):
             Attention pattern for each layer.
+        text_config (`Union[ArlowTextConfig, dict]`, *optional*):
+            Text backbone configuration. If not provided, it is built from the text-related
+            arguments listed above.
         vision_config (`Union[PreTrainedConfig, dict]`, *optional*):
             Vision backbone configuration.
         mm_tokens_per_image (`int`, *optional*, defaults to 256):
@@ -333,7 +336,7 @@ class ArlowConfig(PreTrainedConfig):
     """
 
     model_type = "arlow"
-    sub_configs = {"vision_config": ArlowVisionConfig}
+    sub_configs = {"vision_config": ArlowVisionConfig, "text_config": ArlowTextConfig}
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
@@ -365,6 +368,7 @@ class ArlowConfig(PreTrainedConfig):
         sliding_window=4096,
         max_window_layers=28,
         layer_types=None,
+        text_config: ArlowTextConfig | dict | None = None,
         # Multimodal parameters
         vision_config=None,
         mm_tokens_per_image=512,
@@ -384,35 +388,63 @@ class ArlowConfig(PreTrainedConfig):
         mrope_sections=None,
         **kwargs,
     ):
-        self.vocab_size = vocab_size
-        self.max_position_embeddings = max_position_embeddings
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-        self.use_sliding_window = use_sliding_window
-        self.sliding_window = sliding_window if self.use_sliding_window else None
-        self.max_window_layers = max_window_layers
-        self.num_key_value_heads = num_key_value_heads
-        self.hidden_act = hidden_act
-        self.initializer_range = initializer_range
-        self.rms_norm_eps = rms_norm_eps
-        self.use_cache = use_cache
-        self.rope_theta = rope_theta
-        self.rope_parameters = rope_scaling or rope_parameters
-        self.attention_bias = attention_bias
-        self.attention_dropout = attention_dropout
-        self.resid_dropout = resid_dropout
-        self.mlp_dropout = mlp_dropout
-        self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
+        if isinstance(text_config, dict):
+            text_config = self.sub_configs["text_config"](**text_config)
+        elif text_config is None:
+            text_config = self.sub_configs["text_config"](
+                vocab_size=vocab_size,
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                num_hidden_layers=num_hidden_layers,
+                num_attention_heads=num_attention_heads,
+                num_key_value_heads=num_key_value_heads,
+                hidden_act=hidden_act,
+                max_position_embeddings=max_position_embeddings,
+                initializer_range=initializer_range,
+                rms_norm_eps=rms_norm_eps,
+                use_cache=use_cache,
+                pad_token_id=pad_token_id,
+                bos_token_id=bos_token_id,
+                eos_token_id=eos_token_id,
+                tie_word_embeddings=tie_word_embeddings,
+                rope_theta=rope_theta,
+                rope_parameters=rope_parameters,
+                rope_scaling=rope_scaling,
+                attention_bias=attention_bias,
+                attention_dropout=attention_dropout,
+                resid_dropout=resid_dropout,
+                mlp_dropout=mlp_dropout,
+                head_dim=head_dim,
+                use_sliding_window=use_sliding_window,
+                sliding_window=sliding_window,
+                max_window_layers=max_window_layers,
+                layer_types=layer_types,
+                mrope_sections=mrope_sections,
+            )
+        else:
+            if rope_scaling is not None or rope_parameters is not None:
+                text_config.rope_parameters = rope_scaling or rope_parameters
+            if head_dim is not None:
+                text_config.head_dim = head_dim
+            if mrope_sections is not None:
+                text_config.mrope_sections = mrope_sections
+            if layer_types is not None:
+                text_config.layer_types = layer_types
+            if max_window_layers is not None:
+                text_config.max_window_layers = max_window_layers
+            if use_sliding_window is not None:
+                text_config.use_sliding_window = use_sliding_window
+                text_config.sliding_window = sliding_window if use_sliding_window else None
 
-        # Multimodal configuration
+        self.text_config = text_config
+
         if isinstance(vision_config, dict):
-            self.vision_config = ArlowVisionConfig(**vision_config)
+            self.vision_config = self.sub_configs["vision_config"](**vision_config)
         elif vision_config is None:
-            self.vision_config = ArlowVisionConfig()
+            self.vision_config = self.sub_configs["vision_config"]()
         else:
             self.vision_config = vision_config
+        self.vision_config.hidden_size = text_config.hidden_size
 
         self.mm_tokens_per_image = mm_tokens_per_image
         self.mm_tokens_per_video = mm_tokens_per_video
@@ -429,52 +461,59 @@ class ArlowConfig(PreTrainedConfig):
         self.vision_end_token_id = vision_end_token_id
         self.frame_separator_token_id = frame_separator_token_id
 
-        # M-ROPE configuration: default sections based on head_dim
-        if mrope_sections is None:
-            # Split head_dim into temporal, height, width sections with small-safe defaults
-            t = max(1, self.head_dim // 3)
-            h = max(1, (self.head_dim - t) // 2)
-            w = max(1, self.head_dim - t - h)
-            if t + h + w != self.head_dim:
-                w = self.head_dim - t - h
-            self.mrope_sections = [t, h, w]
-        else:
-            self.mrope_sections = mrope_sections
+        self.vocab_size = text_config.vocab_size
+        self.max_position_embeddings = text_config.max_position_embeddings
+        self.hidden_size = text_config.hidden_size
+        self.intermediate_size = text_config.intermediate_size
+        self.num_hidden_layers = text_config.num_hidden_layers
+        self.num_attention_heads = text_config.num_attention_heads
+        self.num_key_value_heads = text_config.num_key_value_heads
+        self.hidden_act = text_config.hidden_act
+        self.initializer_range = text_config.initializer_range
+        self.rms_norm_eps = text_config.rms_norm_eps
+        self.use_cache = text_config.use_cache
+        self.rope_theta = getattr(text_config, "rope_theta", rope_theta)
+        self.rope_parameters = text_config.rope_parameters
+        self.attention_bias = text_config.attention_bias
+        self.attention_dropout = text_config.attention_dropout
+        self.resid_dropout = text_config.resid_dropout
+        self.mlp_dropout = text_config.mlp_dropout
+        self.head_dim = text_config.head_dim
 
-        # Validate mrope_sections sum equals head_dim
+        if self.rope_parameters is not None and "type" in self.rope_parameters:
+            self.rope_parameters["rope_type"] = self.rope_parameters["type"]
+        rope_config_validation(self, ignore_keys={"mrope_sections"})
+
+        self.layer_types = text_config.layer_types
+        if self.layer_types is None:
+            self.layer_types = [
+                "sliding_attention"
+                if text_config.sliding_window is not None and i >= text_config.max_window_layers
+                else "full_attention"
+                for i in range(self.num_hidden_layers)
+            ]
+        layer_type_validation(self.layer_types, self.num_hidden_layers)
+        self.use_sliding_window = text_config.use_sliding_window
+        self.sliding_window = text_config.sliding_window
+        self.max_window_layers = text_config.max_window_layers
+
+        self.mrope_sections = text_config.mrope_sections
         if sum(self.mrope_sections) != self.head_dim:
             raise ValueError(
                 f"Sum of mrope_sections {self.mrope_sections} (={sum(self.mrope_sections)}) "
                 f"must equal head_dim ({self.head_dim})"
             )
 
-        # Keep track of the ratio so we can project it onto the vision head dimension
         self._mrope_ratio = [section / self.head_dim for section in self.mrope_sections]
         vision_head_dim = self.vision_config.embed_dim // self.vision_config.num_heads
         scaled_sections = self._scale_mrope_sections_from_ratio(vision_head_dim, self._mrope_ratio)
         self.vision_config.mrope_sections = scaled_sections
 
-        # Validate rope parameters (ignore M-ROPE specific keys since we use custom M-ROPE)
-        if self.rope_parameters is not None and "type" in self.rope_parameters:
-            self.rope_parameters["rope_type"] = self.rope_parameters["type"]
-        rope_config_validation(self, ignore_keys={"mrope_sections"})
-
-        # Layer types configuration
-        self.layer_types = layer_types
-        if self.layer_types is None:
-            self.layer_types = [
-                "sliding_attention"
-                if self.sliding_window is not None and i >= self.max_window_layers
-                else "full_attention"
-                for i in range(self.num_hidden_layers)
-            ]
-        layer_type_validation(self.layer_types, self.num_hidden_layers)
-
         super().__init__(
-            pad_token_id=pad_token_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings,
+            pad_token_id=text_config.pad_token_id,
+            bos_token_id=text_config.bos_token_id,
+            eos_token_id=text_config.eos_token_id,
+            tie_word_embeddings=text_config.tie_word_embeddings,
             **kwargs,
         )
 

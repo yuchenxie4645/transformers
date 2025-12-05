@@ -1591,7 +1591,7 @@ class ArlowModel(ArlowPreTrainedModel):
         self.visual = ArlowVLVisionModel._from_config(config.vision_config)
 
         # Text model (language decoder)
-        self.language_model = ArlowTextModel._from_config(config)
+        self.language_model = ArlowTextModel._from_config(config.text_config)
 
         # Cache for rope deltas
         self.rope_deltas = None
@@ -2190,8 +2190,9 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
     def __init__(self, config: ArlowConfig):
         super().__init__(config)
         self.model = ArlowModel(config)  # Now uses the multimodal ArlowModel
-        self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        text_config = config.text_config
+        self.vocab_size = text_config.vocab_size
+        self.lm_head = nn.Linear(text_config.hidden_size, text_config.vocab_size, bias=False)
 
         self.post_init()
 
@@ -2408,8 +2409,9 @@ class ArlowForSequenceClassification(ArlowPreTrainedModel):
     def __init__(self, config: Union[ArlowConfig, ArlowTextConfig]):
         super().__init__(config)
         self.num_labels = config.num_labels
-        self.model = ArlowTextModel._from_config(config)
-        self.score = nn.Linear(config.hidden_size, self.num_labels, bias=False)
+        text_config = config.text_config if hasattr(config, "text_config") else config
+        self.model = ArlowTextModel._from_config(text_config)
+        self.score = nn.Linear(text_config.hidden_size, self.num_labels, bias=False)
 
         if getattr(config, "gradient_checkpointing", False):
             self.gradient_checkpointing_enable()
@@ -2502,8 +2504,9 @@ class ArlowForQuestionAnswering(ArlowPreTrainedModel):
 
     def __init__(self, config: Union[ArlowConfig, ArlowTextConfig]):
         super().__init__(config)
-        self.model = ArlowTextModel._from_config(config)
-        self.qa_outputs = nn.Linear(config.hidden_size, 2)
+        text_config = config.text_config if hasattr(config, "text_config") else config
+        self.model = ArlowTextModel._from_config(text_config)
+        self.qa_outputs = nn.Linear(text_config.hidden_size, 2)
 
         if getattr(config, "gradient_checkpointing", False):
             self.gradient_checkpointing_enable()
@@ -2576,7 +2579,8 @@ class ArlowForTokenClassification(ArlowPreTrainedModel):
     def __init__(self, config: Union[ArlowConfig, ArlowTextConfig]):
         super().__init__(config)
         self.num_labels = config.num_labels
-        self.model = ArlowTextModel._from_config(config)
+        text_config = config.text_config if hasattr(config, "text_config") else config
+        self.model = ArlowTextModel._from_config(text_config)
         if getattr(config, "classifier_dropout", None) is not None:
             classifier_dropout = config.classifier_dropout
         elif getattr(config, "hidden_dropout", None) is not None:
@@ -2584,7 +2588,7 @@ class ArlowForTokenClassification(ArlowPreTrainedModel):
         else:
             classifier_dropout = 0.1
         self.dropout = nn.Dropout(classifier_dropout)
-        self.score = nn.Linear(config.hidden_size, config.num_labels)
+        self.score = nn.Linear(text_config.hidden_size, config.num_labels)
 
         if getattr(config, "gradient_checkpointing", False):
             self.gradient_checkpointing_enable()
