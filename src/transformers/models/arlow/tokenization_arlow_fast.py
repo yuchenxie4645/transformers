@@ -1,6 +1,9 @@
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
-from .tokenization_arlow import ArlowTokenizer
+from tokenizers import Regex, Tokenizer, decoders, normalizers, pre_tokenizers
+from tokenizers.models import BPE
+
+from .tokenization_arlow import PRETOKENIZE_REGEX, ArlowTokenizer
 from ...tokenization_utils_base import AddedToken
 from ...tokenization_utils_tokenizers import PreTrainedTokenizerFast
 from ...utils import logging
@@ -62,9 +65,12 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
     vocab_files_names = VOCAB_FILES_NAMES
     slow_tokenizer_class = ArlowTokenizer
     model_input_names = ["input_ids", "attention_mask"]
+    model = BPE
 
     def __init__(
         self,
+        vocab: Optional[Union[str, dict[str, int]]] = None,
+        merges: Optional[Union[str, list[str]]] = None,
         vocab_file: Optional[str] = None,
         merges_file: Optional[str] = None,
         tokenizer_file: Optional[str] = None,
@@ -72,12 +78,39 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
         bos_token: Optional[str] = None,
         eos_token: str = "<|endoftext|>",
         pad_token: str = "<|endoftext|>",
+        add_prefix_space: Optional[bool] = None,
         **kwargs,
     ):
-        # We need to at least pass vocab_file and merges_file to base class
-        # in case a slow tokenizer needs to be initialized; other can be
-        # configured through files.
-        # following GPT2TokenizerFast, also adding unk_token, bos_token, and eos_token
+        self.add_prefix_space = add_prefix_space if add_prefix_space is not None else False
+        self._vocab = vocab if vocab is not None else (vocab_file if vocab_file is not None else {"<|endoftext|>": 0})
+        self._merges = merges if merges is not None else (merges_file if merges_file is not None else [])
+        self._tokenizer = Tokenizer(
+            BPE(
+                vocab=self._vocab,
+                merges=self._merges,
+                dropout=None,
+                unk_token=str(unk_token) if unk_token is not None else None,
+                continuing_subword_prefix="",
+                end_of_word_suffix="",
+                fuse_unk=False,
+                byte_fallback=False,
+            )
+        )
+        self._tokenizer.decoder = decoders.ByteLevel()
+        self._tokenizer.normalizer = normalizers.NFC()
+        self._tokenizer.pre_tokenizer = pre_tokenizers.Sequence(
+            [
+                pre_tokenizers.Split(
+                    Regex(PRETOKENIZE_REGEX),
+                    behavior="isolated",
+                    invert=False,
+                ),
+                pre_tokenizers.ByteLevel(
+                    add_prefix_space=self.add_prefix_space,
+                    use_regex=False,
+                ),
+            ]
+        )
 
         bos_token = (
             AddedToken(bos_token, lstrip=False, rstrip=False, special=True, normalized=False)
@@ -108,6 +141,7 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
             bos_token=bos_token,
             eos_token=eos_token,
             pad_token=pad_token,
+            add_prefix_space=self.add_prefix_space,
             **kwargs,
         )
         additional_specials = [

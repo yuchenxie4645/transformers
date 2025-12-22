@@ -5,6 +5,7 @@ import tempfile
 import unicodedata
 import unittest
 
+from transformers import AutoTokenizer
 from transformers.models.arlow.tokenization_arlow import ArlowTokenizer
 from transformers.models.arlow.tokenization_arlow_fast import ArlowTokenizerFast
 
@@ -76,6 +77,19 @@ class ArlowTokenizerTests(unittest.TestCase):
         enc = tok(self.text, padding=True)
         self.assertIn("input_ids", enc)
         _ = tok.decode(enc["input_ids"][0])
+
+    def test_fast_tokenizer_without_tokenizer_json(self):
+        os.remove(self.tokenizer_file)
+        tok = ArlowTokenizerFast.from_pretrained(self.tmp)
+        enc = tok(self.text, padding=True)
+        self.assertIn("input_ids", enc)
+
+    def test_auto_tokenizer_uses_arlow_fast_without_tokenizer_json(self):
+        os.remove(self.tokenizer_file)
+        with open(os.path.join(self.tmp, "config.json"), "w", encoding="utf-8") as f:
+            json.dump({"model_type": "arlow"}, f)
+        tok = AutoTokenizer.from_pretrained(self.tmp)
+        self.assertIsInstance(tok, ArlowTokenizerFast)
 
     def test_unicode_normalization_slow(self):
         """Test that Unicode NFC normalization is applied to prevent UTF-8 artifacts."""
