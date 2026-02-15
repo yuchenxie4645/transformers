@@ -4,6 +4,7 @@ import unittest
 
 from transformers import is_torch_available
 from transformers.testing_utils import require_torch, slow, torch_device
+from transformers.utils import is_torchvision_available
 
 from ...causal_lm_tester import CausalLMModelTest, CausalLMModelTester
 
@@ -21,8 +22,10 @@ if is_torch_available():
         ArlowModel,
     )
     from transformers.models.arlow.image_processing_arlow import ArlowImageProcessor
-    from transformers.models.arlow.video_processing_arlow import ArlowVideoProcessor
     from transformers.models.arlow.modeling_arlow import ArlowTextRotaryEmbedding
+
+    if is_torchvision_available():
+        from transformers.models.arlow.video_processing_arlow import ArlowVideoProcessor
 
 
 class ArlowModelTester(CausalLMModelTester):
@@ -63,6 +66,8 @@ class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
     test_can_load_with_device_context_manager = False
     test_can_load_with_global_device_set = False
     test_disk_offload_safetensors = False
+    skip_test_image_features_output_shape = True
+    skip_test_video_features_output_shape = True
 
     # Need to use `0.8` instead of `0.9` for `test_cpu_offload`
     # This is because we are hitting edge cases with the causal_mask buffer
@@ -226,6 +231,8 @@ class ArlowIntegrationTest(unittest.TestCase):
                 break
 
     def test_video_processor_temporal_budget(self):
+        if not is_torchvision_available():
+            self.skipTest("ArlowVideoProcessor requires torchvision.")
         video_processor = ArlowVideoProcessor(
             patch_size=14,
             temporal_patch_size=2,
@@ -245,6 +252,8 @@ class ArlowIntegrationTest(unittest.TestCase):
         )
 
     def test_video_processor_motion_adaptive_sampling(self):
+        if not is_torchvision_available():
+            self.skipTest("ArlowVideoProcessor requires torchvision.")
         np.random.seed(0)
         max_frames = 12
         video_processor = ArlowVideoProcessor(

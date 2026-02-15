@@ -1,7 +1,7 @@
 """Video processor class for Arlow multimodal models."""
 
 import math
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -35,7 +35,7 @@ def smart_resize(
     factor: int = 32,
     min_pixels: int = 128 * 128,
     max_pixels: int = 16 * 16 * 2 * 2 * 2 * 6144,
-    max_frames: Optional[int] = None,
+    max_frames: int | None = None,
     return_temporal: bool = False,
 ):
     """
@@ -225,9 +225,9 @@ class ArlowVideoProcessor(BaseVideoProcessor):
 
     def _further_process_kwargs(
         self,
-        size: Optional[SizeDict] = None,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
+        size: SizeDict | None = None,
+        min_pixels: int | None = None,
+        max_pixels: int | None = None,
         **kwargs,
     ) -> dict:
         """
@@ -250,9 +250,9 @@ class ArlowVideoProcessor(BaseVideoProcessor):
     def _decode_and_sample_videos(
         self,
         videos: VideoInput,
-        video_metadata: Union[VideoMetadata, dict],
-        do_sample_frames: Optional[bool] = None,
-        sample_indices_fn: Optional[Callable] = None,
+        video_metadata: VideoMetadata | dict,
+        do_sample_frames: bool | None = None,
+        sample_indices_fn: Callable | None = None,
     ) -> tuple[list["torch.Tensor"], list[VideoMetadata]]:
         videos = make_batched_videos(videos)
         video_metadata = make_batched_metadata(videos, video_metadata=video_metadata)
@@ -280,11 +280,11 @@ class ArlowVideoProcessor(BaseVideoProcessor):
     def sample_frames(
         self,
         metadata: VideoMetadata,
-        num_frames: Optional[int] = None,
-        fps: Optional[Union[int, float]] = None,
-        sample_strategy: Optional[str] = None,
-        video_frames: Optional[Union[np.ndarray, torch.Tensor]] = None,
-        motion_threshold: Optional[float] = None,
+        num_frames: int | None = None,
+        fps: int | float | None = None,
+        sample_strategy: str | None = None,
+        video_frames: np.ndarray | torch.Tensor | None = None,
+        motion_threshold: float | None = None,
         **kwargs,
     ):
         """
@@ -359,17 +359,17 @@ class ArlowVideoProcessor(BaseVideoProcessor):
         videos: list[torch.Tensor],
         do_convert_rgb: bool = True,
         do_resize: bool = True,
-        size: Optional[SizeDict] = None,
+        size: SizeDict | None = None,
         interpolation: PILImageResampling = PILImageResampling.BICUBIC,
         do_rescale: bool = True,
         rescale_factor: float = 1 / 255.0,
         do_normalize: bool = True,
-        image_mean: Optional[Union[float, list[float]]] = None,
-        image_std: Optional[Union[float, list[float]]] = None,
-        patch_size: Optional[int] = None,
-        temporal_patch_size: Optional[int] = None,
-        merge_size: Optional[int] = None,
-        return_tensors: Optional[Union[str, TensorType]] = None,
+        image_mean: float | list[float] | None = None,
+        image_std: float | list[float] | None = None,
+        patch_size: int | None = None,
+        temporal_patch_size: int | None = None,
+        merge_size: int | None = None,
+        return_tensors: str | TensorType | None = None,
         **kwargs,
     ):
         # Group by shape for batched resizing and tokenization

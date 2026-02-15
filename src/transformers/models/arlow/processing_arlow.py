@@ -4,7 +4,6 @@
 #             the file from the modular. If any change should be done, please apply the change to the
 #                          modular_arlow.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
-from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -57,7 +56,7 @@ class ArlowProcessor(ProcessorMixin):
         tokenizer=None,
         video_processor=None,
         chat_template=None,
-        timestamp_alignment: Optional[bool] = None,
+        timestamp_alignment: bool | None = None,
         **kwargs,
     ):
         # multimodal special tokens
@@ -104,7 +103,7 @@ class ArlowProcessor(ProcessorMixin):
     def __call__(
         self,
         images: ImageInput | None = None,
-        text: Union[TextInput, PreTokenizedInput, list[TextInput], list[PreTokenizedInput]] | None = None,
+        text: TextInput | PreTokenizedInput | list[TextInput] | list[PreTokenizedInput] | None = None,
         videos: VideoInput | None = None,
         **kwargs: Unpack[ArlowProcessorKwargs],
     ) -> BatchFeature:
@@ -120,7 +119,7 @@ class ArlowProcessor(ProcessorMixin):
         video_inputs = {}
         image_grid_thw = None
         video_grid_thw = None
-        image_num_crops: Optional[list[int]] = None
+        image_num_crops: list[int] | None = None
 
         if images is not None:
             image_inputs = self.image_processor(images=images, **output_kwargs["images_kwargs"])
@@ -327,7 +326,7 @@ class ArlowProcessor(ProcessorMixin):
             **kwargs,
         )
 
-    def _calculate_timestamps(self, indices: Union[list[int], np.ndarray], video_fps: float, merge_size: int = 2):
+    def _calculate_timestamps(self, indices: list[int] | np.ndarray, video_fps: float, merge_size: int = 2):
         if not isinstance(indices, list):
             indices = indices.tolist()
         if len(indices) % merge_size != 0:

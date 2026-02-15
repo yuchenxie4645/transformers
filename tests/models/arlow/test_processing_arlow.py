@@ -8,15 +8,21 @@ import pytest
 import torch
 
 from transformers.models.arlow.image_processing_arlow import ArlowImageProcessor
-from transformers.models.arlow.image_processing_arlow_fast import ArlowImageProcessorFast
 from transformers.models.arlow.processing_arlow import ArlowProcessor
 from transformers.models.arlow.tokenization_arlow import ArlowTokenizer
-from transformers.models.arlow.video_processing_arlow import ArlowVideoProcessor
 from transformers.testing_utils import require_torch, require_vision
+from transformers.utils import is_torchvision_available
+
+
+if is_torchvision_available():
+    from transformers.models.arlow.image_processing_arlow_fast import ArlowImageProcessorFast
+    from transformers.models.arlow.video_processing_arlow import ArlowVideoProcessor
 
 
 @pytest.mark.parametrize("fast", [False, True])
 def test_image_processor_preprocess_and_grid(fast):
+    if fast and not is_torchvision_available():
+        pytest.skip("ArlowImageProcessorFast requires torchvision.")
     processor = ArlowImageProcessorFast() if fast else ArlowImageProcessor()
     # make two images with different shapes
     img1 = torch.randint(0, 255, (3, 320, 480), dtype=torch.uint8)
@@ -28,6 +34,8 @@ def test_image_processor_preprocess_and_grid(fast):
 
 
 def test_get_number_of_image_patches_matches_preprocess():
+    if not is_torchvision_available():
+        pytest.skip("ArlowImageProcessorFast requires torchvision.")
     processor = ArlowImageProcessorFast()
     img = torch.randint(0, 255, (3, 320, 640), dtype=torch.uint8)
     out = processor.preprocess([img], return_tensors="pt")
@@ -39,6 +47,8 @@ def test_get_number_of_image_patches_matches_preprocess():
 
 
 def test_video_processor_grid_and_values():
+    if not is_torchvision_available():
+        pytest.skip("ArlowVideoProcessor requires torchvision.")
     vp = ArlowVideoProcessor()
     # make a simple 8-frame video (TCHW)
     video = torch.randint(0, 255, (8, 3, 128, 128), dtype=torch.uint8)
@@ -49,6 +59,8 @@ def test_video_processor_grid_and_values():
 
 
 def test_processor_placeholder_sizing(tmp_path):
+    if not is_torchvision_available():
+        pytest.skip("Arlow fast/image-video processor stack requires torchvision.")
     # build a tiny tokenizer vocab to allow conversion
     vocab = {"<|endoftext|>": 0, "<image>": 1, "<video>": 2, "<|vision_start|>": 3, "<|vision_end|>": 4, "hello": 5}
     merges = "#version: 0.2\na b\n"
@@ -67,6 +79,7 @@ def test_processor_placeholder_sizing(tmp_path):
 
 @require_torch
 @require_vision
+@unittest.skipUnless(is_torchvision_available(), "Arlow fast/image-video processor stack requires torchvision.")
 class ArlowProcessorTest(unittest.TestCase):
     """Comprehensive test suite for ArlowProcessor."""
 

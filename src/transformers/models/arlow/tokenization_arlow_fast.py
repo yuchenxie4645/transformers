@@ -1,12 +1,11 @@
-from typing import Optional, Tuple, Union
 
 from tokenizers import Regex, Tokenizer, decoders, normalizers, pre_tokenizers
 from tokenizers.models import BPE
 
-from .tokenization_arlow import PRETOKENIZE_REGEX, ArlowTokenizer
 from ...tokenization_utils_base import AddedToken
 from ...tokenization_utils_tokenizers import PreTrainedTokenizerFast
 from ...utils import logging
+from .tokenization_arlow import PRETOKENIZE_REGEX, ArlowTokenizer
 
 
 logger = logging.get_logger(__name__)
@@ -69,16 +68,16 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
 
     def __init__(
         self,
-        vocab: Optional[Union[str, dict[str, int]]] = None,
-        merges: Optional[Union[str, list[str]]] = None,
-        vocab_file: Optional[str] = None,
-        merges_file: Optional[str] = None,
-        tokenizer_file: Optional[str] = None,
+        vocab: str | dict[str, int] | None = None,
+        merges: str | list[str] | None = None,
+        vocab_file: str | None = None,
+        merges_file: str | None = None,
+        tokenizer_file: str | None = None,
         unk_token: str = "<|endoftext|>",
-        bos_token: Optional[str] = None,
+        bos_token: str | None = None,
         eos_token: str = "<|endoftext|>",
         pad_token: str = "<|endoftext|>",
-        add_prefix_space: Optional[bool] = None,
+        add_prefix_space: bool | None = None,
         **kwargs,
     ):
         self.add_prefix_space = add_prefix_space if add_prefix_space is not None else False
@@ -165,7 +164,7 @@ class ArlowTokenizerFast(PreTrainedTokenizerFast):
         self.init_kwargs["vision_end_token_id"] = self.vision_end_token_id
 
     # Copied from transformers.models.qwen2.tokenization_qwen2_fast.Qwen2TokenizerFast.save_vocabulary
-    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str, ...]:
+    def save_vocabulary(self, save_directory: str, filename_prefix: str | None = None) -> tuple[str, ...]:
         files = self._tokenizer.model.save(save_directory, name=filename_prefix)
         return tuple(str(file_path) for file_path in files)
 

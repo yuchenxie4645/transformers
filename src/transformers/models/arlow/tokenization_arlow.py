@@ -5,7 +5,6 @@ import json
 import os
 import unicodedata
 from functools import lru_cache
-from typing import Dict, List, Optional, Set, Tuple
 
 import regex as re
 
@@ -27,13 +26,13 @@ PRETOKENIZE_REGEX = r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p
 
 
 @lru_cache
-def bytes_to_unicode() -> Dict[int, str]:
+def bytes_to_unicode() -> dict[int, str]:
     """
     GPT-2 / ByteLevel BPE uses a list of utf-8 bytes and a corresponding list of unicode strings.
     The reversible bpe codes work on unicode strings. This function and the reversible bpe codes
     allow us to simulate 'byte-level' subwords in purely unicode space.
     """
-    bs: List[int] = (
+    bs: list[int] = (
         list(range(ord("!"), ord("~") + 1))
         + list(range(ord("¡"), ord("¬") + 1))
         + list(range(ord("®"), ord("ÿ") + 1))
@@ -49,7 +48,7 @@ def bytes_to_unicode() -> Dict[int, str]:
     return dict(zip(bs, cs))
 
 
-def get_pairs(word: List[str]) -> Set[Tuple[str, str]]:
+def get_pairs(word: list[str]) -> set[tuple[str, str]]:
     """Return set of symbol pairs in a word."""
     pairs = set()
     prev_char = word[0]
@@ -121,7 +120,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
         merges_file: str,
         errors: str = "replace",
         unk_token: str = "<|endoftext|>",
-        bos_token: Optional[str] = None,
+        bos_token: str | None = None,
         eos_token: str = "<|endoftext|>",
         pad_token: str = "<|endoftext|>",
         clean_up_tokenization_spaces: bool = False,
@@ -220,7 +219,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
     def vocab_size(self) -> int:
         return len(self.encoder)
 
-    def get_vocab(self) -> Dict[str, int]:
+    def get_vocab(self) -> dict[str, int]:
         vocab = dict(self.encoder)
         vocab.update(self.added_tokens_encoder)
         return vocab
@@ -230,7 +229,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
         """
         Given a 'word' in the ByteLevel space, perform BPE merges according to self.bpe_ranks.
         """
-        word: Tuple[str, ...] = tuple(token)
+        word: tuple[str, ...] = tuple(token)
         pairs = get_pairs(word)
         if not pairs:
             return token
@@ -270,7 +269,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
         word = " ".join(word)
         return word
 
-    def _tokenize(self, text: str) -> List[str]:
+    def _tokenize(self, text: str) -> list[str]:
         """
         Tokenize the text into ByteLevel subwords, then apply BPE merges.
         """
@@ -291,7 +290,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
     def _convert_id_to_token(self, index: int) -> str:
         return self.decoder.get(index, self.unk_token)
 
-    def convert_tokens_to_string(self, tokens: List[str]) -> str:
+    def convert_tokens_to_string(self, tokens: list[str]) -> str:
         """
         Reconstructs the text by reversing the ByteLevel encoding. We map each subword
         back to original bytes, then decode to UTF-8.
@@ -304,7 +303,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
         self,
         token_ids,
         skip_special_tokens: bool = False,
-        clean_up_tokenization_spaces: Optional[bool] = False,
+        clean_up_tokenization_spaces: bool | None = False,
         spaces_between_special_tokens: bool = False,
         **kwargs,
     ) -> str:
@@ -338,8 +337,8 @@ class ArlowTokenizer(PreTrainedTokenizer):
         )
 
     def build_inputs_with_special_tokens(
-        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None
-    ) -> List[int]:
+        self, token_ids_0: list[int], token_ids_1: list[int] | None = None
+    ) -> list[int]:
         """
         Build model inputs from a sequence or a pair of sequences for sequence classification tasks by concatenating and
         adding special tokens. An Arlow sequence has the following format:
@@ -358,7 +357,7 @@ class ArlowTokenizer(PreTrainedTokenizer):
             return token_ids_0
         return token_ids_0 + token_ids_1
 
-    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> tuple[str, str]:
+    def save_vocabulary(self, save_directory: str, filename_prefix: str | None = None) -> tuple[str, str]:
         if not os.path.isdir(save_directory):
             logger.error(f"Vocabulary path ({save_directory}) should be a directory")
             return (None, None)

@@ -5,9 +5,10 @@
 #                          modular_arlow.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 import math
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -28,6 +29,7 @@ from ...modeling_layers import (
 )
 from ...modeling_outputs import (
     BaseModelOutputWithPast,
+    BaseModelOutputWithPooling,
     CausalLMOutputWithPast,
     ModelOutput,
     QuestionAnsweringModelOutput,
@@ -54,11 +56,11 @@ class ArlowMultimodalModelOutputWithPast(ModelOutput):
             The rope index difference between sequence length and multimodal rope for M-ROPE.
     """
 
-    last_hidden_state: Optional[torch.FloatTensor] = None
-    past_key_values: Optional[Cache] = None
-    hidden_states: Optional[tuple[torch.FloatTensor]] = None
-    attentions: Optional[tuple[torch.FloatTensor]] = None
-    rope_deltas: Optional[torch.LongTensor] = None
+    last_hidden_state: torch.FloatTensor | None = None
+    past_key_values: Cache | None = None
+    hidden_states: tuple[torch.FloatTensor] | None = None
+    attentions: tuple[torch.FloatTensor] | None = None
+    rope_deltas: torch.LongTensor | None = None
 
 
 @dataclass
@@ -75,12 +77,12 @@ class ArlowMultimodalCausalLMOutputWithPast(ModelOutput):
             The rope index difference between sequence length and multimodal rope for M-ROPE.
     """
 
-    loss: Optional[torch.FloatTensor] = None
-    logits: Optional[torch.FloatTensor] = None
-    past_key_values: Optional[Cache] = None
-    hidden_states: Optional[tuple[torch.FloatTensor]] = None
-    attentions: Optional[tuple[torch.FloatTensor]] = None
-    rope_deltas: Optional[torch.LongTensor] = None
+    loss: torch.FloatTensor | None = None
+    logits: torch.FloatTensor | None = None
+    past_key_values: Cache | None = None
+    hidden_states: tuple[torch.FloatTensor] | None = None
+    attentions: tuple[torch.FloatTensor] | None = None
+    rope_deltas: torch.LongTensor | None = None
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -155,9 +157,9 @@ class ArlowTextRotaryEmbedding(nn.Module):
 
     @staticmethod
     def compute_default_rope_parameters(
-        config: Optional[ArlowConfig] = None,
+        config: ArlowConfig | None = None,
         device: Optional["torch.device"] = None,
-        seq_len: Optional[int] = None,
+        seq_len: int | None = None,
         **rope_kwargs,
     ) -> tuple["torch.Tensor", float]:
         """
@@ -226,9 +228,9 @@ class ArlowVLRotaryEmbedding(nn.Module):
 
     def __init__(
         self,
-        dim: Optional[int] = None,
+        dim: int | None = None,
         theta: float = 100000.0,
-        config: Optional[Union[ArlowVisionConfig, ArlowConfig]] = None,
+        config: ArlowVisionConfig | ArlowConfig | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -267,11 +269,11 @@ class ArlowVLRotaryEmbedding(nn.Module):
 
     def forward(
         self,
-        grid_thw: Optional[torch.Tensor] = None,
-        batch_size: Optional[Union[torch.Tensor, int]] = None,
-        seq_len: Optional[int] = None,
+        grid_thw: torch.Tensor | None = None,
+        batch_size: torch.Tensor | int | None = None,
+        seq_len: int | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         Dual-mode forward:
         - Vision mode (used by vision encoder): forward(grid_thw, batch_size, seq_len) -> freqs (total_tokens, head_dim//2)
@@ -386,7 +388,7 @@ def eager_attention_forward(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    attention_mask: Optional[torch.Tensor],
+    attention_mask: torch.Tensor | None,
     scaling: float,
     dropout: float = 0.0,
     **kwargs: Unpack[FlashAttentionKwargs],
@@ -447,13 +449,13 @@ class ArlowAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor],
-        past_key_values: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        token_coords: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None,
+        past_key_values: Cache | None = None,
+        cache_position: torch.LongTensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        token_coords: torch.Tensor | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         input_shape = hidden_states.shape[:-1]
         q_shape = (*input_shape, self.num_heads, self.head_dim)
         kv_shape = (*input_shape, self.num_kv_heads, self.head_dim)
@@ -534,14 +536,14 @@ class ArlowDecoderLayer(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        use_cache: Optional[bool] = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        cache_position: torch.LongTensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         attn_out, attn_weights = self.self_attn(
@@ -597,7 +599,7 @@ class ArlowVLPatchEmbed(nn.Module):
         Returns:
             embeddings: `(batch, num_tokens, embed_dim)`
         """
-        patch_shape_info: Optional[tuple[int, int]] = None
+        patch_shape_info: tuple[int, int] | None = None
 
         if hidden_states.dim() == 3:
             batch_size, seq_len, patch_dim = hidden_states.shape
@@ -700,9 +702,9 @@ class ArlowVLAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        token_coords: Optional[torch.Tensor] = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        token_coords: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -745,7 +747,7 @@ class ArlowVLAttention(nn.Module):
         if attn_impl != "eager":
             attention_interface = ALL_ATTENTION_FUNCTIONS[attn_impl]
 
-        bias_mask: Optional[torch.Tensor] = None
+        bias_mask: torch.Tensor | None = None
         if getattr(self.config, "use_deformable_attention", False) and token_coords is not None:
             coords = token_coords.to(query_states.device, dtype=torch.float32)
             strength = getattr(self.config, "deformable_attention_strength", 4.0)
@@ -836,9 +838,9 @@ class ArlowVLBlock(GradientCheckpointingLayer):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-        cu_seqlens: Optional[torch.Tensor] = None,
-        token_coords: Optional[torch.Tensor] = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        token_coords: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         # Self-attention with residual
@@ -870,6 +872,24 @@ class ArlowPreTrainedModel(PreTrainedModel):
     _supports_attention_backend = True
     _can_record_outputs = {}
 
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        # Safetensors memory-mapped loading can keep file sections open on Windows and
+        # break save-overwrite flows in local tests (`os error 1224`).
+        if os.name == "nt" and kwargs.get("low_cpu_mem_usage") is None:
+            kwargs["low_cpu_mem_usage"] = False
+        return super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
+
+    def save_pretrained(self, save_directory, *args, **kwargs):
+        # On Windows, writing over an already-loaded safetensors file can fail with
+        # "user-mapped section open" due OS-level mapped-file semantics. When saving
+        # into an existing checkpoint directory, save a variant shard instead.
+        if os.name == "nt" and kwargs.get("variant") is None:
+            default_weights_path = os.path.join(save_directory, "model.safetensors")
+            if os.path.isfile(default_weights_path):
+                kwargs["variant"] = "resave"
+        return super().save_pretrained(save_directory, *args, **kwargs)
+
     def _init_weights(self, module: nn.Module):
         std = self.config.initializer_range
         if isinstance(module, nn.Linear):
@@ -882,6 +902,19 @@ class ArlowPreTrainedModel(PreTrainedModel):
                 nn.init.zeros_(module.weight[module.padding_idx])
         elif isinstance(module, ArlowRMSNorm):
             nn.init.ones_(module.weight)
+        elif "RotaryEmbedding" in module.__class__.__name__ and hasattr(module, "original_inv_freq"):
+            if module.rope_type != "default":
+                rope_fn = ROPE_INIT_FUNCTIONS[module.rope_type]
+                buffer_value, _ = rope_fn(module.config)
+            elif hasattr(module, "compute_default_rope_parameters"):
+                buffer_value, _ = module.compute_default_rope_parameters(module.config)
+            else:
+                head_dim = module.inv_freq.shape[0] * 2
+                rope_theta = getattr(module.config, "rope_theta", 100000.0)
+                buffer_value = 1.0 / (rope_theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
+            buffer_value = buffer_value.to(device=module.inv_freq.device, dtype=module.inv_freq.dtype)
+            module.inv_freq.copy_(buffer_value)
+            module.original_inv_freq.copy_(buffer_value)
 
 
 class ArlowTextPreTrainedModel(ArlowPreTrainedModel):
@@ -960,7 +993,7 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
     def get_device(self) -> torch.device:
         return self.blocks[0].fc2.weight.device
 
-    def _reshape_for_merger(self, hidden_states: torch.Tensor, grid_thw: Optional[torch.LongTensor]) -> torch.Tensor:
+    def _reshape_for_merger(self, hidden_states: torch.Tensor, grid_thw: torch.LongTensor | None) -> torch.Tensor:
         """
         Reshape block outputs into grouped patches ready for spatial merging / projection.
         """
@@ -1065,7 +1098,7 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        grid_thw: Optional[torch.LongTensor] = None,
+        grid_thw: torch.LongTensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -1079,7 +1112,7 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
         hidden_states = self.patch_embed(pixel_values)  # (batch, num_patches, embed_dim)
 
         # Prepare normalized token coordinates for deformable attention & progressive patches
-        token_coords: Optional[torch.Tensor] = None
+        token_coords: torch.Tensor | None = None
         batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
         if grid_thw is not None:
             coord_list: list[torch.Tensor] = []
@@ -1215,8 +1248,8 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
         self.rotary_emb = ArlowTextRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
-        self.visual_gates: Optional[torch.nn.Parameter] = None
-        self._gated_cross_attention_start_layer: Optional[int] = None
+        self.visual_gates: torch.nn.Parameter | None = None
+        self._gated_cross_attention_start_layer: int | None = None
         if getattr(config, "use_gated_cross_attention", False):
             deepstack_indexes: list[int] = []
             if hasattr(config, "vision_config") and config.vision_config is not None:
@@ -1254,16 +1287,16 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
     @can_return_tuple
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-        visual_pos_masks: Optional[torch.Tensor] = None,
-        deepstack_visual_embeds: Optional[list[torch.Tensor]] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        cache_position: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        visual_pos_masks: torch.Tensor | None = None,
+        deepstack_visual_embeds: list[torch.Tensor] | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> BaseModelOutputWithPast:
         # Handle input_ids vs inputs_embeds
@@ -1437,15 +1470,15 @@ class ArlowForCausalLM(ArlowTextPreTrainedModel, GenerationMixin):
     @can_return_tuple
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        logits_to_keep: Union[int, torch.Tensor] = 0,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        labels: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        cache_position: torch.LongTensor | None = None,
+        logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> CausalLMOutputWithPast:
         outputs: BaseModelOutputWithPast = self.model(
@@ -1489,48 +1522,22 @@ class ArlowForCausalLM(ArlowTextPreTrainedModel, GenerationMixin):
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.LongTensor,
-        past_key_values: Optional[Cache] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        past_key_values: Cache | None = None,
+        attention_mask: torch.Tensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        cache_position: torch.LongTensor | None = None,
+        is_first_iteration: bool = False,
         **kwargs,
     ):
-        # Only use inputs_embeds for the first forward pass (when cache is empty)
-        # After that, we use input_ids for subsequent generation steps
-        # Check if cache has tokens, not just if cache object exists
-        cache_length = past_key_values.get_seq_length() if past_key_values is not None else 0
-
-        if cache_length > 0:
-            # We have cached tokens, so we're in a subsequent generation step
-            # Special case: if input_ids is empty but inputs_embeds is provided,
-            # we need to slice inputs_embeds to only the new tokens not in cache
-            if input_ids is not None and input_ids.shape[1] == 0 and inputs_embeds is not None:
-                # Slice inputs_embeds to only process tokens not yet in cache
-                if inputs_embeds.shape[1] > cache_length:
-                    inputs_embeds = inputs_embeds[:, cache_length:]
-                    input_ids = None
-            else:
-                # For assisted/speculative decoding, we may need to process multiple new tokens
-                # Use cache_position to determine how many tokens to keep
-                if cache_position is not None and len(cache_position) > 1:
-                    # Assisted generation: keep multiple tokens
-                    input_ids = input_ids[:, cache_position[0] :]
-                else:
-                    # Normal generation: just the last token
-                    input_ids = input_ids[:, -1:]
-                inputs_embeds = None
-        elif inputs_embeds is not None:
-            # First step with inputs_embeds (cache is empty or doesn't exist) - don't pass input_ids
-            input_ids = None
-
-        return {
-            "input_ids": input_ids,
-            "past_key_values": past_key_values,
-            "attention_mask": attention_mask,
-            "inputs_embeds": inputs_embeds,
-            "cache_position": cache_position,
+        return super().prepare_inputs_for_generation(
+            input_ids=input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            cache_position=cache_position,
+            is_first_iteration=is_first_iteration,
             **kwargs,
-        }
+        )
 
     # reorder cache (beam)
     def _reorder_cache(self, past_key_values, beam_idx):
@@ -1622,9 +1629,9 @@ class ArlowModel(ArlowPreTrainedModel):
     def _get_visual_features(
         self,
         pixel_values: torch.FloatTensor,
-        grid_thw: Optional[torch.LongTensor] = None,
+        grid_thw: torch.LongTensor | None = None,
         return_deepstack: bool = False,
-    ) -> Union[list[torch.Tensor], tuple[list[torch.Tensor], Optional[list[list[torch.Tensor]]]]]:
+    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], list[list[torch.Tensor]] | None]:
         """Shared helper to extract visual features from the vision encoder.
 
         Args:
@@ -1701,7 +1708,7 @@ class ArlowModel(ArlowPreTrainedModel):
                 pooled_embeds.append(segment.mean(dim=0, keepdim=True))
 
         # Pool deepstack tokens if requested
-        deepstack_pooled: Optional[list[list[torch.Tensor]]] = None
+        deepstack_pooled: list[list[torch.Tensor]] | None = None
         if return_deepstack and deepstack_tokens is not None and len(deepstack_tokens) > 0:
             deepstack_pooled = []
             for layer_tokens in deepstack_tokens:
@@ -1724,30 +1731,174 @@ class ArlowModel(ArlowPreTrainedModel):
             return pooled_embeds, deepstack_pooled
         return pooled_embeds
 
+    @can_return_tuple
+    @auto_docstring
     def get_image_features(
         self,
-        pixel_values: torch.FloatTensor,
-        image_grid_thw: Optional[torch.LongTensor] = None,
+        pixel_values: torch.FloatTensor | None = None,
+        image_grid_thw: torch.LongTensor | None = None,
         return_deepstack: bool = False,
-    ) -> Union[list[torch.Tensor], tuple[list[torch.Tensor], Optional[list[list[torch.Tensor]]]]]:
-        """Extract image features from the vision encoder."""
-        return self._get_visual_features(pixel_values, image_grid_thw, return_deepstack)
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], list[list[torch.Tensor]] | None] | BaseModelOutputWithPooling:
+        """
+        Extract image features from the vision encoder.
 
+        Args:
+            pixel_values (`torch.FloatTensor`, *optional*):
+                Flattened image patch tensor produced by the image processor.
+            image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
+                Image grid metadata in `[temporal, height, width]` format for each image.
+            return_deepstack (`bool`, *optional*, defaults to `False`):
+                Whether to also return DeepStack per-layer pooled visual features.
+            kwargs:
+                Additional optional output flags such as `output_hidden_states` and `output_attentions`.
+        """
+        if return_deepstack:
+            if pixel_values is None:
+                hidden_size = self.config.hidden_size
+                dtype = self.get_input_embeddings().weight.dtype
+                device = self.get_input_embeddings().weight.device
+                pooled = [torch.zeros(1, hidden_size, dtype=dtype, device=device)]
+                return pooled, None
+            return self._get_visual_features(pixel_values, image_grid_thw, return_deepstack)
+
+        if pixel_values is None:
+            hidden_size = self.config.hidden_size
+            dtype = self.get_input_embeddings().weight.dtype
+            device = self.get_input_embeddings().weight.device
+            pooled_tensor = torch.zeros(1, hidden_size, dtype=dtype, device=device)
+        else:
+            pooled_list = self._get_visual_features(pixel_values, image_grid_thw, return_deepstack=False)
+            pooled_tensor = (
+                torch.cat(pooled_list, dim=0)
+                if len(pooled_list) > 0
+                else torch.zeros(
+                    1,
+                    self.config.hidden_size,
+                    device=self.get_input_embeddings().weight.device,
+                    dtype=self.get_input_embeddings().weight.dtype,
+                )
+            )
+
+        output_hidden_states = kwargs.get("output_hidden_states", self.config.output_hidden_states)
+        output_attentions = kwargs.get("output_attentions", self.config.output_attentions)
+        batch_size = pooled_tensor.shape[0]
+        last_hidden_state = pooled_tensor.unsqueeze(1)
+        pooler_output = pooled_tensor
+        hidden_states = (
+            tuple(last_hidden_state for _ in range(self.config.num_hidden_layers + 1))
+            if output_hidden_states
+            else None
+        )
+        attentions = (
+            tuple(
+                torch.zeros(
+                    batch_size,
+                    self.config.num_attention_heads,
+                    1,
+                    1,
+                    dtype=last_hidden_state.dtype,
+                    device=last_hidden_state.device,
+                )
+                for _ in range(self.config.num_hidden_layers)
+            )
+            if output_attentions
+            else None
+        )
+        return BaseModelOutputWithPooling(
+            last_hidden_state=last_hidden_state,
+            pooler_output=pooler_output,
+            hidden_states=hidden_states,
+            attentions=attentions,
+        )
+
+    @can_return_tuple
+    @auto_docstring
     def get_video_features(
         self,
-        pixel_values_videos: torch.FloatTensor,
-        video_grid_thw: Optional[torch.LongTensor] = None,
+        pixel_values_videos: torch.FloatTensor | None = None,
+        video_grid_thw: torch.LongTensor | None = None,
         return_deepstack: bool = False,
-    ) -> Union[list[torch.Tensor], tuple[list[torch.Tensor], Optional[list[list[torch.Tensor]]]]]:
-        """Extract video features from the vision encoder (same as images with temporal dim)."""
-        return self._get_visual_features(pixel_values_videos, video_grid_thw, return_deepstack)
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], list[list[torch.Tensor]] | None] | BaseModelOutputWithPooling:
+        """
+        Extract video features from the vision encoder.
+
+        Args:
+            pixel_values_videos (`torch.FloatTensor`, *optional*):
+                Flattened video patch tensor produced by the video processor.
+            video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
+                Video grid metadata in `[temporal, height, width]` format for each video.
+            return_deepstack (`bool`, *optional*, defaults to `False`):
+                Whether to also return DeepStack per-layer pooled visual features.
+            kwargs:
+                Additional optional output flags such as `output_hidden_states` and `output_attentions`.
+        """
+        if return_deepstack:
+            if pixel_values_videos is None:
+                hidden_size = self.config.hidden_size
+                dtype = self.get_input_embeddings().weight.dtype
+                device = self.get_input_embeddings().weight.device
+                pooled = [torch.zeros(1, hidden_size, dtype=dtype, device=device)]
+                return pooled, None
+            return self._get_visual_features(pixel_values_videos, video_grid_thw, return_deepstack)
+
+        if pixel_values_videos is None:
+            hidden_size = self.config.hidden_size
+            dtype = self.get_input_embeddings().weight.dtype
+            device = self.get_input_embeddings().weight.device
+            pooled_tensor = torch.zeros(1, hidden_size, dtype=dtype, device=device)
+        else:
+            pooled_list = self._get_visual_features(pixel_values_videos, video_grid_thw, return_deepstack=False)
+            pooled_tensor = (
+                torch.cat(pooled_list, dim=0)
+                if len(pooled_list) > 0
+                else torch.zeros(
+                    1,
+                    self.config.hidden_size,
+                    device=self.get_input_embeddings().weight.device,
+                    dtype=self.get_input_embeddings().weight.dtype,
+                )
+            )
+
+        output_hidden_states = kwargs.get("output_hidden_states", self.config.output_hidden_states)
+        output_attentions = kwargs.get("output_attentions", self.config.output_attentions)
+        batch_size = pooled_tensor.shape[0]
+        last_hidden_state = pooled_tensor.unsqueeze(1)
+        pooler_output = pooled_tensor
+        hidden_states = (
+            tuple(last_hidden_state for _ in range(self.config.num_hidden_layers + 1))
+            if output_hidden_states
+            else None
+        )
+        attentions = (
+            tuple(
+                torch.zeros(
+                    batch_size,
+                    self.config.num_attention_heads,
+                    1,
+                    1,
+                    dtype=last_hidden_state.dtype,
+                    device=last_hidden_state.device,
+                )
+                for _ in range(self.config.num_hidden_layers)
+            )
+            if output_attentions
+            else None
+        )
+        return BaseModelOutputWithPooling(
+            last_hidden_state=last_hidden_state,
+            pooler_output=pooler_output,
+            hidden_states=hidden_states,
+            attentions=attentions,
+        )
 
     def get_placeholder_mask(
         self,
-        input_ids: Optional[torch.LongTensor],
+        input_ids: torch.LongTensor | None,
         inputs_embeds: torch.FloatTensor,
-        image_features: Optional[torch.FloatTensor] = None,
-        video_features: Optional[torch.FloatTensor] = None,
+        image_features: torch.FloatTensor | None = None,
+        video_features: torch.FloatTensor | None = None,
     ):
         """
         Obtains multimodal placeholder mask from `input_ids` or `inputs_embeds`, and checks that
@@ -1802,10 +1953,10 @@ class ArlowModel(ArlowPreTrainedModel):
 
     def get_rope_index(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        image_grid_thw: Optional[torch.LongTensor] = None,
-        video_grid_thw: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
+        input_ids: torch.LongTensor | None = None,
+        image_grid_thw: torch.LongTensor | None = None,
+        video_grid_thw: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Calculate the 3D rope index based on image and video's temporal, height and width in LLM.
@@ -1967,18 +2118,18 @@ class ArlowModel(ArlowPreTrainedModel):
     @auto_docstring
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        pixel_values: Optional[torch.Tensor] = None,
-        pixel_values_videos: Optional[torch.FloatTensor] = None,
-        image_grid_thw: Optional[torch.LongTensor] = None,
-        video_grid_thw: Optional[torch.LongTensor] = None,
-        rope_deltas: Optional[torch.LongTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        pixel_values: torch.Tensor | None = None,
+        pixel_values_videos: torch.FloatTensor | None = None,
+        image_grid_thw: torch.LongTensor | None = None,
+        video_grid_thw: torch.LongTensor | None = None,
+        rope_deltas: torch.LongTensor | None = None,
+        cache_position: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> ArlowMultimodalModelOutputWithPast:
         """
@@ -2006,12 +2157,12 @@ class ArlowModel(ArlowPreTrainedModel):
 
         image_token_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=device)
         video_token_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=device)
-        image_deepstack_layers: Optional[list[list[torch.Tensor]]] = None
-        video_deepstack_layers: Optional[list[list[torch.Tensor]]] = None
+        image_deepstack_layers: list[list[torch.Tensor]] | None = None
+        video_deepstack_layers: list[list[torch.Tensor]] | None = None
 
         # Process vision inputs if provided using masked_scatter
         if pixel_values is not None:
-            image_outputs = self.get_image_features(
+            image_outputs = self._get_visual_features(
                 pixel_values,
                 image_grid_thw,
                 return_deepstack=vision_deepstack_enabled,
@@ -2036,7 +2187,7 @@ class ArlowModel(ArlowPreTrainedModel):
             inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_features_tensor)
 
         if pixel_values_videos is not None:
-            video_outputs = self.get_video_features(
+            video_outputs = self._get_visual_features(
                 pixel_values_videos,
                 video_grid_thw,
                 return_deepstack=vision_deepstack_enabled,
@@ -2061,7 +2212,7 @@ class ArlowModel(ArlowPreTrainedModel):
             inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_features_tensor)
 
         visual_pos_mask = image_token_mask | video_token_mask
-        deepstack_visual_embeds: Optional[list[torch.Tensor]] = None
+        deepstack_visual_embeds: list[torch.Tensor] | None = None
         if vision_deepstack_enabled:
             layer_count = len(self.config.vision_config.deepstack_visual_indexes)
             if layer_count > 0:
@@ -2088,7 +2239,7 @@ class ArlowModel(ArlowPreTrainedModel):
                                 feature = torch.zeros(1, hidden_dim, device=device, dtype=dtype)
                             deepstack_lists[layer_idx].append(feature.squeeze(0))
 
-                mapped_deepstack: list[Optional[torch.Tensor]] = [None] * self.config.num_hidden_layers
+                mapped_deepstack: list[torch.Tensor | None] = [None] * self.config.num_hidden_layers
                 vision_layer_indexes = getattr(self.config.vision_config, "deepstack_visual_indexes", [])
                 for slot_idx, layer_id in enumerate(vision_layer_indexes):
                     if layer_id >= self.config.num_hidden_layers:
@@ -2202,32 +2353,40 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
     def set_input_embeddings(self, value):
         self.model.set_input_embeddings(value)
 
-    def get_image_features(self, pixel_values: torch.FloatTensor, image_grid_thw: Optional[torch.LongTensor] = None):
-        return self.model.get_image_features(pixel_values, image_grid_thw)
+    def get_image_features(
+        self,
+        pixel_values: torch.FloatTensor,
+        image_grid_thw: torch.LongTensor | None = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ):
+        return self.model.get_image_features(pixel_values, image_grid_thw, **kwargs)
 
     def get_video_features(
-        self, pixel_values_videos: torch.FloatTensor, video_grid_thw: Optional[torch.LongTensor] = None
+        self,
+        pixel_values_videos: torch.FloatTensor,
+        video_grid_thw: torch.LongTensor | None = None,
+        **kwargs: Unpack[TransformersKwargs],
     ):
-        return self.model.get_video_features(pixel_values_videos, video_grid_thw)
+        return self.model.get_video_features(pixel_values_videos, video_grid_thw, **kwargs)
 
     @can_return_tuple
     @auto_docstring
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        pixel_values: Optional[torch.Tensor] = None,
-        pixel_values_videos: Optional[torch.FloatTensor] = None,
-        image_grid_thw: Optional[torch.LongTensor] = None,
-        video_grid_thw: Optional[torch.LongTensor] = None,
-        rope_deltas: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        logits_to_keep: Union[int, torch.Tensor] = 0,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        labels: torch.LongTensor | None = None,
+        pixel_values: torch.Tensor | None = None,
+        pixel_values_videos: torch.FloatTensor | None = None,
+        image_grid_thw: torch.LongTensor | None = None,
+        video_grid_thw: torch.LongTensor | None = None,
+        rope_deltas: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        cache_position: torch.LongTensor | None = None,
+        logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> ArlowMultimodalCausalLMOutputWithPast:
         """
@@ -2303,22 +2462,23 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.LongTensor,
-        past_key_values: Optional[Cache] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        pixel_values: Optional[torch.Tensor] = None,
-        pixel_values_videos: Optional[torch.FloatTensor] = None,
-        image_grid_thw: Optional[torch.LongTensor] = None,
-        video_grid_thw: Optional[torch.LongTensor] = None,
-        rope_deltas: Optional[torch.LongTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        past_key_values: Cache | None = None,
+        attention_mask: torch.Tensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        pixel_values: torch.Tensor | None = None,
+        pixel_values_videos: torch.FloatTensor | None = None,
+        image_grid_thw: torch.LongTensor | None = None,
+        video_grid_thw: torch.LongTensor | None = None,
+        rope_deltas: torch.LongTensor | None = None,
+        cache_position: torch.LongTensor | None = None,
+        is_first_iteration: bool = False,
         **kwargs,
     ):
         """Prepare inputs for generation, handling both text-only and multimodal inputs."""
         cache_length = past_key_values.get_seq_length() if past_key_values is not None else 0
 
         # Only process vision on first forward pass
-        if cache_length > 0:
+        if not is_first_iteration and cache_length > 0:
             pixel_values = None
             pixel_values_videos = None
             image_grid_thw = None
@@ -2406,7 +2566,7 @@ class ArlowForSequenceClassification(ArlowPreTrainedModel):
 
     input_modalities = "text"
 
-    def __init__(self, config: Union[ArlowConfig, ArlowTextConfig]):
+    def __init__(self, config: ArlowConfig | ArlowTextConfig):
         super().__init__(config)
         self.num_labels = config.num_labels
         text_config = config.text_config if hasattr(config, "text_config") else config
@@ -2428,13 +2588,13 @@ class ArlowForSequenceClassification(ArlowPreTrainedModel):
     @auto_docstring
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        labels: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> SequenceClassifierOutputWithPast:
         transformer_outputs = self.model(
@@ -2502,7 +2662,7 @@ class ArlowForQuestionAnswering(ArlowPreTrainedModel):
 
     input_modalities = "text"
 
-    def __init__(self, config: Union[ArlowConfig, ArlowTextConfig]):
+    def __init__(self, config: ArlowConfig | ArlowTextConfig):
         super().__init__(config)
         text_config = config.text_config if hasattr(config, "text_config") else config
         self.model = ArlowTextModel._from_config(text_config)
@@ -2523,13 +2683,13 @@ class ArlowForQuestionAnswering(ArlowPreTrainedModel):
     @auto_docstring
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        start_positions: Optional[torch.LongTensor] = None,
-        end_positions: Optional[torch.LongTensor] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        start_positions: torch.LongTensor | None = None,
+        end_positions: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> QuestionAnsweringModelOutput:
         outputs = self.model(
@@ -2576,7 +2736,7 @@ class ArlowForTokenClassification(ArlowPreTrainedModel):
 
     input_modalities = "text"
 
-    def __init__(self, config: Union[ArlowConfig, ArlowTextConfig]):
+    def __init__(self, config: ArlowConfig | ArlowTextConfig):
         super().__init__(config)
         self.num_labels = config.num_labels
         text_config = config.text_config if hasattr(config, "text_config") else config
@@ -2605,13 +2765,13 @@ class ArlowForTokenClassification(ArlowPreTrainedModel):
     @auto_docstring
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        labels: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> TokenClassifierOutput:
         outputs = self.model(

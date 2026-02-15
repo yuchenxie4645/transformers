@@ -1,5 +1,5 @@
 import math
-from typing import Optional, Union
+from typing import Union
 
 import torch
 
@@ -56,13 +56,13 @@ class ArlowImageProcessorKwargs(ImagesKwargs, total=False):
 @add_start_docstrings(
     "Constructs an Arlow fast image processor that dynamically resizes images and outputs grid metadata.",
     """
-		patch_size (`int`, *optional*, defaults to 14):
-			The spatial patch size of the vision encoder.
-		temporal_patch_size (`int`, *optional*, defaults to 2):
-			Temporal patch size used by the vision encoder (images use 1 temporal slice but are padded to be divisible).
-		merge_size (`int`, *optional*, defaults to 2):
-			The merge size of the vision encoder to LLM encoder.
-	""",
+        patch_size (`int`, *optional*, defaults to 14):
+            The spatial patch size of the vision encoder.
+        temporal_patch_size (`int`, *optional*, defaults to 2):
+            Temporal patch size used by the vision encoder (images use 1 temporal slice but are padded to be divisible).
+        merge_size (`int`, *optional*, defaults to 2):
+            The merge size of the vision encoder to LLM encoder.
+    """,
 )
 class ArlowImageProcessorFast(BaseImageProcessorFast):
     do_resize = True
@@ -117,9 +117,9 @@ class ArlowImageProcessorFast(BaseImageProcessorFast):
 
     def _further_process_kwargs(
         self,
-        size: Optional[SizeDict] = None,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
+        size: SizeDict | None = None,
+        min_pixels: int | None = None,
+        max_pixels: int | None = None,
         **kwargs,
     ) -> dict:
         if min_pixels is not None and max_pixels is not None:
@@ -147,7 +147,9 @@ class ArlowImageProcessorFast(BaseImageProcessorFast):
             if height == 0 or width / height < pan_and_scan_min_ratio_to_activate:
                 return []
             num_crops_w = int(math.floor(width / height + 0.5))
-            max_crops_by_size = int(math.floor(width / pan_and_scan_min_crop_size)) if pan_and_scan_min_crop_size else num_crops_w
+            max_crops_by_size = (
+                int(math.floor(width / pan_and_scan_min_crop_size)) if pan_and_scan_min_crop_size else num_crops_w
+            )
             num_crops_w = min(max_crops_by_size, num_crops_w)
             num_crops_w = max(2, num_crops_w)
             num_crops_w = min(pan_and_scan_max_num_crops, num_crops_w)
@@ -156,7 +158,9 @@ class ArlowImageProcessorFast(BaseImageProcessorFast):
             if width == 0 or height / width < pan_and_scan_min_ratio_to_activate:
                 return []
             num_crops_h = int(math.floor(height / width + 0.5))
-            max_crops_by_size = int(math.floor(height / pan_and_scan_min_crop_size)) if pan_and_scan_min_crop_size else num_crops_h
+            max_crops_by_size = (
+                int(math.floor(height / pan_and_scan_min_crop_size)) if pan_and_scan_min_crop_size else num_crops_h
+            )
             num_crops_h = min(max_crops_by_size, num_crops_h)
             num_crops_h = max(2, num_crops_h)
             num_crops_h = min(pan_and_scan_max_num_crops, num_crops_h)
@@ -171,7 +175,7 @@ class ArlowImageProcessorFast(BaseImageProcessorFast):
         crop_positions_w = [min(width - crop_size_w, crop_size_w * i) for i in range(num_crops_w)]
         crop_positions_h = [min(height - crop_size_h, crop_size_h * i) for i in range(num_crops_h)]
 
-        crops: list["torch.Tensor"] = []
+        crops: list[torch.Tensor] = []
         for pos_h in crop_positions_h:
             for pos_w in crop_positions_w:
                 end_h = min(pos_h + crop_size_h, height)
@@ -188,11 +192,11 @@ class ArlowImageProcessorFast(BaseImageProcessorFast):
         pan_and_scan_max_num_crops: int,
         pan_and_scan_min_ratio_to_activate: float,
     ) -> tuple[list["torch.Tensor"], list[int]]:
-        expanded: list["torch.Tensor"] = []
+        expanded: list[torch.Tensor] = []
         num_crops_per_image: list[int] = []
 
         for image in images:
-            crops: list["torch.Tensor"] = []
+            crops: list[torch.Tensor] = []
             if do_pan_and_scan:
                 crops = self.pan_and_scan(
                     image=image,
@@ -213,57 +217,74 @@ class ArlowImageProcessorFast(BaseImageProcessorFast):
     ) -> BatchFeature:
         return super().preprocess(images, **kwargs)
 
+    @staticmethod
+    def _flatten_unpadded_pixel_values(
+        pixel_values: "torch.Tensor | None", image_grid_thw: "torch.Tensor | None"
+    ) -> "torch.Tensor | None":
+        if (
+            pixel_values is None
+            or image_grid_thw is None
+            or pixel_values.ndim != 3
+            or image_grid_thw.ndim != 2
+            or image_grid_thw.shape[-1] != 3
+        ):
+            return pixel_values
+
+        patch_counts = (image_grid_thw[:, 0] * image_grid_thw[:, 1] * image_grid_thw[:, 2]).tolist()
+        total_patches = sum(int(count) for count in patch_counts)
+        flattened = pixel_values.new_zeros((total_patches, pixel_values.shape[-1]))
+
+        offset = 0
+        for image_idx, patch_count in enumerate(patch_counts):
+            count = int(patch_count)
+            if count > 0:
+                flattened[offset : offset + count] = pixel_values[image_idx, :count]
+            offset += count
+
+        return flattened
+
+    def __call__(self, images: ImageInput, *args, **kwargs: Unpack[ArlowImageProcessorKwargs]) -> BatchFeature:
+        batch_feature = self.preprocess(images, *args, **kwargs)
+        if "pixel_values" in batch_feature and "image_grid_thw" in batch_feature:
+            batch_feature["pixel_values"] = self._flatten_unpadded_pixel_values(
+                batch_feature["pixel_values"], batch_feature["image_grid_thw"]
+            )
+        return batch_feature
+
     def _preprocess_image_like_inputs(
         self,
         images: ImageInput,
         do_convert_rgb: bool,
         input_data_format: ChannelDimension,
-        device: Optional[Union[str, "torch.device"]] = None,
+        device: Union[str, "torch.device"] | None = None,
         **kwargs: Unpack[ArlowImageProcessorKwargs],
     ) -> BatchFeature:
-        # Detect original input structure before flattening
-        orig = images
-        is_list = isinstance(orig, (list, tuple))
-        is_nested = is_list and len(orig) > 0 and isinstance(orig[0], (list, tuple))
-        is_single_list_of_one = is_list and not is_nested and len(orig) == 1
-
         images = self._prepare_image_like_inputs(
             images=images, do_convert_rgb=do_convert_rgb, input_data_format=input_data_format, device=device
         )
-        batch_feature = self._preprocess(images, **kwargs)
-        # For nested batches and single-list inputs, return 2D (flattened) to match common image processor tests
-        if isinstance(batch_feature["pixel_values"], torch.Tensor):
-            pixel_values = batch_feature["pixel_values"]
-            if pixel_values.ndim == 3 and (is_nested or is_single_list_of_one):
-                b, p, d = pixel_values.shape
-                batch_feature["pixel_values"] = pixel_values.reshape(b * p, d)
-        return batch_feature
+        return self._preprocess(images, **kwargs)
 
     def _preprocess(
         self,
         images: list["torch.Tensor"],
         do_resize: bool,
         size: SizeDict,
-        interpolation: Optional[PILImageResampling],
+        interpolation: PILImageResampling | None,
         do_rescale: bool,
         rescale_factor: float,
         do_normalize: bool,
-        image_mean: Optional[Union[float, list[float]]],
-        image_std: Optional[Union[float, list[float]]],
+        image_mean: float | list[float] | None,
+        image_std: float | list[float] | None,
         patch_size: int,
         temporal_patch_size: int,
         merge_size: int,
-        disable_grouping: Optional[bool],
-        return_tensors: Optional[Union[str, TensorType]],
+        disable_grouping: bool | None,
+        return_tensors: str | TensorType | None,
         **kwargs,
     ):
         do_pan_and_scan = kwargs.pop("do_pan_and_scan", self.do_pan_and_scan)
-        pan_and_scan_min_crop_size = kwargs.pop(
-            "pan_and_scan_min_crop_size", self.pan_and_scan_min_crop_size
-        )
-        pan_and_scan_max_num_crops = kwargs.pop(
-            "pan_and_scan_max_num_crops", self.pan_and_scan_max_num_crops
-        )
+        pan_and_scan_min_crop_size = kwargs.pop("pan_and_scan_min_crop_size", self.pan_and_scan_min_crop_size)
+        pan_and_scan_max_num_crops = kwargs.pop("pan_and_scan_max_num_crops", self.pan_and_scan_max_num_crops)
         pan_and_scan_min_ratio_to_activate = kwargs.pop(
             "pan_and_scan_min_ratio_to_activate", self.pan_and_scan_min_ratio_to_activate
         )
@@ -298,9 +319,7 @@ class ArlowImageProcessorFast(BaseImageProcessorFast):
             resized_images_grouped[shape] = stacked_images
         resized_images = reorder_images(resized_images_grouped, grouped_images_index)
 
-        grouped_images, grouped_images_index = group_images_by_shape(
-            resized_images, disable_grouping=disable_grouping
-        )
+        grouped_images, grouped_images_index = group_images_by_shape(resized_images, disable_grouping=disable_grouping)
         processed_images_grouped = {}
         processed_grids = {}
         for shape, stacked_images in grouped_images.items():

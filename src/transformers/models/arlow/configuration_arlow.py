@@ -5,10 +5,8 @@
 #                          modular_arlow.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 import math
-from typing import Optional
 
 from ...configuration_utils import PreTrainedConfig, layer_type_validation
-from ...modeling_rope_utils import rope_config_validation
 
 
 class ArlowVisionConfig(PreTrainedConfig):
@@ -75,10 +73,10 @@ class ArlowVisionConfig(PreTrainedConfig):
         token_pruning_ratio: float = 0.0,
         deformable_attention_window: float = 0.25,
         deformable_attention_strength: float = 4.0,
-        deepstack_visual_indexes: Optional[list[int]] = None,
-        mrope_sections: Optional[list[int]] = None,
+        deepstack_visual_indexes: list[int] | None = None,
+        mrope_sections: list[int] | None = None,
         initializer_range: float = 0.02,
-        max_position_embeddings: Optional[int] = None,
+        max_position_embeddings: int | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -207,7 +205,8 @@ class ArlowTextConfig(PreTrainedConfig):
         # Validate rope parameters
         if self.rope_parameters is not None and "type" in self.rope_parameters:
             self.rope_parameters["rope_type"] = self.rope_parameters["type"]
-        rope_config_validation(self, ignore_keys={"mrope_sections"})
+        self.standardize_rope_params()
+        self.validate_rope(ignore_keys={"mrope_sections"})
 
         # Layer types configuration (supports full/sliding attention)
         self.use_sliding_window = use_sliding_window
@@ -482,7 +481,8 @@ class ArlowConfig(PreTrainedConfig):
 
         if self.rope_parameters is not None and "type" in self.rope_parameters:
             self.rope_parameters["rope_type"] = self.rope_parameters["type"]
-        rope_config_validation(self, ignore_keys={"mrope_sections"})
+        self.standardize_rope_params()
+        self.validate_rope(ignore_keys={"mrope_sections"})
 
         self.layer_types = text_config.layer_types
         if self.layer_types is None:
@@ -516,6 +516,16 @@ class ArlowConfig(PreTrainedConfig):
             tie_word_embeddings=text_config.tie_word_embeddings,
             **kwargs,
         )
+
+    def to_dict(self):
+        output = super().to_dict()
+        dtype = output.get("dtype")
+        if dtype is not None:
+            for sub_config_key in ("text_config", "vision_config"):
+                sub_config = output.get(sub_config_key)
+                if isinstance(sub_config, dict) and sub_config.get("dtype") is None:
+                    sub_config["dtype"] = dtype
+        return output
 
     @staticmethod
     def _scale_mrope_sections_from_ratio(head_dim: int, ratio: list[float]) -> list[int]:

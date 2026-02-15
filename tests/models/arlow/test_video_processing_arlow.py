@@ -6,8 +6,8 @@ import unittest
 
 import numpy as np
 
-from transformers.testing_utils import require_torch, require_vision
-from transformers.utils import is_torch_available, is_vision_available
+from transformers.testing_utils import require_torch, require_torchvision, require_vision
+from transformers.utils import is_torch_available, is_torchvision_available, is_vision_available
 from transformers.video_utils import VideoMetadata
 
 from ...test_video_processing_common import VideoProcessingTestMixin, prepare_video_inputs
@@ -16,7 +16,7 @@ from ...test_video_processing_common import VideoProcessingTestMixin, prepare_vi
 if is_torch_available():
     import torch
 
-if is_vision_available():
+if is_vision_available() and is_torchvision_available():
     from transformers import ArlowVideoProcessor
 
 
@@ -102,9 +102,10 @@ class ArlowVideoProcessingTester:
 
 @require_torch
 @require_vision
+@require_torchvision
 class ArlowVideoProcessingTest(VideoProcessingTestMixin, unittest.TestCase):
-    video_processing_class = ArlowVideoProcessor if is_vision_available() else None
-    fast_video_processing_class = ArlowVideoProcessor if is_vision_available() else None
+    video_processing_class = ArlowVideoProcessor if is_vision_available() and is_torchvision_available() else None
+    fast_video_processing_class = ArlowVideoProcessor if is_vision_available() and is_torchvision_available() else None
 
     def setUp(self):
         super().setUp()
@@ -241,7 +242,7 @@ class ArlowVideoProcessingTest(VideoProcessingTestMixin, unittest.TestCase):
         """Test uniform frame sampling."""
         video_processor = self.video_processing_class(**{**self.video_processor_dict, "sample_strategy": "uniform"})
 
-        metadata = VideoMetadata(fps=30, total_frames=100, duration=3.33)
+        metadata = VideoMetadata(fps=30, total_num_frames=100, duration=3.33)
         indices = video_processor.sample_frames(metadata, num_frames=16)
 
         # Should return 16 frame indices
@@ -253,7 +254,7 @@ class ArlowVideoProcessingTest(VideoProcessingTestMixin, unittest.TestCase):
         """Test FPS-based frame sampling."""
         video_processor = self.video_processing_class(**{**self.video_processor_dict, "sample_strategy": "fps_based"})
 
-        metadata = VideoMetadata(fps=30, total_frames=90, duration=3.0)
+        metadata = VideoMetadata(fps=30, total_num_frames=90, duration=3.0)
         indices = video_processor.sample_frames(metadata, fps=10)
 
         # Should sample approximately at target FPS
