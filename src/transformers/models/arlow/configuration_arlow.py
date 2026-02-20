@@ -239,7 +239,7 @@ class ArlowConfig(PreTrainedConfig):
     a text-only configuration.
 
     Instantiating with defaults yields configuration similar to Arlow-Base
-    [yuchenxie/ArlowGPT-Base](https://huggingface.co/yuchenxie/ArlowGPT-Base).
+    [yuchenxie/ArlowGPT-3B-Foundational-Preview](https://huggingface.co/yuchenxie/ArlowGPT-3B-Foundational-Preview).
 
     Configuration objects inherit from [`PretrainedConfig`] and control model outputs.
 
