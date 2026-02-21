@@ -140,7 +140,7 @@ class ArlowTextConfig(PreTrainedConfig):
 
     def __init__(
         self,
-        vocab_size=131072,
+        vocab_size=131074,
         hidden_size=2304,
         intermediate_size=9216,
         num_hidden_layers=32,
@@ -244,7 +244,7 @@ class ArlowConfig(PreTrainedConfig):
     Configuration objects inherit from [`PretrainedConfig`] and control model outputs.
 
     Args:
-        vocab_size (`int`, *optional*, defaults to 131076):
+        vocab_size (`int`, *optional*, defaults to 131074):
             Vocabulary size of the model.
         hidden_size (`int`, *optional*, defaults to 2304):
             Dimension of hidden representations.
@@ -323,9 +323,9 @@ class ArlowConfig(PreTrainedConfig):
             Token ID for image placeholders.
         video_token_id (`int`, *optional*, defaults to 131073):
             Token ID for video placeholders.
-        vision_start_token_id (`int`, *optional*, defaults to 131074):
+        vision_start_token_id (`int`, *optional*, defaults to 3):
             Token ID marking start of vision input.
-        vision_end_token_id (`int`, *optional*, defaults to 131075):
+        vision_end_token_id (`int`, *optional*, defaults to 4):
             Token ID marking end of vision input.
         frame_separator_token_id (`int`, *optional*):
             Token ID for separating video frames.
@@ -340,7 +340,7 @@ class ArlowConfig(PreTrainedConfig):
 
     def __init__(
         self,
-        vocab_size=131076,
+        vocab_size=131074,
         hidden_size=2304,
         intermediate_size=9216,
         num_hidden_layers=32,
@@ -381,8 +381,8 @@ class ArlowConfig(PreTrainedConfig):
         gated_cross_attention_start_layer=None,
         image_token_id=131072,
         video_token_id=131073,
-        vision_start_token_id=131074,
-        vision_end_token_id=131075,
+        vision_start_token_id=3,
+        vision_end_token_id=4,
         frame_separator_token_id=None,
         mrope_sections=None,
         **kwargs,

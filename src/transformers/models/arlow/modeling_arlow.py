@@ -471,18 +471,18 @@ class ArlowAttention(nn.Module):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        # For SDPA, during incremental decoding (query_len == 1), we should pass None as the mask
-        # to allow SDPA to use is_causal=False, avoiding shape issues with 4D masks
-        if (
+        # For SDPA, incremental decoding can return expanded sequence outputs with cached keys.
+        # Force eager attention in this specific case to keep output shape as [batch, query_len, hidden].
+        sdpa_incremental_decode = (
             getattr(self.config, "_attn_implementation", "eager") == "sdpa"
-            and attention_mask is not None
             and query_states.shape[2] == 1  # q_len == 1 (incremental decoding)
-        ):
+        )
+        if sdpa_incremental_decode:
             attention_mask = None
 
         # Dispatch to proper attention implementation
         attention_interface = eager_attention_forward
-        if getattr(self.config, "_attn_implementation", "eager") != "eager":
+        if getattr(self.config, "_attn_implementation", "eager") != "eager" and not sdpa_incremental_decode:
             attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
 
         attn_output, attn_weights = attention_interface(
@@ -2488,9 +2488,12 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
                 if inputs_embeds.shape[1] > cache_length:
                     inputs_embeds = inputs_embeds[:, cache_length:]
                     input_ids = None
+                    if cache_position is not None and len(cache_position) > inputs_embeds.shape[1]:
+                        cache_position = cache_position[-inputs_embeds.shape[1] :]
             else:
                 if cache_position is not None and len(cache_position) > 1:
                     input_ids = input_ids[:, cache_position[0] :]
+                    cache_position = cache_position[-input_ids.shape[1] :]
                 else:
                     input_ids = input_ids[:, -1:]
                 inputs_embeds = None
@@ -2511,6 +2514,21 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
             **kwargs,
         }
 
+        # Keep sequence-like generation inputs aligned with the actually forwarded token span.
+        target_seq_len = None
+        if model_inputs["input_ids"] is not None:
+            target_seq_len = model_inputs["input_ids"].shape[1]
+        elif model_inputs["inputs_embeds"] is not None:
+            target_seq_len = model_inputs["inputs_embeds"].shape[1]
+
+        if target_seq_len is not None:
+            position_ids = model_inputs.get("position_ids")
+            if position_ids is not None and position_ids.shape[-1] != target_seq_len:
+                model_inputs["position_ids"] = position_ids[..., -target_seq_len:]
+
+            if model_inputs["cache_position"] is not None and len(model_inputs["cache_position"]) != target_seq_len:
+                model_inputs["cache_position"] = model_inputs["cache_position"][-target_seq_len:]
+
         # Keep model-level rope deltas in sync and optionally pack 4D position_ids: [text; 3D mrope]
         prefill_stage = (cache_position is not None and cache_position[0] == 0) or cache_length == 0
         if prefill_stage or getattr(self.model, "rope_deltas", None) is None:
@@ -2521,25 +2539,6 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
                 attention_mask=attention_mask,
             )
             self.model.rope_deltas = rope_deltas
-
-        text_position_ids = model_inputs.get("position_ids")
-        if text_position_ids is not None and getattr(self.model, "rope_deltas", None) is not None:
-            batch_size, seq_length = text_position_ids.shape
-            device = text_position_ids.device
-
-            vision_positions = torch.arange(seq_length, device=device)
-            vision_positions = vision_positions.view(1, 1, -1).expand(3, batch_size, -1)
-
-            cache_offset = cache_position[0] if cache_position is not None else 0
-            delta = (cache_offset + self.model.rope_deltas).to(device)
-            if delta.ndim == 1:
-                delta = delta.unsqueeze(0)
-            if delta.shape[0] != batch_size:
-                repeat_factor = max(1, math.ceil(batch_size / delta.shape[0]))
-                delta = delta.repeat_interleave(repeat_factor, dim=0)[:batch_size]
-
-            vision_positions = vision_positions + delta.to(vision_positions.device)
-            model_inputs["position_ids"] = torch.cat([text_position_ids[None, ...], vision_positions], dim=0)
 
         # After prefill, don't pass pixels again
         if model_inputs["cache_position"] is not None and model_inputs["cache_position"][0] != 0:
