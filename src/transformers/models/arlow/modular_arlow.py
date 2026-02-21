@@ -2,7 +2,7 @@ import math
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional
 
 import numpy as np
 import torch
@@ -27,8 +27,8 @@ from ...modeling_layers import (
     GradientCheckpointingLayer,
 )
 from ...modeling_outputs import (
-    BaseModelOutputWithPooling,
     BaseModelOutputWithPast,
+    BaseModelOutputWithPooling,
     CausalLMOutputWithPast,
     ModelOutput,
     QuestionAnsweringModelOutput,
@@ -55,17 +55,17 @@ class ArlowVisionConfig(PreTrainedConfig):
     Configuration for the vision transformer component of Arlow multimodal models.
 
     Args:
-        depth (`int`, *optional*, defaults to 32):
+        depth (`int`, *optional*, defaults to 2):
             Number of hidden layers in the vision transformer.
-        embed_dim (`int`, *optional*, defaults to 1280):
+        embed_dim (`int`, *optional*, defaults to 32):
             Dimensionality of the vision encoder embeddings.
-        hidden_size (`int`, *optional*, defaults to 3584):
+        hidden_size (`int`, *optional*, defaults to 64):
             Dimensionality after vision projection to match text model.
         hidden_act (`str`, *optional*, defaults to `"gelu_pytorch_tanh"`):
             The non-linear activation function in the vision encoder.
         mlp_ratio (`int`, *optional*, defaults to 4):
             Ratio of mlp hidden dim to embedding dim.
-        num_heads (`int`, *optional*, defaults to 16):
+        num_heads (`int`, *optional*, defaults to 4):
             Number of attention heads in the vision transformer.
         in_channels (`int`, *optional*, defaults to 3):
             Number of input image channels.
@@ -287,7 +287,7 @@ class ArlowConfig(PreTrainedConfig):
     Configuration objects inherit from [`PretrainedConfig`] and control model outputs.
 
     Args:
-        vocab_size (`int`, *optional*, defaults to 131072):
+        vocab_size (`int`, *optional*, defaults to 131076):
             Vocabulary size of the model.
         hidden_size (`int`, *optional*, defaults to 2304):
             Dimension of hidden representations.
@@ -301,7 +301,7 @@ class ArlowConfig(PreTrainedConfig):
             Number of key_value heads for Grouped Query Attention.
         hidden_act (`str`, *optional*, defaults to `"silu"`):
             Non-linear activation function.
-        max_position_embeddings (`int`, *optional*, defaults to 2048):
+        max_position_embeddings (`int`, *optional*, defaults to 32768):
             Maximum sequence length.
         initializer_range (`float`, *optional*, defaults to 0.02):
             Standard deviation for weight initialization.
@@ -344,11 +344,11 @@ class ArlowConfig(PreTrainedConfig):
             arguments listed above.
         vision_config (`Union[PreTrainedConfig, dict]`, *optional*):
             Vision backbone configuration.
-        mm_tokens_per_image (`int`, *optional*, defaults to 256):
+        mm_tokens_per_image (`int`, *optional*, defaults to 512):
             Number of tokens per image after vision projection.
-        mm_tokens_per_video (`int`, *optional*, defaults to 128):
+        mm_tokens_per_video (`int`, *optional*, defaults to 1024):
             Number of tokens per video after temporal resampling.
-        video_max_frames (`int`, *optional*, defaults to 64):
+        video_max_frames (`int`, *optional*, defaults to 768):
             Maximum number of video frames to extract.
         video_sample_strategy (`str`, *optional*, defaults to "uniform"):
             Video frame sampling strategy: "uniform", "motion_adaptive", or "fps_based".
@@ -383,7 +383,7 @@ class ArlowConfig(PreTrainedConfig):
 
     def __init__(
         self,
-        vocab_size=131072,
+        vocab_size=131076,
         hidden_size=2304,
         intermediate_size=9216,
         num_hidden_layers=32,
@@ -2283,11 +2283,11 @@ class ArlowModel(ArlowPreTrainedModel):
     @auto_docstring
     def get_image_features(
         self,
-        pixel_values: Optional[torch.FloatTensor] = None,
+        pixel_values: torch.FloatTensor | None = None,
         image_grid_thw: torch.LongTensor | None = None,
         return_deepstack: bool = False,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> Union[list[torch.Tensor], tuple[list[torch.Tensor], list[list[torch.Tensor]] | None], BaseModelOutputWithPooling]:
+    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], list[list[torch.Tensor]] | None] | BaseModelOutputWithPooling:
         """
         Extract image features from the vision encoder.
 
@@ -2355,11 +2355,11 @@ class ArlowModel(ArlowPreTrainedModel):
     @auto_docstring
     def get_video_features(
         self,
-        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        pixel_values_videos: torch.FloatTensor | None = None,
         video_grid_thw: torch.LongTensor | None = None,
         return_deepstack: bool = False,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> Union[list[torch.Tensor], tuple[list[torch.Tensor], list[list[torch.Tensor]] | None], BaseModelOutputWithPooling]:
+    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], list[list[torch.Tensor]] | None] | BaseModelOutputWithPooling:
         """
         Extract video features from the vision encoder.
 
@@ -3033,37 +3033,35 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
             **kwargs,
         }
 
-        # Prepare 4D packed position_ids: [text; 3D mrope]
-        if "position_ids" not in model_inputs or model_inputs["position_ids"] is None:
-            prefill_stage = (cache_position is not None and cache_position[0] == 0) or cache_length == 0
-            if prefill_stage or getattr(self.model, "rope_deltas", None) is None:
-                vision_positions, rope_deltas = self.model.get_rope_index(
-                    model_inputs.get("input_ids"),
-                    image_grid_thw=image_grid_thw,
-                    video_grid_thw=video_grid_thw,
-                    attention_mask=attention_mask,
-                )
-                self.model.rope_deltas = rope_deltas
-            else:
-                # If text positions are provided, compute vision positions using cached rope_deltas
-                if "position_ids" in model_inputs and model_inputs["position_ids"] is not None:
-                    batch_size, seq_length = model_inputs["position_ids"].shape
-                    device = model_inputs["position_ids"].device
-                    position_ids = torch.arange(seq_length, device=device)
-                    position_ids = position_ids.view(1, 1, -1).expand(3, batch_size, -1)
-                    delta = cache_position[0] + self.model.rope_deltas
-                    delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
-                    vision_positions = position_ids + delta.expand_as(position_ids)
-                else:
-                    vision_positions = None
+        # Keep model-level rope deltas in sync and optionally pack 4D position_ids: [text; 3D mrope]
+        prefill_stage = (cache_position is not None and cache_position[0] == 0) or cache_length == 0
+        if prefill_stage or getattr(self.model, "rope_deltas", None) is None:
+            _, rope_deltas = self.model.get_rope_index(
+                model_inputs.get("input_ids"),
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                attention_mask=attention_mask,
+            )
+            self.model.rope_deltas = rope_deltas
 
-            if (
-                "position_ids" in model_inputs
-                and model_inputs["position_ids"] is not None
-                and vision_positions is not None
-            ):
-                text_positions = model_inputs["position_ids"][None, ...]
-                model_inputs["position_ids"] = torch.cat([text_positions, vision_positions], dim=0)
+        text_position_ids = model_inputs.get("position_ids")
+        if text_position_ids is not None and getattr(self.model, "rope_deltas", None) is not None:
+            batch_size, seq_length = text_position_ids.shape
+            device = text_position_ids.device
+
+            vision_positions = torch.arange(seq_length, device=device)
+            vision_positions = vision_positions.view(1, 1, -1).expand(3, batch_size, -1)
+
+            cache_offset = cache_position[0] if cache_position is not None else 0
+            delta = (cache_offset + self.model.rope_deltas).to(device)
+            if delta.ndim == 1:
+                delta = delta.unsqueeze(0)
+            if delta.shape[0] != batch_size:
+                repeat_factor = max(1, math.ceil(batch_size / delta.shape[0]))
+                delta = delta.repeat_interleave(repeat_factor, dim=0)[:batch_size]
+
+            vision_positions = vision_positions + delta.to(vision_positions.device)
+            model_inputs["position_ids"] = torch.cat([text_position_ids[None, ...], vision_positions], dim=0)
 
         # After prefill, don't pass pixels again
         if model_inputs["cache_position"] is not None and model_inputs["cache_position"][0] != 0:
@@ -3304,24 +3302,52 @@ class ArlowProcessor(ProcessorMixin):
             index = 0
             for i in range(len(text)):
                 while self.video_token in text[i]:
+                    if index >= len(video_grid_thw):
+                        raise ValueError(
+                            "Not enough video grid metadata to expand placeholders. "
+                            "Check video preprocessing and prompt placeholders."
+                        )
                     # build per-frame blocks
                     video_placeholder = ""
                     frame_seqlen = video_grid_thw[index][1:].prod() // merge_len
+                    num_video_frames = int(video_grid_thw[index][0])
 
                     # compute timestamps if metadata exists, otherwise just omit
                     curr_timestamps = None
                     if timestamp_alignment_flag and video_metadata is not None:
-                        metadata = video_metadata[index]
-                        if getattr(metadata, "fps", None) is None:
+                        if index >= len(video_metadata):
                             logger.warning_once(
-                                "Arlow requires video fps to build timestamp prompts; defaulting to fps=24."
+                                "Video metadata entries are fewer than video placeholders; "
+                                "skipping timestamp prompts for remaining videos."
                             )
-                            metadata.fps = 24 if metadata.fps is None else metadata.fps
-                        curr_timestamps = self._calculate_timestamps(
-                            metadata.frames_indices, metadata.fps, self.video_processor.merge_size
-                        )
+                        else:
+                            metadata = video_metadata[index]
+                            if getattr(metadata, "fps", None) is None:
+                                logger.warning_once(
+                                    "Arlow requires video fps to build timestamp prompts; defaulting to fps=24."
+                                )
+                                metadata.fps = 24
+                            curr_timestamps = self._calculate_timestamps(
+                                metadata.frames_indices, metadata.fps, self.video_processor.merge_size
+                            )
+                            if len(curr_timestamps) < num_video_frames:
+                                if len(curr_timestamps) == 0:
+                                    logger.warning_once(
+                                        "No frame indices available for timestamp alignment; omitting timestamp prompts."
+                                    )
+                                    curr_timestamps = None
+                                else:
+                                    logger.warning_once(
+                                        "Timestamp count is smaller than temporal grid size; "
+                                        "repeating the last timestamp."
+                                    )
+                                    curr_timestamps = curr_timestamps + [curr_timestamps[-1]] * (
+                                        num_video_frames - len(curr_timestamps)
+                                    )
+                            elif len(curr_timestamps) > num_video_frames:
+                                curr_timestamps = curr_timestamps[:num_video_frames]
 
-                    for frame_idx in range(video_grid_thw[index][0]):
+                    for frame_idx in range(num_video_frames):
                         if curr_timestamps is not None:
                             curr_time = curr_timestamps[frame_idx]
                             video_placeholder += f"<{curr_time:.1f} seconds>"
@@ -3337,6 +3363,11 @@ class ArlowProcessor(ProcessorMixin):
                     index += 1
 
                 text[i] = text[i].replace("<|placeholder|>", self.video_token)
+            if index != len(video_grid_thw):
+                logger.warning(
+                    "Some video grid metadata entries were unused during placeholder expansion. "
+                    "This may indicate mismatched prompts or preprocessing configuration."
+                )
 
         return_tensors = output_kwargs["text_kwargs"].pop("return_tensors", None)
         return_mm_token_type_ids = output_kwargs["text_kwargs"].pop("return_mm_token_type_ids", None)

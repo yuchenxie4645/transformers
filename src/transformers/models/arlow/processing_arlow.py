@@ -243,24 +243,52 @@ class ArlowProcessor(ProcessorMixin):
             index = 0
             for i in range(len(text)):
                 while self.video_token in text[i]:
+                    if index >= len(video_grid_thw):
+                        raise ValueError(
+                            "Not enough video grid metadata to expand placeholders. "
+                            "Check video preprocessing and prompt placeholders."
+                        )
                     # build per-frame blocks
                     video_placeholder = ""
                     frame_seqlen = video_grid_thw[index][1:].prod() // merge_len
+                    num_video_frames = int(video_grid_thw[index][0])
 
                     # compute timestamps if metadata exists, otherwise just omit
                     curr_timestamps = None
                     if timestamp_alignment_flag and video_metadata is not None:
-                        metadata = video_metadata[index]
-                        if getattr(metadata, "fps", None) is None:
+                        if index >= len(video_metadata):
                             logger.warning_once(
-                                "Arlow requires video fps to build timestamp prompts; defaulting to fps=24."
+                                "Video metadata entries are fewer than video placeholders; "
+                                "skipping timestamp prompts for remaining videos."
                             )
-                            metadata.fps = 24 if metadata.fps is None else metadata.fps
-                        curr_timestamps = self._calculate_timestamps(
-                            metadata.frames_indices, metadata.fps, self.video_processor.merge_size
-                        )
+                        else:
+                            metadata = video_metadata[index]
+                            if getattr(metadata, "fps", None) is None:
+                                logger.warning_once(
+                                    "Arlow requires video fps to build timestamp prompts; defaulting to fps=24."
+                                )
+                                metadata.fps = 24
+                            curr_timestamps = self._calculate_timestamps(
+                                metadata.frames_indices, metadata.fps, self.video_processor.merge_size
+                            )
+                            if len(curr_timestamps) < num_video_frames:
+                                if len(curr_timestamps) == 0:
+                                    logger.warning_once(
+                                        "No frame indices available for timestamp alignment; omitting timestamp prompts."
+                                    )
+                                    curr_timestamps = None
+                                else:
+                                    logger.warning_once(
+                                        "Timestamp count is smaller than temporal grid size; "
+                                        "repeating the last timestamp."
+                                    )
+                                    curr_timestamps = curr_timestamps + [curr_timestamps[-1]] * (
+                                        num_video_frames - len(curr_timestamps)
+                                    )
+                            elif len(curr_timestamps) > num_video_frames:
+                                curr_timestamps = curr_timestamps[:num_video_frames]
 
-                    for frame_idx in range(video_grid_thw[index][0]):
+                    for frame_idx in range(num_video_frames):
                         if curr_timestamps is not None:
                             curr_time = curr_timestamps[frame_idx]
                             video_placeholder += f"<{curr_time:.1f} seconds>"
@@ -276,6 +304,11 @@ class ArlowProcessor(ProcessorMixin):
                     index += 1
 
                 text[i] = text[i].replace("<|placeholder|>", self.video_token)
+            if index != len(video_grid_thw):
+                logger.warning(
+                    "Some video grid metadata entries were unused during placeholder expansion. "
+                    "This may indicate mismatched prompts or preprocessing configuration."
+                )
 
         return_tensors = output_kwargs["text_kwargs"].pop("return_tensors", None)
         return_mm_token_type_ids = output_kwargs["text_kwargs"].pop("return_mm_token_type_ids", None)

@@ -14,17 +14,17 @@ class ArlowVisionConfig(PreTrainedConfig):
     Configuration for the vision transformer component of Arlow multimodal models.
 
     Args:
-        depth (`int`, *optional*, defaults to 32):
+        depth (`int`, *optional*, defaults to 2):
             Number of hidden layers in the vision transformer.
-        embed_dim (`int`, *optional*, defaults to 1280):
+        embed_dim (`int`, *optional*, defaults to 32):
             Dimensionality of the vision encoder embeddings.
-        hidden_size (`int`, *optional*, defaults to 3584):
+        hidden_size (`int`, *optional*, defaults to 64):
             Dimensionality after vision projection to match text model.
         hidden_act (`str`, *optional*, defaults to `"gelu_pytorch_tanh"`):
             The non-linear activation function in the vision encoder.
         mlp_ratio (`int`, *optional*, defaults to 4):
             Ratio of mlp hidden dim to embedding dim.
-        num_heads (`int`, *optional*, defaults to 16):
+        num_heads (`int`, *optional*, defaults to 4):
             Number of attention heads in the vision transformer.
         in_channels (`int`, *optional*, defaults to 3):
             Number of input image channels.
@@ -244,7 +244,7 @@ class ArlowConfig(PreTrainedConfig):
     Configuration objects inherit from [`PretrainedConfig`] and control model outputs.
 
     Args:
-        vocab_size (`int`, *optional*, defaults to 131072):
+        vocab_size (`int`, *optional*, defaults to 131076):
             Vocabulary size of the model.
         hidden_size (`int`, *optional*, defaults to 2304):
             Dimension of hidden representations.
@@ -258,7 +258,7 @@ class ArlowConfig(PreTrainedConfig):
             Number of key_value heads for Grouped Query Attention.
         hidden_act (`str`, *optional*, defaults to `"silu"`):
             Non-linear activation function.
-        max_position_embeddings (`int`, *optional*, defaults to 2048):
+        max_position_embeddings (`int`, *optional*, defaults to 32768):
             Maximum sequence length.
         initializer_range (`float`, *optional*, defaults to 0.02):
             Standard deviation for weight initialization.
@@ -301,11 +301,11 @@ class ArlowConfig(PreTrainedConfig):
             arguments listed above.
         vision_config (`Union[PreTrainedConfig, dict]`, *optional*):
             Vision backbone configuration.
-        mm_tokens_per_image (`int`, *optional*, defaults to 256):
+        mm_tokens_per_image (`int`, *optional*, defaults to 512):
             Number of tokens per image after vision projection.
-        mm_tokens_per_video (`int`, *optional*, defaults to 128):
+        mm_tokens_per_video (`int`, *optional*, defaults to 1024):
             Number of tokens per video after temporal resampling.
-        video_max_frames (`int`, *optional*, defaults to 64):
+        video_max_frames (`int`, *optional*, defaults to 768):
             Maximum number of video frames to extract.
         video_sample_strategy (`str`, *optional*, defaults to "uniform"):
             Video frame sampling strategy: "uniform", "motion_adaptive", or "fps_based".
@@ -340,7 +340,7 @@ class ArlowConfig(PreTrainedConfig):
 
     def __init__(
         self,
-        vocab_size=131072,
+        vocab_size=131076,
         hidden_size=2304,
         intermediate_size=9216,
         num_hidden_layers=32,

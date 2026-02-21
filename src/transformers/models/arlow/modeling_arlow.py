@@ -2511,37 +2511,35 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
             **kwargs,
         }
 
-        # Prepare 4D packed position_ids: [text; 3D mrope]
-        if "position_ids" not in model_inputs or model_inputs["position_ids"] is None:
-            prefill_stage = (cache_position is not None and cache_position[0] == 0) or cache_length == 0
-            if prefill_stage or getattr(self.model, "rope_deltas", None) is None:
-                vision_positions, rope_deltas = self.model.get_rope_index(
-                    model_inputs.get("input_ids"),
-                    image_grid_thw=image_grid_thw,
-                    video_grid_thw=video_grid_thw,
-                    attention_mask=attention_mask,
-                )
-                self.model.rope_deltas = rope_deltas
-            else:
-                # If text positions are provided, compute vision positions using cached rope_deltas
-                if "position_ids" in model_inputs and model_inputs["position_ids"] is not None:
-                    batch_size, seq_length = model_inputs["position_ids"].shape
-                    device = model_inputs["position_ids"].device
-                    position_ids = torch.arange(seq_length, device=device)
-                    position_ids = position_ids.view(1, 1, -1).expand(3, batch_size, -1)
-                    delta = cache_position[0] + self.model.rope_deltas
-                    delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
-                    vision_positions = position_ids + delta.expand_as(position_ids)
-                else:
-                    vision_positions = None
+        # Keep model-level rope deltas in sync and optionally pack 4D position_ids: [text; 3D mrope]
+        prefill_stage = (cache_position is not None and cache_position[0] == 0) or cache_length == 0
+        if prefill_stage or getattr(self.model, "rope_deltas", None) is None:
+            _, rope_deltas = self.model.get_rope_index(
+                model_inputs.get("input_ids"),
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                attention_mask=attention_mask,
+            )
+            self.model.rope_deltas = rope_deltas
 
-            if (
-                "position_ids" in model_inputs
-                and model_inputs["position_ids"] is not None
-                and vision_positions is not None
-            ):
-                text_positions = model_inputs["position_ids"][None, ...]
-                model_inputs["position_ids"] = torch.cat([text_positions, vision_positions], dim=0)
+        text_position_ids = model_inputs.get("position_ids")
+        if text_position_ids is not None and getattr(self.model, "rope_deltas", None) is not None:
+            batch_size, seq_length = text_position_ids.shape
+            device = text_position_ids.device
+
+            vision_positions = torch.arange(seq_length, device=device)
+            vision_positions = vision_positions.view(1, 1, -1).expand(3, batch_size, -1)
+
+            cache_offset = cache_position[0] if cache_position is not None else 0
+            delta = (cache_offset + self.model.rope_deltas).to(device)
+            if delta.ndim == 1:
+                delta = delta.unsqueeze(0)
+            if delta.shape[0] != batch_size:
+                repeat_factor = max(1, math.ceil(batch_size / delta.shape[0]))
+                delta = delta.repeat_interleave(repeat_factor, dim=0)[:batch_size]
+
+            vision_positions = vision_positions + delta.to(vision_positions.device)
+            model_inputs["position_ids"] = torch.cat([text_position_ids[None, ...], vision_positions], dim=0)
 
         # After prefill, don't pass pixels again
         if model_inputs["cache_position"] is not None and model_inputs["cache_position"][0] != 0:
