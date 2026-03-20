@@ -358,10 +358,10 @@ class ArlowVLRotaryEmbedding(nn.Module):
 
 # Inspired by transformers.models.llama.modeling_llama.rotate_half
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    # Interleave even/odd features: (-x_odd, x_even)
-    x_even = x[..., ::2]
-    x_odd = x[..., 1::2]
-    return torch.stack((-x_odd, x_even), dim=-1).reshape_as(x)
+    """Rotate the hidden states using the standard half-split RoPE layout."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
 
 
 # Inspired by transformers.models.gemma.modeling_gemma.apply_rotary_pos_emb
@@ -1501,15 +1501,8 @@ class ArlowForCausalLM(ArlowTextPreTrainedModel, GenerationMixin):
 
         loss = None
         if labels is not None:
-            # Align labels to sliced logits window before shifting
             labels_window = labels[:, slice_indices]
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels_window[..., 1:].contiguous()
-            loss = F.cross_entropy(
-                shift_logits.view(-1, self.config.vocab_size),
-                shift_labels.view(-1),
-                ignore_index=-100,
-            )
+            loss = self.loss_function(logits=logits, labels=labels_window, vocab_size=self.config.vocab_size, **kwargs)
 
         return CausalLMOutputWithPast(
             loss=loss,
@@ -2442,12 +2435,8 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         loss = None
         if labels is not None:
             labels_window = labels[:, slice_indices]
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels_window[..., 1:].contiguous()
-            loss = F.cross_entropy(
-                shift_logits.view(-1, self.config.vocab_size),
-                shift_labels.view(-1),
-                ignore_index=-100,
+            loss = self.loss_function(
+                logits=logits, labels=labels_window, vocab_size=self.config.text_config.vocab_size, **kwargs
             )
 
         return ArlowMultimodalCausalLMOutputWithPast(

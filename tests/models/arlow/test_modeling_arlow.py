@@ -18,14 +18,20 @@ if is_torch_available():
         ArlowForCausalLM,
         ArlowForQuestionAnswering,
         ArlowForSequenceClassification,
+        ArlowTextConfig,
         ArlowForTokenClassification,
         ArlowModel,
     )
-    from transformers.models.arlow.image_processing_arlow import ArlowImageProcessor
+    from transformers.models.arlow.image_processing_pil_arlow import ArlowImageProcessorPil
     from transformers.models.arlow.modeling_arlow import ArlowTextRotaryEmbedding
 
     if is_torchvision_available():
         from transformers.models.arlow.video_processing_arlow import ArlowVideoProcessor
+
+    def _reference_rotate_half(x):
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
 
 
 class ArlowModelTester(CausalLMModelTester):
@@ -230,6 +236,42 @@ class ArlowIntegrationTest(unittest.TestCase):
                 self.assertIsNotNone(param.grad)
                 break
 
+    def test_causal_lm_uses_shared_loss_function(self):
+        config = ArlowConfig(
+            vocab_size=128,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=64,
+        )
+        model = ArlowForCausalLM(config).to(torch_device).train()
+        if torch.cuda.is_available() and torch_device.startswith("cuda") and torch.cuda.is_bf16_supported():
+            model = model.to(dtype=torch.bfloat16)
+
+        observed = {}
+        default_loss_function = model.loss_function
+
+        def tracking_loss(*args, **kwargs):
+            observed["called"] = True
+            observed["logits_dtype"] = kwargs["logits"].dtype
+            return default_loss_function(*args, **kwargs)
+
+        model.loss_function = tracking_loss
+
+        input_ids = torch.randint(0, config.vocab_size, (2, 12), device=torch_device)
+        labels = input_ids.clone()
+
+        outputs = model(input_ids=input_ids, labels=labels)
+
+        self.assertTrue(observed.get("called", False))
+        self.assertTrue(torch.isfinite(outputs.loss))
+
+        outputs.loss.backward()
+        self.assertIsNotNone(model.lm_head.weight.grad)
+        self.assertTrue(torch.isfinite(model.lm_head.weight.grad).all())
+
     def test_video_processor_temporal_budget(self):
         if not is_torchvision_available():
             self.skipTest("ArlowVideoProcessor requires torchvision.")
@@ -279,7 +321,7 @@ class ArlowIntegrationTest(unittest.TestCase):
         self.assertTrue(np.all((indices >= 0) & (indices < max_frames)))
 
     def test_image_pan_and_scan_generates_crops(self):
-        image_processor = ArlowImageProcessor(
+        image_processor = ArlowImageProcessorPil(
             do_pan_and_scan=True,
             pan_and_scan_min_crop_size=64,
             pan_and_scan_min_ratio_to_activate=1.0,
@@ -312,6 +354,17 @@ class ArlowIntegrationTest(unittest.TestCase):
             [sec / vision_total for sec in vision_sections],
         ):
             self.assertAlmostEqual(text_ratio, vision_ratio, delta=0.1)
+
+    def test_rope_validation_ignores_mrope_sections(self):
+        rope_parameters = {"rope_type": "default", "rope_theta": 10000.0, "mrope_sections": [4, 6, 6]}
+
+        text_config = ArlowTextConfig(rope_parameters=dict(rope_parameters))
+        config = ArlowConfig(rope_parameters=dict(rope_parameters))
+
+        self.assertEqual(text_config.ignore_keys_at_rope_validation, {"mrope_sections"})
+        self.assertEqual(config.ignore_keys_at_rope_validation, {"mrope_sections"})
+        self.assertIn("mrope_sections", text_config.rope_parameters)
+        self.assertIn("mrope_sections", config.rope_parameters)
 
     @slow
     def test_model_sliding_window_attention(self):
@@ -674,6 +727,44 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
                 self.assertIsNotNone(param.grad)
                 break
 
+    def test_conditional_generation_uses_shared_loss_function(self):
+        from transformers import ArlowForConditionalGeneration
+
+        config = ArlowConfig(
+            vocab_size=128,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=64,
+        )
+        model = ArlowForConditionalGeneration(config).to(torch_device).train()
+        if torch.cuda.is_available() and torch_device.startswith("cuda") and torch.cuda.is_bf16_supported():
+            model = model.to(dtype=torch.bfloat16)
+
+        observed = {}
+        default_loss_function = model.loss_function
+
+        def tracking_loss(*args, **kwargs):
+            observed["called"] = True
+            observed["logits_dtype"] = kwargs["logits"].dtype
+            return default_loss_function(*args, **kwargs)
+
+        model.loss_function = tracking_loss
+
+        input_ids = torch.randint(0, config.vocab_size, (2, 12), device=torch_device)
+        labels = input_ids.clone()
+
+        outputs = model(input_ids=input_ids, labels=labels)
+
+        self.assertTrue(observed.get("called", False))
+        self.assertTrue(torch.isfinite(outputs.loss))
+
+        outputs.loss.backward()
+        self.assertIsNotNone(model.lm_head.weight.grad)
+        self.assertTrue(torch.isfinite(model.lm_head.weight.grad).all())
+
     def test_model_multimodal_generation(self):
         """Test generation with multimodal model."""
         from transformers import ArlowForConditionalGeneration, ArlowVisionConfig
@@ -794,6 +885,38 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
             outputs = model(input_ids=input_ids, position_ids=position_ids)
 
         self.assertEqual(outputs.last_hidden_state.shape[:2], (batch, seq))
+
+    def test_text_rotary_matches_reference_half_split(self):
+        from transformers.models.arlow.modeling_arlow import apply_rotary_pos_emb
+
+        config = ArlowConfig(
+            vocab_size=128,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=64,
+        )
+        rotary = ArlowTextRotaryEmbedding(config).to(torch_device)
+
+        batch_size, seq_len = 2, 6
+        anchor = torch.zeros(batch_size, seq_len, config.hidden_size, device=torch_device)
+        position_ids = torch.arange(seq_len, device=torch_device).unsqueeze(0).expand(batch_size, -1)
+        cos, sin = rotary(anchor, position_ids)
+
+        head_dim = config.hidden_size // config.num_attention_heads
+        query = torch.randn(batch_size, config.num_attention_heads, seq_len, head_dim, device=torch_device)
+        key = torch.randn_like(query)
+
+        rotated_q, rotated_k = apply_rotary_pos_emb(query, key, cos, sin)
+        expected_cos = cos.unsqueeze(1)
+        expected_sin = sin.unsqueeze(1)
+        expected_q = (query * expected_cos) + (_reference_rotate_half(query) * expected_sin)
+        expected_k = (key * expected_cos) + (_reference_rotate_half(key) * expected_sin)
+
+        torch.testing.assert_close(rotated_q, expected_q)
+        torch.testing.assert_close(rotated_k, expected_k)
 
     def test_vision_fa2_dispatch_runs_when_available(self):
         """If FA2 is available, ensure vision path can dispatch without errors."""

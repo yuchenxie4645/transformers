@@ -137,6 +137,7 @@ class ArlowTextConfig(PreTrainedConfig):
 
     model_type = "arlow_text"
     base_config_key = "text_config"
+    ignore_keys_at_rope_validation = {"mrope_sections"}
 
     def __init__(
         self,
@@ -206,7 +207,7 @@ class ArlowTextConfig(PreTrainedConfig):
         if self.rope_parameters is not None and "type" in self.rope_parameters:
             self.rope_parameters["rope_type"] = self.rope_parameters["type"]
         self.standardize_rope_params()
-        self.validate_rope(ignore_keys={"mrope_sections"})
+        self.validate_rope()
 
         # Layer types configuration (supports full/sliding attention)
         self.use_sliding_window = use_sliding_window
@@ -337,6 +338,7 @@ class ArlowConfig(PreTrainedConfig):
     model_type = "arlow"
     sub_configs = {"vision_config": ArlowVisionConfig, "text_config": ArlowTextConfig}
     keys_to_ignore_at_inference = ["past_key_values"]
+    ignore_keys_at_rope_validation = {"mrope_sections"}
 
     def __init__(
         self,
@@ -482,7 +484,7 @@ class ArlowConfig(PreTrainedConfig):
         if self.rope_parameters is not None and "type" in self.rope_parameters:
             self.rope_parameters["rope_type"] = self.rope_parameters["type"]
         self.standardize_rope_params()
-        self.validate_rope(ignore_keys={"mrope_sections"})
+        self.validate_rope()
 
         self.layer_types = text_config.layer_types
         if self.layer_types is None:

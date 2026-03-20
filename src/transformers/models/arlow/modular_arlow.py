@@ -180,6 +180,7 @@ class ArlowTextConfig(PreTrainedConfig):
 
     model_type = "arlow_text"
     base_config_key = "text_config"
+    ignore_keys_at_rope_validation = {"mrope_sections"}
 
     def __init__(
         self,
@@ -249,7 +250,7 @@ class ArlowTextConfig(PreTrainedConfig):
         if self.rope_parameters is not None and "type" in self.rope_parameters:
             self.rope_parameters["rope_type"] = self.rope_parameters["type"]
         self.standardize_rope_params()
-        self.validate_rope(ignore_keys={"mrope_sections"})
+        self.validate_rope()
 
         # Layer types configuration (supports full/sliding attention)
         self.use_sliding_window = use_sliding_window
@@ -380,6 +381,7 @@ class ArlowConfig(PreTrainedConfig):
     model_type = "arlow"
     sub_configs = {"vision_config": ArlowVisionConfig, "text_config": ArlowTextConfig}
     keys_to_ignore_at_inference = ["past_key_values"]
+    ignore_keys_at_rope_validation = {"mrope_sections"}
 
     def __init__(
         self,
@@ -525,7 +527,7 @@ class ArlowConfig(PreTrainedConfig):
         if self.rope_parameters is not None and "type" in self.rope_parameters:
             self.rope_parameters["rope_type"] = self.rope_parameters["type"]
         self.standardize_rope_params()
-        self.validate_rope(ignore_keys={"mrope_sections"})
+        self.validate_rope()
 
         self.layer_types = text_config.layer_types
         if self.layer_types is None:
@@ -768,10 +770,10 @@ class ArlowTextRotaryEmbedding(nn.Module):
 
 # Inspired by transformers.models.llama.modeling_llama.rotate_half
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    # Interleave even/odd features: (-x_odd, x_even)
-    x_even = x[..., ::2]
-    x_odd = x[..., 1::2]
-    return torch.stack((-x_odd, x_even), dim=-1).reshape_as(x)
+    """Rotate the hidden states using the standard half-split RoPE layout."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
 
 
 def apply_interleaved_mrope(freqs: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
@@ -2053,15 +2055,8 @@ class ArlowForCausalLM(ArlowTextPreTrainedModel, GenerationMixin):
 
         loss = None
         if labels is not None:
-            # Align labels to sliced logits window before shifting
             labels_window = labels[:, slice_indices]
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels_window[..., 1:].contiguous()
-            loss = F.cross_entropy(
-                shift_logits.view(-1, self.config.vocab_size),
-                shift_labels.view(-1),
-                ignore_index=-100,
-            )
+            loss = self.loss_function(logits=logits, labels=labels_window, vocab_size=self.config.vocab_size, **kwargs)
 
         return CausalLMOutputWithPast(
             loss=loss,
@@ -2967,12 +2962,8 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         loss = None
         if labels is not None:
             labels_window = labels[:, slice_indices]
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels_window[..., 1:].contiguous()
-            loss = F.cross_entropy(
-                shift_logits.view(-1, self.config.vocab_size),
-                shift_labels.view(-1),
-                ignore_index=-100,
+            loss = self.loss_function(
+                logits=logits, labels=labels_window, vocab_size=self.config.text_config.vocab_size, **kwargs
             )
 
         return ArlowMultimodalCausalLMOutputWithPast(

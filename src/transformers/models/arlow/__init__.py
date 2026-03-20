@@ -7,7 +7,7 @@ from ...utils.import_utils import define_import_structure
 if TYPE_CHECKING:
     from .configuration_arlow import *
     from .image_processing_arlow import *
-    from .image_processing_arlow_fast import *
+    from .image_processing_pil_arlow import *
     from .modeling_arlow import *
     from .processing_arlow import *
     from .tokenization_arlow import *

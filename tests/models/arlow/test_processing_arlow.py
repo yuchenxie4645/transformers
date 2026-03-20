@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from transformers.models.arlow.image_processing_arlow import ArlowImageProcessor
+from transformers.models.arlow.image_processing_pil_arlow import ArlowImageProcessorPil
 from transformers.models.arlow.processing_arlow import ArlowProcessor
 from transformers.models.arlow.tokenization_arlow import ArlowTokenizer
 from transformers.testing_utils import require_torch, require_vision
@@ -15,15 +16,14 @@ from transformers.utils import is_torchvision_available
 
 
 if is_torchvision_available():
-    from transformers.models.arlow.image_processing_arlow_fast import ArlowImageProcessorFast
     from transformers.models.arlow.video_processing_arlow import ArlowVideoProcessor
 
 
 @pytest.mark.parametrize("fast", [False, True])
 def test_image_processor_preprocess_and_grid(fast):
     if fast and not is_torchvision_available():
-        pytest.skip("ArlowImageProcessorFast requires torchvision.")
-    processor = ArlowImageProcessorFast() if fast else ArlowImageProcessor()
+        pytest.skip("ArlowImageProcessor requires torchvision.")
+    processor = ArlowImageProcessor() if fast else ArlowImageProcessorPil()
     # make two images with different shapes
     img1 = torch.randint(0, 255, (3, 320, 480), dtype=torch.uint8)
     img2 = torch.randint(0, 255, (3, 256, 256), dtype=torch.uint8)
@@ -35,8 +35,8 @@ def test_image_processor_preprocess_and_grid(fast):
 
 def test_get_number_of_image_patches_matches_preprocess():
     if not is_torchvision_available():
-        pytest.skip("ArlowImageProcessorFast requires torchvision.")
-    processor = ArlowImageProcessorFast()
+        pytest.skip("ArlowImageProcessor requires torchvision.")
+    processor = ArlowImageProcessor()
     img = torch.randint(0, 255, (3, 320, 640), dtype=torch.uint8)
     out = processor.preprocess([img], return_tensors="pt")
     grid = out["image_grid_thw"][0]
@@ -67,7 +67,7 @@ def test_processor_placeholder_sizing(tmp_path):
     (vp := tmp_path / "vocab.json").write_text(str({k: v for k, v in vocab.items()}))
     (mp := tmp_path / "merges.txt").write_text(merges)
     tok = ArlowTokenizer(vocab_file=str(vp), merges_file=str(mp))
-    ip = ArlowImageProcessorFast()
+    ip = ArlowImageProcessor()
     vidp = ArlowVideoProcessor()
     proc = ArlowProcessor(image_processor=ip, tokenizer=tok, video_processor=vidp)
     text = ["hello <image> and <|vision_start|><video><|vision_end|>"]
@@ -115,7 +115,7 @@ class ArlowProcessorTest(unittest.TestCase):
             f.write("#version: 0.2\nh e\nl l\no o\n")
 
         cls.tokenizer = ArlowTokenizer(vocab_file=str(vocab_path), merges_file=str(merges_path))
-        cls.image_processor = ArlowImageProcessorFast()
+        cls.image_processor = ArlowImageProcessor()
         cls.video_processor = ArlowVideoProcessor()
 
     def test_processor_initialization(self):

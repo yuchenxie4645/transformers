@@ -19,7 +19,7 @@ if is_torch_available():
 if is_vision_available():
     from PIL import Image
 
-    from transformers import ArlowImageProcessor
+    from transformers import ArlowImageProcessor, ArlowImageProcessorPil, AutoImageProcessor
 
     if is_torchvision_available():
         from transformers import ArlowImageProcessorFast
@@ -104,12 +104,21 @@ class ArlowImageProcessingTester:
 @require_torch
 @require_vision
 class ArlowImageProcessingTest(ImageProcessingTestMixin, unittest.TestCase):
-    image_processing_class = ArlowImageProcessor if is_vision_available() else None
-    fast_image_processing_class = ArlowImageProcessorFast if is_torchvision_available() else None
+    image_processing_class = ArlowImageProcessorPil if is_vision_available() else None
+    fast_image_processing_class = ArlowImageProcessor if is_torchvision_available() else None
 
     def setUp(self):
         super().setUp()
         self.image_processor_tester = ArlowImageProcessingTester(self)
+        # Keep Arlow's custom tests compatible with the shared backend-aware image processing test mixin.
+        self.image_processor_list = list(self.image_processing_classes.values())
+        self.image_processing_class = self.image_processing_classes.get("pil")
+        self.fast_image_processing_class = self.image_processing_classes.get("torchvision")
+        self.test_slow_image_processor = self.image_processing_class is not None
+        self.test_fast_image_processor = self.fast_image_processing_class is not None
+
+    def _assert_slow_fast_tensors_equivalence(self, tensor1, tensor2):
+        self._assert_tensors_equivalence(tensor1, tensor2)
 
     @property
     def image_processor_dict(self):
@@ -140,6 +149,37 @@ class ArlowImageProcessingTest(ImageProcessingTestMixin, unittest.TestCase):
             )
             self.assertEqual(image_processor.min_pixels, 256 * 256)
             self.assertEqual(image_processor.max_pixels, 640 * 640)
+
+    def test_explicit_pil_backend_roundtrip(self):
+        image_processor = ArlowImageProcessorPil(**self.image_processor_dict)
+        self.assertEqual(image_processor.backend, "pil")
+        self.assertEqual(image_processor.to_dict()["image_processor_type"], "ArlowImageProcessor")
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            image_processor.save_pretrained(tmpdirname)
+
+            image_processor_pil = AutoImageProcessor.from_pretrained(tmpdirname, backend="pil")
+            self.assertIsInstance(image_processor_pil, ArlowImageProcessorPil)
+
+            if is_torchvision_available():
+                image_processor_torchvision = AutoImageProcessor.from_pretrained(tmpdirname, backend="torchvision")
+                self.assertIsInstance(image_processor_torchvision, ArlowImageProcessor)
+
+    def test_legacy_fast_alias_matches_torchvision_backend(self):
+        if not is_torchvision_available():
+            self.skipTest("ArlowImageProcessorFast requires torchvision.")
+
+        canonical_processor = ArlowImageProcessor(**self.image_processor_dict)
+        legacy_fast_processor = ArlowImageProcessorFast(**self.image_processor_dict)
+        image = Image.new("RGB", (224, 224))
+
+        canonical_outputs = canonical_processor(image, return_tensors="pt")
+        legacy_fast_outputs = legacy_fast_processor(image, return_tensors="pt")
+
+        torch.testing.assert_close(canonical_outputs.pixel_values, legacy_fast_outputs.pixel_values)
+        torch.testing.assert_close(
+            canonical_outputs.image_grid_thw.float(), legacy_fast_outputs.image_grid_thw.float()
+        )
 
     def test_select_best_resolution(self):
         # Test with a final resize resolution
