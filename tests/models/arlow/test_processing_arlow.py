@@ -60,8 +60,8 @@ def test_video_processor_grid_and_values():
 
 def test_processor_placeholder_sizing(tmp_path):
     if not is_torchvision_available():
-        pytest.skip("Arlow fast/image-video processor stack requires torchvision.")
-    # build a tiny tokenizer vocab to allow conversion
+        pytest.skip("Arlow image-video processor stack requires torchvision.")
+    # build a tiny tokenizer vocab to allow loading
     vocab = {"<|endoftext|>": 0, "<image>": 1, "<video>": 2, "<|vision_start|>": 3, "<|vision_end|>": 4, "hello": 5}
     merges = "#version: 0.2\na b\n"
     (vp := tmp_path / "vocab.json").write_text(str({k: v for k, v in vocab.items()}))
@@ -79,7 +79,7 @@ def test_processor_placeholder_sizing(tmp_path):
 
 @require_torch
 @require_vision
-@unittest.skipUnless(is_torchvision_available(), "Arlow fast/image-video processor stack requires torchvision.")
+@unittest.skipUnless(is_torchvision_available(), "Arlow image-video processor stack requires torchvision.")
 class ArlowProcessorTest(unittest.TestCase):
     """Comprehensive test suite for ArlowProcessor."""
 

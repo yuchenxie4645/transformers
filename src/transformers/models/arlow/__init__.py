@@ -11,7 +11,6 @@ if TYPE_CHECKING:
     from .modeling_arlow import *
     from .processing_arlow import *
     from .tokenization_arlow import *
-    from .tokenization_arlow_fast import *
     from .video_processing_arlow import *
 else:
     import sys

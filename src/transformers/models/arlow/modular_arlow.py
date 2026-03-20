@@ -3089,7 +3089,7 @@ class ArlowProcessor(ProcessorMixin):
 
     Args:
         image_processor: Required image processor.
-        tokenizer: Required tokenizer (`ArlowTokenizer` or `ArlowTokenizerFast`).
+        tokenizer: Required tokenizer (`ArlowTokenizer`).
         video_processor: Required video processor for video support.
         chat_template: Optional chat template string.
         timestamp_alignment: Whether to inject timestamp prompts for video frames. Defaults to `False`.
@@ -3098,7 +3098,7 @@ class ArlowProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer", "video_processor"]
     image_processor_class = "AutoImageProcessor"
     video_processor_class = "AutoVideoProcessor"
-    tokenizer_class = ("ArlowTokenizer", "ArlowTokenizerFast")
+    tokenizer_class = "ArlowTokenizer"
 
     def __init__(
         self,
