@@ -7,7 +7,6 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn.functional as F
-from packaging import version
 from torch import nn
 from torch.nn import LayerNorm
 
@@ -40,7 +39,6 @@ from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import MultiModalData, ProcessingKwargs, ProcessorMixin, Unpack
 from ...tokenization_utils_base import PreTokenizedInput, TextInput
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
-from ...utils.import_utils import get_torch_version
 from ...video_utils import VideoInput
 
 
@@ -649,32 +647,24 @@ class ArlowMultimodalCausalLMOutputWithPast(ModelOutput):
     rope_deltas: torch.LongTensor | None = None
 
 
-if version.parse(get_torch_version()) >= version.parse("2.3.0"):
+@use_kernel_forward_from_hub("RMSNorm")
+# Inspired by transformers.models.gemma.modeling_gemma.GemmaRMSNorm
+class ArlowRMSNorm(nn.Module):
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
 
-    # Inspired by transformers.models.gemma.modeling_gemma.GemmaRMSNorm
-    class ArlowRMSNorm(nn.RMSNorm):
-        def __init__(self, hidden_size: int, eps: float = 1e-6):
-            super().__init__(normalized_shape=hidden_size, eps=eps, elementwise_affine=True)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        hidden_states = hidden_states * self.weight.to(torch.float32)
+        return hidden_states.to(input_dtype)
 
-else:
-
-    @use_kernel_forward_from_hub("RMSNorm")
-    # Inspired by transformers.models.gemma.modeling_gemma.GemmaRMSNorm
-    class ArlowRMSNorm(nn.Module):
-        def __init__(self, hidden_size: int, eps: float = 1e-6):
-            super().__init__()
-            self.weight = nn.Parameter(torch.ones(hidden_size))
-            self.variance_epsilon = eps
-
-        def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-            input_dtype = hidden_states.dtype
-            hidden_states = hidden_states.to(torch.float32)
-            variance = hidden_states.pow(2).mean(-1, keepdim=True)
-            hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-            return self.weight * hidden_states.to(input_dtype)
-
-        def extra_repr(self):
-            return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLRotaryEmbedding
 class ArlowTextRotaryEmbedding(nn.Module):
@@ -1910,7 +1900,7 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
             # Prepare mask arguments
             mask_kwargs = {
                 "config": self.config,
-                "input_embeds": inputs_embeds,
+                "inputs_embeds": inputs_embeds,
                 "attention_mask": attention_mask,
                 "cache_position": cache_position,
                 "past_key_values": past_key_values,

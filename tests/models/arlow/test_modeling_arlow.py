@@ -3,7 +3,7 @@
 import unittest
 
 from transformers import is_torch_available
-from transformers.testing_utils import require_torch, slow, torch_device
+from transformers.testing_utils import require_torch, require_torch_bf16, slow, torch_device
 from transformers.utils import is_torchvision_available
 
 from ...causal_lm_tester import CausalLMModelTest, CausalLMModelTester
@@ -23,7 +23,7 @@ if is_torch_available():
         ArlowModel,
     )
     from transformers.models.arlow.image_processing_pil_arlow import ArlowImageProcessorPil
-    from transformers.models.arlow.modeling_arlow import ArlowTextRotaryEmbedding
+    from transformers.models.arlow.modeling_arlow import ArlowRMSNorm, ArlowTextRotaryEmbedding
 
     if is_torchvision_available():
         from transformers.models.arlow.video_processing_arlow import ArlowVideoProcessor
@@ -271,6 +271,70 @@ class ArlowIntegrationTest(unittest.TestCase):
         outputs.loss.backward()
         self.assertIsNotNone(model.lm_head.weight.grad)
         self.assertTrue(torch.isfinite(model.lm_head.weight.grad).all())
+
+    @require_torch_bf16
+    def test_rmsnorm_preserves_bfloat16_dtype(self):
+        norm = ArlowRMSNorm(16).to(torch_device)
+        hidden_states = torch.randn(2, 4, 16, dtype=torch.bfloat16, device=torch_device, requires_grad=True)
+
+        output = norm(hidden_states)
+
+        self.assertEqual(output.dtype, hidden_states.dtype)
+        self.assertTrue(torch.isfinite(output).all())
+
+        output.float().square().mean().backward()
+
+        self.assertIsNotNone(hidden_states.grad)
+        self.assertIsNotNone(norm.weight.grad)
+        self.assertTrue(torch.isfinite(hidden_states.grad).all())
+        self.assertTrue(torch.isfinite(norm.weight.grad).all())
+
+    @require_torch_bf16
+    def test_causal_lm_bfloat16_first_backward_stays_finite(self):
+        for attn_impl in ["eager", "sdpa"]:
+            for gradient_checkpointing in [False, True]:
+                with self.subTest(attn_implementation=attn_impl, gradient_checkpointing=gradient_checkpointing):
+                    config = ArlowTextConfig(
+                        vocab_size=128,
+                        hidden_size=64,
+                        intermediate_size=128,
+                        num_hidden_layers=2,
+                        num_attention_heads=4,
+                        num_key_value_heads=4,
+                        max_position_embeddings=64,
+                        bos_token_id=1,
+                        eos_token_id=2,
+                        pad_token_id=0,
+                        use_cache=False,
+                        tie_word_embeddings=False,
+                    )
+                    config._attn_implementation = attn_impl
+
+                    model = ArlowForCausalLM(config).to(torch_device).train().to(dtype=torch.bfloat16)
+                    if gradient_checkpointing:
+                        model.gradient_checkpointing_enable()
+
+                    input_ids = torch.randint(0, config.vocab_size, (2, 16), device=torch_device)
+                    attention_mask = torch.ones_like(input_ids)
+                    labels = input_ids.clone()
+
+                    outputs = model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels,
+                        use_cache=False,
+                    )
+
+                    self.assertTrue(torch.isfinite(outputs.loss))
+
+                    outputs.loss.backward()
+
+                    self.assertIsNotNone(model.model.embed_tokens.weight.grad)
+                    self.assertIsNotNone(model.model.layers[0].input_layernorm.weight.grad)
+                    self.assertIsNotNone(model.model.layers[0].mlp.gate_proj.weight.grad)
+                    self.assertTrue(torch.isfinite(model.model.embed_tokens.weight.grad).all())
+                    self.assertTrue(torch.isfinite(model.model.layers[0].input_layernorm.weight.grad).all())
+                    self.assertTrue(torch.isfinite(model.model.layers[0].mlp.gate_proj.weight.grad).all())
 
     def test_video_processor_temporal_budget(self):
         if not is_torchvision_available():
