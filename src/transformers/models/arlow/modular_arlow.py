@@ -2669,6 +2669,9 @@ class ArlowModel(ArlowPreTrainedModel):
                 Video grid dimensions as `[temporal, height, width]` for each video in the batch.
             rope_deltas (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
                 The rope index difference between sequence length and multimodal rope for M-ROPE.
+            cache_position (`torch.LongTensor` of shape `(sequence_length,)`, *optional*):
+                Indices depicting the position of the input sequence tokens in the sequence. It is used to
+                update the cache in the correct position and to infer the complete sequence length.
         """
         # Get text embeddings
         if inputs_embeds is None:
@@ -2919,6 +2922,9 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
                 Video grid dimensions as `[temporal, height, width]` for each video in the batch.
             rope_deltas (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
                 The rope index difference between sequence length and multimodal rope for M-ROPE.
+            cache_position (`torch.LongTensor` of shape `(sequence_length,)`, *optional*):
+                Indices depicting the position of the input sequence tokens in the sequence. It is used to
+                update the cache in the correct position and to infer the complete sequence length.
 
         Example:
         ```python
