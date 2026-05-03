@@ -173,6 +173,10 @@ class _ArlowImageProcessorMixin:
 
     def __call__(self, images: ImageInput, *args, **kwargs: Unpack[ArlowImageProcessorKwargs]) -> BatchFeature:
         batch_feature = self.preprocess(images, *args, **kwargs)
+        return batch_feature
+
+    def preprocess(self, images: ImageInput, *args, **kwargs: Unpack[ArlowImageProcessorKwargs]) -> BatchFeature:
+        batch_feature = super().preprocess(images, *args, **kwargs)
         if "pixel_values" in batch_feature and "image_grid_thw" in batch_feature:
             batch_feature["pixel_values"] = self._flatten_unpadded_pixel_values(
                 batch_feature["pixel_values"], batch_feature["image_grid_thw"]
@@ -360,14 +364,13 @@ class ArlowImageProcessor(_ArlowImageProcessorMixin, TorchvisionBackend):
                 grid_t,
                 temporal_patch_size,
                 channel,
-                grid_h // merge_size,
-                merge_size,
+                grid_h,
                 patch_size,
-                grid_w // merge_size,
-                merge_size,
+                grid_w,
                 patch_size,
             )
-            patches = patches.permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
+            # Row-major token order: T, H, W. Feature order: C, temporal_patch, patch_h, patch_w.
+            patches = patches.permute(0, 1, 4, 6, 3, 2, 5, 7).contiguous()
             flatten_patches = patches.reshape(
                 batch_size,
                 grid_t * grid_h * grid_w,

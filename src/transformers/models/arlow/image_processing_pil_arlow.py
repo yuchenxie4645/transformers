@@ -112,14 +112,13 @@ class ArlowImageProcessorPil(_ArlowImageProcessorMixin, PilBackend):
                 grid_t,
                 temporal_patch_size,
                 channel,
-                grid_h // merge_size,
-                merge_size,
+                grid_h,
                 patch_size,
-                grid_w // merge_size,
-                merge_size,
+                grid_w,
                 patch_size,
             )
-            patches = patches.transpose(0, 3, 6, 4, 7, 2, 1, 5, 8)
+            # Row-major token order: T, H, W. Feature order: C, temporal_patch, patch_h, patch_w.
+            patches = patches.transpose(0, 3, 5, 2, 1, 4, 6)
             flatten_patches = patches.reshape(
                 grid_t * grid_h * grid_w,
                 channel * temporal_patch_size * patch_size * patch_size,
@@ -128,19 +127,11 @@ class ArlowImageProcessorPil(_ArlowImageProcessorMixin, PilBackend):
             processed_grids.append([grid_t, grid_h, grid_w])
 
         if len(processed_patches) > 0:
-            max_patches = max(patches.shape[0] for patches in processed_patches)
-            feature_size = processed_patches[0].shape[-1]
-            padded = []
-            for patches in processed_patches:
-                if patches.shape[0] < max_patches:
-                    padding = np.zeros((max_patches - patches.shape[0], feature_size), dtype=patches.dtype)
-                    patches = np.concatenate([patches, padding], axis=0)
-                padded.append(patches)
-            pixel_values = np.stack(padded, axis=0)
+            pixel_values = np.concatenate(processed_patches, axis=0)
             image_grid_thw = np.asarray(processed_grids, dtype=np.int64)
         else:
             feature_size = 3 * temporal_patch_size * patch_size * patch_size
-            pixel_values = np.zeros((0, 0, feature_size), dtype=np.float32)
+            pixel_values = np.zeros((0, feature_size), dtype=np.float32)
             image_grid_thw = np.zeros((0, 3), dtype=np.int64)
 
         return BatchFeature(

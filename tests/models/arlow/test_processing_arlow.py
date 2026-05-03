@@ -29,8 +29,26 @@ def test_image_processor_preprocess_and_grid(fast):
     img2 = torch.randint(0, 255, (3, 256, 256), dtype=torch.uint8)
     out = processor.preprocess([img1, img2], return_tensors="pt")
     assert "pixel_values" in out and "image_grid_thw" in out
-    assert out["pixel_values"].ndim == 3
-    assert out["image_grid_thw"].shape[-1] == 3
+    _assert_packed_image_output(out, processor)
+
+
+def _raw_patch_count(grid_thw):
+    if hasattr(grid_thw, "detach"):
+        grid_thw = grid_thw.detach().cpu()
+    return int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum().item())
+
+
+def _assert_packed_image_output(out, processor):
+    pixel_values = out["pixel_values"]
+    grid_thw = out["image_grid_thw"]
+
+    assert pixel_values.ndim == 2
+    assert grid_thw.ndim == 2
+    assert grid_thw.shape[-1] == 3
+    assert pixel_values.shape[0] == _raw_patch_count(grid_thw)
+
+    expected_feature_dim = 3 * processor.temporal_patch_size * processor.patch_size * processor.patch_size
+    assert pixel_values.shape[-1] == expected_feature_dim
 
 
 def test_get_number_of_image_patches_matches_preprocess():
@@ -54,18 +72,27 @@ def test_video_processor_grid_and_values():
     video = torch.randint(0, 255, (8, 3, 128, 128), dtype=torch.uint8)
     out = vp.preprocess([video], return_tensors="pt", patch_size=14, temporal_patch_size=2, merge_size=2)
     assert "pixel_values_videos" in out and "video_grid_thw" in out
-    assert out["pixel_values_videos"].ndim == 3
+    assert out["pixel_values_videos"].ndim == 2
     assert out["video_grid_thw"].shape[-1] == 3
+    assert out["pixel_values_videos"].shape[0] == _raw_patch_count(out["video_grid_thw"])
 
 
 def test_processor_placeholder_sizing(tmp_path):
     if not is_torchvision_available():
         pytest.skip("Arlow image-video processor stack requires torchvision.")
     # build a tiny tokenizer vocab to allow loading
-    vocab = {"<|endoftext|>": 0, "<image>": 1, "<video>": 2, "<|vision_start|>": 3, "<|vision_end|>": 4, "hello": 5}
+    vocab = {
+        "<|endoftext|>": 0,
+        "<image>": 1,
+        "<video>": 2,
+        "<|vision_start|>": 3,
+        "<|vision_end|>": 4,
+        "hello": 5,
+        "and": 6,
+    }
     merges = "#version: 0.2\na b\n"
-    (vp := tmp_path / "vocab.json").write_text(str({k: v for k, v in vocab.items()}))
-    (mp := tmp_path / "merges.txt").write_text(merges)
+    (vp := tmp_path / "vocab.json").write_text(json.dumps(vocab), encoding="utf-8")
+    (mp := tmp_path / "merges.txt").write_text(merges, encoding="utf-8")
     tok = ArlowTokenizer(vocab_file=str(vp), merges_file=str(mp))
     ip = ArlowImageProcessor()
     vidp = ArlowVideoProcessor()

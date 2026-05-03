@@ -1,6 +1,7 @@
 """Testing suite for Arlow video processor."""
 
 import json
+import math
 import tempfile
 import unittest
 
@@ -18,6 +19,31 @@ if is_torch_available():
 
 if is_vision_available() and is_torchvision_available():
     from transformers import ArlowVideoProcessor
+
+
+def _raw_patch_count(grid_thw):
+    if hasattr(grid_thw, "detach"):
+        grid_thw = grid_thw.detach().cpu()
+    return int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum().item())
+
+
+def _merged_token_count(grid_thw, merge_size):
+    if hasattr(grid_thw, "detach"):
+        grid_thw = grid_thw.detach().cpu()
+    return int((grid_thw[:, 0] * (grid_thw[:, 1] // merge_size) * (grid_thw[:, 2] // merge_size)).sum().item())
+
+
+def _assert_packed_video_output(testcase, outputs, processor):
+    pixel_values = outputs["pixel_values_videos"]
+    grid_thw = outputs["video_grid_thw"]
+
+    testcase.assertEqual(pixel_values.ndim, 2)
+    testcase.assertEqual(grid_thw.ndim, 2)
+    testcase.assertEqual(grid_thw.shape[-1], 3)
+    testcase.assertEqual(pixel_values.shape[0], _raw_patch_count(grid_thw))
+
+    expected_feature_dim = 3 * processor.temporal_patch_size * processor.patch_size * processor.patch_size
+    testcase.assertEqual(pixel_values.shape[-1], expected_feature_dim)
 
 
 class ArlowVideoProcessingTester:
@@ -96,8 +122,7 @@ class ArlowVideoProcessingTester:
                 image_std=1.0,
             )
         pv = enc.pixel_values_videos
-        # Return (patches, features)
-        return [pv.shape[1], pv.shape[2]]
+        return list(pv.shape)
 
 
 @require_torch
@@ -155,14 +180,8 @@ class ArlowVideoProcessingTest(VideoProcessingTestMixin, unittest.TestCase):
                 input_data_format="channels_last",
                 image_mean=0.0,
                 image_std=1.0,
-            )[self.input_name]
-
-            # For Arlow, output is (batch, patches, features) where features = hidden_dim
-            # The number of patches should be same regardless of input channels (converted to RGB)
-            self.assertEqual(len(encoded_videos.shape), 3)
-            self.assertEqual(encoded_videos.shape[0], 1)  # batch
-            self.assertGreater(encoded_videos.shape[1], 0)  # patches
-            self.assertGreater(encoded_videos.shape[2], 0)  # features
+            )
+            _assert_packed_video_output(self, encoded_videos, video_processor)
 
     def test_video_processor_properties(self):
         video_processor = self.video_processing_class(**self.video_processor_dict)
@@ -188,10 +207,50 @@ class ArlowVideoProcessingTest(VideoProcessingTestMixin, unittest.TestCase):
         encoded_videos = video_processor(video_inputs[0], return_tensors="pt")[self.input_name]
         encoded_videos_batched = video_processor(video_inputs, return_tensors="pt")[self.input_name]
         # Should keep all frames (reflected in token count after temporal merge)
-        self.assertGreater(encoded_videos.shape[1], 0)
-        self.assertGreater(encoded_videos_batched.shape[1], 0)
+        self.assertGreater(encoded_videos.shape[0], 0)
+        self.assertGreater(encoded_videos_batched.shape[0], 0)
         # Restore
         self.video_processor_tester.num_frames = prev_num_frames
+
+    def _run_packed_video_call_test(self, return_tensors):
+        video_processor = self.video_processing_class(**self.video_processor_dict)
+
+        if return_tensors == "pil":
+            video_inputs = self.video_processor_tester.prepare_video_inputs(equal_resolution=False)
+        else:
+            video_inputs = self.video_processor_tester.prepare_video_inputs(
+                equal_resolution=False,
+                return_tensors=return_tensors,
+            )
+
+        single = video_processor(video_inputs[0], return_tensors="pt")
+        _assert_packed_video_output(self, single, video_processor)
+        self.assertEqual(len(single["video_grid_thw"]), 1)
+
+        batched = video_processor(video_inputs, return_tensors="pt")
+        _assert_packed_video_output(self, batched, video_processor)
+        self.assertEqual(len(batched["video_grid_thw"]), self.video_processor_tester.batch_size)
+
+    def test_call_pil(self):
+        self._run_packed_video_call_test("pil")
+
+    def test_call_numpy(self):
+        self._run_packed_video_call_test("np")
+
+    def test_call_pytorch(self):
+        self._run_packed_video_call_test("torch")
+
+    def test_nested_input(self):
+        video_processor = self.video_processing_class(**self.video_processor_dict)
+        video_inputs = self.video_processor_tester.prepare_video_inputs(equal_resolution=False, return_tensors="np")
+        video_inputs = [list(video) for video in video_inputs]
+
+        single = video_processor(video_inputs[0], return_tensors="pt")
+        _assert_packed_video_output(self, single, video_processor)
+
+        batched = video_processor(video_inputs, return_tensors="pt")
+        _assert_packed_video_output(self, batched, video_processor)
+        self.assertEqual(len(batched["video_grid_thw"]), self.video_processor_tester.batch_size)
 
     def test_call_torch(self):
         video_processor = self.video_processing_class(**self.video_processor_dict)
@@ -202,12 +261,7 @@ class ArlowVideoProcessingTest(VideoProcessingTestMixin, unittest.TestCase):
         self.assertIn("pixel_values_videos", process_out)
         self.assertIn("video_grid_thw", process_out)
 
-        encoded_videos = process_out.pixel_values_videos
-        video_grid_thws = process_out.video_grid_thw
-
-        # Check dimensions
-        self.assertEqual(encoded_videos.ndim, 3)  # (batch, patches, features)
-        self.assertEqual(video_grid_thws.shape[-1], 3)  # (T, H, W)
+        _assert_packed_video_output(self, process_out, video_processor)
 
     def test_temporal_patch_alignment(self):
         """Test that frames are properly aligned to temporal_patch_size."""
@@ -215,11 +269,13 @@ class ArlowVideoProcessingTest(VideoProcessingTestMixin, unittest.TestCase):
 
         # Test with frame count not divisible by temporal_patch_size
         video = torch.randint(0, 255, (7, 3, 112, 112), dtype=torch.uint8)
-        process_out = video_processor(video, return_tensors="pt")
+        process_out = video_processor(video, return_tensors="pt", do_sample_frames=False)
 
-        # Temporal dimension should be padded to be divisible
         grid_t = process_out.video_grid_thw[0][0].item()
-        self.assertEqual(grid_t % self.video_processor_tester.temporal_patch_size, 0)
+        temporal_patch_size = video_processor.temporal_patch_size
+        self.assertEqual(grid_t, math.ceil(video.shape[0] / temporal_patch_size))
+        self.assertGreaterEqual(grid_t * temporal_patch_size, video.shape[0])
+        self.assertLess(grid_t * temporal_patch_size, video.shape[0] + temporal_patch_size)
 
     def test_smart_resize_video(self):
         """Test that smart_resize works correctly for videos."""
@@ -347,10 +403,13 @@ class ArlowVideoProcessingTest(VideoProcessingTestMixin, unittest.TestCase):
         vp2 = self.video_processing_class(**{**self.video_processor_dict, "merge_size": 1})
         out2 = vp2(video, return_tensors="pt")
 
-        # merge_size=1 should produce more patches
-        patches1 = out1.video_grid_thw[0].prod().item()
-        patches2 = out2.video_grid_thw[0].prod().item()
-        self.assertGreater(patches2, patches1)
+        raw_patches1 = _raw_patch_count(out1.video_grid_thw)
+        raw_patches2 = _raw_patch_count(out2.video_grid_thw)
+        merged_tokens1 = _merged_token_count(out1.video_grid_thw, merge_size=2)
+        merged_tokens2 = _merged_token_count(out2.video_grid_thw, merge_size=1)
+
+        self.assertEqual(raw_patches1, raw_patches2)
+        self.assertGreater(merged_tokens2, merged_tokens1)
 
     def test_channel_conversion(self):
         """Test RGB conversion for grayscale videos."""

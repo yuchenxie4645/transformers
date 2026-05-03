@@ -494,37 +494,34 @@ class ArlowVideoProcessor(BaseVideoProcessor):
 
             # Ensure divisibility for temporal patching by repeating last frame
             if patches.shape[1] % temporal_patch_size != 0:
-                repeats = patches[:, -1:].repeat(1, temporal_patch_size - 1, 1, 1, 1)
+                repeats = patches[:, -1:].repeat(1, temporal_patch_size - (patches.shape[1] % temporal_patch_size), 1, 1, 1)
                 patches = torch.cat([patches, repeats], dim=1)
 
             batch_size, temporal_tokens, channel = patches.shape[:3]
             temporal_groups = temporal_tokens // temporal_patch_size
-            grid_h_patches = max(resized_height // patch_size, 1)
-            grid_w_patches = max(resized_width // patch_size, 1)
-            grid_h_groups = max(grid_h_patches // merge_size, 1)
-            grid_w_groups = max(grid_w_patches // merge_size, 1)
+            grid_h = max(resized_height // patch_size, 1)
+            grid_w = max(resized_width // patch_size, 1)
 
             patches = patches.view(
                 batch_size,
                 temporal_groups,
                 temporal_patch_size,
                 channel,
-                grid_h_groups,
-                merge_size,
+                grid_h,
                 patch_size,
-                grid_w_groups,
-                merge_size,
+                grid_w,
                 patch_size,
             )
-            patches = patches.permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
+            # Row-major token order: T, H, W. Feature order: C, temporal_patch, patch_h, patch_w.
+            patches = patches.permute(0, 1, 4, 6, 3, 2, 5, 7).contiguous()
             flatten_patches = patches.reshape(
                 batch_size,
-                temporal_groups * grid_h_groups * grid_w_groups,
-                channel * temporal_patch_size * merge_size * merge_size * patch_size * patch_size,
+                temporal_groups * grid_h * grid_w,
+                channel * temporal_patch_size * patch_size * patch_size,
             )
 
             processed_videos_grouped[shape] = flatten_patches
-            processed_grids[shape] = [[temporal_groups, grid_h_groups, grid_w_groups]] * batch_size
+            processed_grids[shape] = [[temporal_groups, grid_h, grid_w]] * batch_size
 
         processed_videos = reorder_videos(processed_videos_grouped, grouped_videos_index)
         processed_grids = reorder_videos(processed_grids, grouped_videos_index)
@@ -547,12 +544,52 @@ class ArlowVideoProcessor(BaseVideoProcessor):
 
         return BatchFeature(data=data, tensor_type=return_tensors)
 
+    @staticmethod
+    def _flatten_unpadded_pixel_values(pixel_values, video_grid_thw):
+        """
+        Convert padded video patches from `(num_videos, max_patches, patch_dim)` to packed patches.
+        """
+        if (
+            pixel_values is None
+            or video_grid_thw is None
+            or getattr(pixel_values, "ndim", None) != 3
+            or getattr(video_grid_thw, "ndim", None) != 2
+            or video_grid_thw.shape[-1] != 3
+        ):
+            return pixel_values
+
+        if isinstance(video_grid_thw, torch.Tensor):
+            patch_counts = (video_grid_thw[:, 0] * video_grid_thw[:, 1] * video_grid_thw[:, 2]).tolist()
+        else:
+            patch_counts = [int(t * h * w) for t, h, w in video_grid_thw.tolist()]
+
+        total_patches = sum(int(count) for count in patch_counts)
+        feature_size = pixel_values.shape[-1]
+
+        if isinstance(pixel_values, np.ndarray):
+            flattened = np.zeros((total_patches, feature_size), dtype=pixel_values.dtype)
+        else:
+            flattened = pixel_values.new_zeros((total_patches, feature_size))
+
+        offset = 0
+        for video_idx, patch_count in enumerate(patch_counts):
+            count = int(patch_count)
+            if count > 0:
+                flattened[offset : offset + count] = pixel_values[video_idx, :count]
+            offset += count
+
+        return flattened
+
     def preprocess(
         self,
         videos: VideoInput,
         **kwargs: Unpack[VideosKwargs],
     ) -> BatchFeature:
         outputs = super().preprocess(videos, **kwargs)
+        if "pixel_values_videos" in outputs and "video_grid_thw" in outputs:
+            outputs["pixel_values_videos"] = self._flatten_unpadded_pixel_values(
+                outputs["pixel_values_videos"], outputs["video_grid_thw"]
+            )
         if "video_metadata" in outputs and self._last_selected_frame_indices:
             metadata_list = outputs["video_metadata"]
             for metadata, indices in zip(metadata_list, self._last_selected_frame_indices):

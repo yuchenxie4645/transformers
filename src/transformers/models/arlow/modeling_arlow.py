@@ -593,45 +593,44 @@ class ArlowVLPatchEmbed(nn.Module):
         """
         Args:
             hidden_states:
-                - `(batch, seq_len, patch_dim)` flattened patches from the processor, or
+                - `(total_patches, patch_dim)` packed flattened patches from the processor,
+                - `(batch, seq_len, patch_dim)` padded flattened patches from the processor, or
                 - `(batch, channels, temporal, height, width)` raw clips/images.
         Returns:
-            embeddings: `(batch, num_tokens, embed_dim)`
+            embeddings:
+                - packed input -> `(total_patches, embed_dim)`
+                - padded input -> `(batch, seq_len, embed_dim)`
+                - raw input -> `(batch, num_patches, embed_dim)`
         """
-        patch_shape_info: tuple[int, int] | None = None
+        expected_dim = self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size
 
-        if hidden_states.dim() == 3:
-            batch_size, seq_len, patch_dim = hidden_states.shape
-            expected_dim = self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size
-            if patch_dim != expected_dim:
-                raise ValueError(f"Expected flattened patch dimension {expected_dim}, but received {patch_dim}.")
-            hidden_states = hidden_states.reshape(
-                batch_size * seq_len,
-                self.in_channels,
-                self.temporal_patch_size,
-                self.patch_size,
-                self.patch_size,
-            )
-            patch_shape_info = (batch_size, seq_len)
-        else:
-            if hidden_states.dim() == 4:
-                # Images without explicit temporal dimension
-                hidden_states = hidden_states.unsqueeze(2)
-            if hidden_states.dim() != 5:
+        if hidden_states.dim() in (2, 3):
+            if hidden_states.shape[-1] != expected_dim:
                 raise ValueError(
-                    "ArlowVLPatchEmbed expects flattened patches with 3 dims or image/video tensors with "
-                    f"4/5 dims. Received shape: {tuple(hidden_states.shape)}"
+                    f"Expected flattened patch dimension {expected_dim}, but received {hidden_states.shape[-1]}."
                 )
+            weight = self.proj.weight.flatten(1)
+            return F.linear(hidden_states, weight)
+
+        if hidden_states.dim() == 4:
+            # Images without explicit temporal dimension
+            hidden_states = hidden_states.unsqueeze(2)
+        if hidden_states.dim() != 5:
+            raise ValueError(
+                "ArlowVLPatchEmbed expects flattened patches with 2/3 dims or image/video tensors with "
+                f"4/5 dims. Received shape: {tuple(hidden_states.shape)}"
+            )
+
+        frames = hidden_states.shape[2]
+        remainder = frames % self.temporal_patch_size
+        if remainder:
+            pad = self.temporal_patch_size - remainder
+            hidden_states = torch.cat([hidden_states, hidden_states[:, :, -1:].repeat(1, 1, pad, 1, 1)], dim=2)
 
         projected = self.proj(hidden_states)
-
-        if patch_shape_info is not None:
-            batch_size, seq_len = patch_shape_info
-            return projected.reshape(batch_size, seq_len, self.embed_dim)
-
         batch_size = projected.shape[0]
         projected = projected.reshape(batch_size, self.embed_dim, -1).transpose(1, 2)
-        return projected
+        return projected.contiguous()
 
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.PatchMerger
@@ -711,26 +710,34 @@ class ArlowVLAttention(nn.Module):
             hidden_states: (total_tokens, embed_dim)
             position_embeddings: (cos, sin) for RoPE
         """
-        _batch_size, seq_length = (
-            hidden_states.shape[0],
-            hidden_states.shape[1] if hidden_states.dim() > 2 else hidden_states.shape[0],
-        )
-
-        attention_mask = kwargs.get("attention_mask")
+        input_shape = hidden_states.shape
+        input_ndim = hidden_states.dim()
+        hidden_states = hidden_states.reshape(-1, self.embed_dim)
+        total_tokens = hidden_states.shape[0]
 
         # Compute Q, K, V
-        qkv = self.qkv(hidden_states).reshape(-1, 3, self.num_heads, self.head_dim)
+        qkv = self.qkv(hidden_states).reshape(total_tokens, 3, self.num_heads, self.head_dim)
         query_states, key_states, value_states = qkv.unbind(1)
 
         # Apply RoPE if provided
         if position_embeddings is not None:
             cos, sin = position_embeddings
+            if cos.shape[0] != total_tokens:
+                raise ValueError(
+                    f"Vision RoPE length mismatch: cos has {cos.shape[0]} tokens, "
+                    f"hidden_states has {total_tokens} tokens."
+                )
             query_states, key_states = apply_rotary_pos_emb_vision(query_states, key_states, cos, sin)
 
         # Reshape for attention: (seq, heads, head_dim) -> (1, seq, heads, head_dim) -> (1, heads, seq, head_dim)
         query_states = query_states.unsqueeze(0).transpose(1, 2)
         key_states = key_states.unsqueeze(0).transpose(1, 2)
         value_states = value_states.unsqueeze(0).transpose(1, 2)
+
+        if cu_seqlens is None:
+            cu_seqlens = torch.tensor([0, total_tokens], device=hidden_states.device, dtype=torch.int32)
+        else:
+            cu_seqlens = cu_seqlens.to(device=hidden_states.device, dtype=torch.int32)
 
         # Dispatch to attention backends (FA2/SDPA/eager)
         # Use the same attribute name as text model if set on the vision config via parent
@@ -740,79 +747,57 @@ class ArlowVLAttention(nn.Module):
         # Fall back to config if available
         if attn_impl is None:
             attn_impl = getattr(getattr(self, "config", None), "_attn_implementation", "eager")
-        if getattr(self.config, "use_deformable_attention", False):
+        if getattr(self.config, "use_deformable_attention", False) or attn_impl == "flash_attention_2":
             attn_impl = "eager"
         attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(attn_impl, eager_attention_forward)
 
-        bias_mask: torch.Tensor | None = None
-        if getattr(self.config, "use_deformable_attention", False) and token_coords is not None:
-            coords = token_coords.to(query_states.device, dtype=torch.float32)
-            strength = getattr(self.config, "deformable_attention_strength", 4.0)
-            radius = getattr(self.config, "deformable_attention_window", 0.25)
-            penalty = strength * 100.0
-            bias_list: list[torch.Tensor] = []
-            for sample_coords in coords:
-                dist = torch.cdist(sample_coords, sample_coords, p=2)
+        outputs: list[torch.Tensor] = []
+        starts = cu_seqlens[:-1].tolist()
+        ends = cu_seqlens[1:].tolist()
+
+        for start, end in zip(starts, ends):
+            if end <= start:
+                continue
+
+            q = query_states[:, :, start:end, :]
+            k = key_states[:, :, start:end, :]
+            v = value_states[:, :, start:end, :]
+
+            attention_mask = None
+            if getattr(self.config, "use_deformable_attention", False) and token_coords is not None:
+                coords = token_coords[start:end].to(device=q.device, dtype=torch.float32)
+                strength = getattr(self.config, "deformable_attention_strength", 4.0)
+                radius = getattr(self.config, "deformable_attention_window", 0.25)
+                penalty = strength * 100.0
+
+                dist = torch.cdist(coords, coords, p=2)
                 bias = -dist * strength
                 if radius > 0:
                     bias = torch.where(dist <= radius, bias, bias - penalty)
-                bias_list.append(bias)
-            bias_mask = torch.stack(bias_list, dim=0).unsqueeze(1).to(query_states.dtype)
-            if attention_mask is None:
-                attention_mask = bias_mask
-            else:
-                attention_mask = attention_mask + bias_mask
+                attention_mask = bias[None, None, :, :].to(dtype=q.dtype)
 
-        if attn_impl == "flash_attention_2":
-            # FA2 expects int32 cu_seqlens with a leading zero
-            seq_length = query_states.shape[2]
-            if cu_seqlens is None:
-                cu_seqlens = torch.tensor([0, seq_length], device=query_states.device, dtype=torch.int32)
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-            attn_output, _ = attention_interface(
+            out, _ = attention_interface(
                 self,
-                query_states,
-                key_states,
-                value_states,
+                q,
+                k,
+                v,
                 attention_mask=attention_mask,
                 scaling=self.scaling,
                 dropout=0.0 if not self.training else self.attention_dropout,
-                cu_seq_lens_q=cu_seqlens,
-                cu_seq_lens_k=cu_seqlens,
-                max_length_q=max_seqlen,
-                max_length_k=max_seqlen,
                 is_causal=False,
                 **kwargs,
             )
+            outputs.append(out)
+
+        if len(outputs) == 0:
+            attn_output = hidden_states.new_zeros((0, self.embed_dim))
         else:
-            # Process chunks if cu_seqlens provided; otherwise treat as one chunk
-            seq_length = query_states.shape[2]
-            if cu_seqlens is None:
-                cu_seqlens = torch.tensor([0, seq_length], device=query_states.device, dtype=torch.int32)
-            lengths = cu_seqlens[1:] - cu_seqlens[:-1]
-
-            splits = [
-                torch.split(tensor, lengths.tolist(), dim=2) for tensor in (query_states, key_states, value_states)
-            ]
-            attn_outputs = [
-                attention_interface(
-                    self,
-                    q,
-                    k,
-                    v,
-                    attention_mask=attention_mask,
-                    scaling=self.scaling,
-                    dropout=0.0 if not self.training else self.attention_dropout,
-                    is_causal=False,
-                    **kwargs,
-                )[0]
-                for q, k, v in zip(*splits)
-            ]
-            attn_output = torch.cat(attn_outputs, dim=1)
-
-        # Reshape back
-        attn_output = attn_output.transpose(1, 2).reshape(-1, self.embed_dim)
+            # Local eager/SDPA interfaces return [batch, seq, heads, head_dim].
+            attn_output = torch.cat(outputs, dim=1).reshape(total_tokens, self.embed_dim)
         attn_output = self.proj(attn_output)
+
+        if input_ndim == 3:
+            attn_output = attn_output.view(input_shape)
 
         return attn_output
 
@@ -990,107 +975,207 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
     def get_device(self) -> torch.device:
         return self.blocks[0].fc2.weight.device
 
+    def _resolve_grid_thw(
+        self,
+        grid_thw: torch.LongTensor | None,
+        hidden_states: torch.Tensor,
+    ) -> torch.LongTensor | None:
+        """Normalize grid metadata to the actual patch-token sequence length."""
+        if grid_thw is None:
+            return None
+
+        if hidden_states.dim() == 2:
+            token_count = hidden_states.shape[0]
+        elif hidden_states.dim() == 3:
+            token_count = hidden_states.shape[0] * hidden_states.shape[1]
+        else:
+            return grid_thw
+
+        expected = int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum().item())
+        if expected == token_count:
+            return grid_thw
+
+        temporal_patch = getattr(self.patch_embed, "temporal_patch_size", 1)
+        patched_grid = grid_thw.clone()
+        patched_grid[:, 0] = (patched_grid[:, 0] + temporal_patch - 1) // temporal_patch
+        patched_expected = int((patched_grid[:, 0] * patched_grid[:, 1] * patched_grid[:, 2]).sum().item())
+        if patched_expected == token_count:
+            return patched_grid
+
+        return grid_thw
+
+    def _pack_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.LongTensor | None,
+    ) -> torch.Tensor:
+        """Convert padded vision states to a packed token sequence."""
+        if hidden_states.dim() == 2:
+            return hidden_states
+
+        if hidden_states.dim() != 3:
+            raise ValueError(f"Expected 2D or 3D hidden_states, got {tuple(hidden_states.shape)}.")
+
+        if grid_thw is None:
+            return hidden_states.reshape(-1, hidden_states.shape[-1])
+
+        pieces: list[torch.Tensor] = []
+        for batch_idx, (t, h, w) in enumerate(grid_thw.tolist()):
+            n = int(t) * int(h) * int(w)
+            pieces.append(hidden_states[batch_idx, :n])
+
+        if len(pieces) == 0:
+            return hidden_states.new_zeros((0, hidden_states.shape[-1]))
+
+        return torch.cat(pieces, dim=0)
+
+    def _make_cu_seqlens(
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.LongTensor | None,
+    ) -> torch.Tensor:
+        """Build packed-sequence boundaries for independent image/video attention."""
+        if grid_thw is None:
+            return torch.tensor([0, hidden_states.shape[0]], device=hidden_states.device, dtype=torch.int32)
+
+        lengths = (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).to(
+            device=hidden_states.device,
+            dtype=torch.int32,
+        )
+        total = int(lengths.sum().item())
+        if total != hidden_states.shape[0]:
+            raise ValueError(
+                f"grid_thw describes {total} vision tokens, but patch embedding produced "
+                f"{hidden_states.shape[0]} tokens. grid_thw={grid_thw.tolist()}"
+            )
+
+        return F.pad(torch.cumsum(lengths, dim=0), (1, 0))
+
+    def _make_token_coords(
+        self,
+        grid_thw: torch.LongTensor | None,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        """Packed THW coordinates matching row-major processor order."""
+        if grid_thw is None:
+            return None
+
+        coords: list[torch.Tensor] = []
+        for t, h, w in grid_thw.tolist():
+            t, h, w = int(t), int(h), int(w)
+            if t <= 0 or h <= 0 or w <= 0:
+                continue
+
+            t_range = torch.linspace(0, 1, steps=t, device=device) if t > 1 else torch.zeros(1, device=device)
+            h_range = torch.linspace(0, 1, steps=h, device=device) if h > 1 else torch.zeros(1, device=device)
+            w_range = torch.linspace(0, 1, steps=w, device=device) if w > 1 else torch.zeros(1, device=device)
+
+            tt, hh, ww = torch.meshgrid(t_range, h_range, w_range, indexing="ij")
+            coords.append(torch.stack([tt, hh, ww], dim=-1).reshape(-1, 3))
+
+        if len(coords) == 0:
+            return None
+
+        return torch.cat(coords, dim=0)
+
+    def _apply_progressive_patches(
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.LongTensor | None,
+    ) -> torch.Tensor:
+        """Progressive patch refinement for packed row-major THW tokens."""
+        if not self.use_progressive_patches or grid_thw is None:
+            return hidden_states
+
+        pieces: list[torch.Tensor] = []
+        start = 0
+        embed_dim = hidden_states.shape[-1]
+
+        for t, h, w in grid_thw.tolist():
+            t, h, w = int(t), int(h), int(w)
+            n = t * h * w
+            tokens = hidden_states[start : start + n]
+            start += n
+
+            if n == 0:
+                pieces.append(tokens)
+                continue
+
+            view_tensor = tokens.view(t, h, w, embed_dim).permute(3, 0, 1, 2).contiguous()
+            pooled = self.progressive_pool(view_tensor.unsqueeze(0))
+            upsampled = F.interpolate(
+                pooled,
+                size=(t, h, w),
+                mode="trilinear",
+                align_corners=False,
+            ).squeeze(0)
+
+            refined = self.progressive_proj(upsampled.permute(1, 2, 3, 0).reshape(n, embed_dim)).to(tokens.dtype)
+            pieces.append(tokens + refined)
+
+        if start != hidden_states.shape[0]:
+            raise ValueError(
+                f"grid_thw consumed {start} tokens, but hidden_states has {hidden_states.shape[0]} tokens."
+            )
+
+        return torch.cat(pieces, dim=0) if pieces else hidden_states
+
     def _reshape_for_merger(self, hidden_states: torch.Tensor, grid_thw: torch.LongTensor | None) -> torch.Tensor:
         """
-        Reshape block outputs into grouped patches ready for spatial merging / projection.
+        Convert unmerged row-major THW patch tokens to spatially merged tokens.
         """
-        batch_size, seq_len, embed_dim = hidden_states.shape
+        hidden_states = self._pack_hidden_states(hidden_states, grid_thw)
         spatial_merge_size = self.config.spatial_merge_size
+        embed_dim = hidden_states.shape[-1]
+        merge_unit = spatial_merge_size * spatial_merge_size
 
-        if grid_thw is not None:
-            # grid_thw may contain inconsistent temporal values (pre- or post-temporal patching).
-            temporal_patch = getattr(self.patch_embed, "temporal_patch_size", 1)
-            t_in = grid_thw[:, 0]
-            h_patched = grid_thw[:, 1]
-            w_patched = grid_thw[:, 2]
-
-            counts1 = (t_in * h_patched * w_patched).sum().item()
-            if counts1 == seq_len:
-                temporal_patched = t_in
-            else:
-                temporal_patched2 = (t_in + temporal_patch - 1) // temporal_patch
-                counts2 = (temporal_patched2 * h_patched * w_patched).sum().item()
-                if counts2 == seq_len:
-                    temporal_patched = temporal_patched2
-                else:
-                    per_item_base = (h_patched * w_patched).tolist()
-                    temporal_guess: list[int] = []
-                    remaining = seq_len
-                    for base in per_item_base:
-                        t_guess = max(1, remaining // max(base, 1))
-                        temporal_guess.append(t_guess)
-                        remaining -= t_guess * base
-                    if remaining > 0 and temporal_guess:
-                        temporal_guess[-1] += remaining
-                    temporal_patched = torch.tensor(temporal_guess, device=grid_thw.device)
-
-            all_embeddings: list[torch.Tensor] = []
-            start_idx = 0
-            for i in range(len(grid_thw)):
-                t = int(temporal_patched[i].item())
-                h = int(h_patched[i].item())
-                w = int(w_patched[i].item())
-                num_patches_per_frame = max(1, h * w)
-                total_patches = min(seq_len - start_idx, t * num_patches_per_frame)
-
-                img_patches = hidden_states[:, start_idx : start_idx + total_patches, :]
-                start_idx += total_patches
-
-                if num_patches_per_frame == 0:
-                    all_embeddings.append(
-                        torch.zeros(
-                            batch_size,
-                            0,
-                            spatial_merge_size**2 * embed_dim,
-                            device=hidden_states.device,
-                            dtype=hidden_states.dtype,
-                        )
-                    )
-                    continue
-
-                img_patches = img_patches.reshape(batch_size, t, h, w, embed_dim)
-                merged_h = max(1, h // spatial_merge_size)
-                merged_w = max(1, w // spatial_merge_size)
-                img_patches = img_patches.reshape(
-                    batch_size,
-                    t,
-                    merged_h,
-                    spatial_merge_size,
-                    merged_w,
-                    spatial_merge_size,
-                    embed_dim,
+        if grid_thw is None:
+            if hidden_states.shape[0] % merge_unit != 0:
+                raise ValueError(
+                    f"Cannot spatial-merge {hidden_states.shape[0]} tokens by merge unit {merge_unit} without grid_thw."
                 )
-                img_patches = img_patches.permute(0, 1, 2, 4, 3, 5, 6)
-                img_patches = img_patches.reshape(
-                    batch_size,
-                    t,
-                    merged_h,
-                    merged_w,
-                    spatial_merge_size**2 * embed_dim,
-                )
-                img_patches = img_patches.reshape(
-                    batch_size,
-                    t * merged_h * merged_w,
-                    spatial_merge_size**2 * embed_dim,
-                )
-                all_embeddings.append(img_patches)
+            return hidden_states.reshape(-1, merge_unit * embed_dim)
 
-            if all_embeddings:
-                hidden_states = torch.cat(all_embeddings, dim=1)
-            else:
-                hidden_states = hidden_states.reshape(batch_size, 0, embed_dim)
-        else:
-            num_merged_patches = seq_len // (spatial_merge_size**2)
-            if num_merged_patches * (spatial_merge_size**2) == seq_len and num_merged_patches > 0:
-                hidden_states = hidden_states.reshape(
-                    batch_size,
-                    num_merged_patches,
-                    spatial_merge_size**2 * embed_dim,
-                )
-            else:
-                hidden_states = hidden_states.reshape(batch_size, seq_len, embed_dim)
+        merged: list[torch.Tensor] = []
+        start = 0
+        for t, h, w in grid_thw.tolist():
+            t, h, w = int(t), int(h), int(w)
 
-        return hidden_states.reshape(-1, hidden_states.shape[-1])
+            if h % spatial_merge_size != 0 or w % spatial_merge_size != 0:
+                raise ValueError(
+                    f"Grid height/width must be divisible by spatial_merge_size={spatial_merge_size}; "
+                    f"got grid (t={t}, h={h}, w={w})."
+                )
+
+            n = t * h * w
+            item = hidden_states[start : start + n]
+            start += n
+
+            if item.shape[0] != n:
+                raise ValueError(f"Expected {n} tokens for grid {(t, h, w)}, got {item.shape[0]}.")
+
+            item = item.view(t, h, w, embed_dim)
+            item = item.view(
+                t,
+                h // spatial_merge_size,
+                spatial_merge_size,
+                w // spatial_merge_size,
+                spatial_merge_size,
+                embed_dim,
+            )
+            item = item.permute(0, 1, 3, 2, 4, 5).contiguous()
+            item = item.view(
+                t * (h // spatial_merge_size) * (w // spatial_merge_size),
+                merge_unit * embed_dim,
+            )
+            merged.append(item)
+
+        if start != hidden_states.shape[0]:
+            raise ValueError(
+                f"grid_thw consumed {start} tokens, but hidden_states has {hidden_states.shape[0]} tokens."
+            )
+
+        return torch.cat(merged, dim=0) if merged else hidden_states.new_zeros((0, merge_unit * embed_dim))
 
     def forward(
         self,
@@ -1099,91 +1184,37 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
     ) -> torch.Tensor:
         """
         Args:
-            pixel_values: (batch, channels, temporal, height, width)
-            grid_thw: (num_images/videos, 3) containing [temporal, height, width] dimensions
-        Returns:
-            vision_embeddings: (total_tokens, hidden_size)
+            pixel_values: Packed flattened patches, padded flattened patches, or raw image/video tensors.
+            grid_thw: Unmerged patch grid per visual item in `[temporal, height, width]` format.
         """
+        hidden_states = self.patch_embed(pixel_values)
 
-        # Patch embedding
-        hidden_states = self.patch_embed(pixel_values)  # (batch, num_patches, embed_dim)
-
-        # Prepare normalized token coordinates for deformable attention & progressive patches
-        token_coords: torch.Tensor | None = None
-        batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
         if grid_thw is not None:
-            coord_list: list[torch.Tensor] = []
-            device = hidden_states.device
-            for b in range(len(grid_thw)):
-                t, h, w = [int(v) for v in grid_thw[b].tolist()]
-                if t <= 0 or h <= 0 or w <= 0:
-                    coord_list.append(torch.zeros((seq_len, 3), device=device, dtype=torch.float32))
-                    continue
-                t_range = (
-                    torch.linspace(0, 1, steps=t, device=device, dtype=torch.float32)
-                    if t > 1
-                    else torch.zeros(1, device=device, dtype=torch.float32)
-                )
-                h_range = (
-                    torch.linspace(0, 1, steps=h, device=device, dtype=torch.float32)
-                    if h > 1
-                    else torch.zeros(1, device=device, dtype=torch.float32)
-                )
-                w_range = (
-                    torch.linspace(0, 1, steps=w, device=device, dtype=torch.float32)
-                    if w > 1
-                    else torch.zeros(1, device=device, dtype=torch.float32)
-                )
-                t_grid, h_grid, w_grid = torch.meshgrid(t_range, h_range, w_range, indexing="ij")
-                coords = torch.stack([t_grid, h_grid, w_grid], dim=-1).reshape(-1, 3)
-                coord_list.append(coords)
-            token_coords = torch.stack(coord_list, dim=0)
+            grid_thw = grid_thw.to(device=hidden_states.device)
+            grid_thw = self._resolve_grid_thw(grid_thw, hidden_states)
 
-        # Inject progressive multi-scale patches if enabled
-        if self.use_progressive_patches and grid_thw is not None:
-            updated_states: list[torch.Tensor] = []
-            embed_dim = hidden_states.shape[-1]
-            for b in range(batch_size):
-                t, h, w = [int(v) for v in grid_thw[b].tolist()]
-                tokens = hidden_states[b]
-                total = t * h * w
-                if total == 0:
-                    updated_states.append(tokens)
-                    continue
-                view_tokens = tokens[:total]
-                view_tensor = view_tokens.view(t, h, w, embed_dim).permute(3, 0, 1, 2)  # (embed, T, H, W)
-                pooled = self.progressive_pool(view_tensor.unsqueeze(0))
-                upsampled = F.interpolate(
-                    pooled,
-                    size=(t, h, w),
-                    mode="trilinear",
-                    align_corners=False,
-                ).squeeze(0)
-                refined = self.progressive_proj(upsampled.permute(1, 2, 3, 0).reshape(total, embed_dim)).to(
-                    tokens.dtype
-                )
-                tokens = tokens.clone()
-                tokens[:total] = view_tokens + refined
-                updated_states.append(tokens)
-            hidden_states = torch.stack(updated_states, dim=0)
+        hidden_states = self._pack_hidden_states(hidden_states, grid_thw)
 
-        # Get grid-aware RoPE embeddings for vision
-        rotary_pos_emb = self.rotary_pos_emb(grid_thw, batch_size=batch_size, seq_len=seq_len)
-        # Robustness: fall back to 1D positions if a mismatch occurs
-        total_tokens = batch_size * seq_len
-        if rotary_pos_emb.shape[0] != total_tokens:
-            seq = torch.arange(total_tokens, device=hidden_states.device, dtype=self.rotary_pos_emb.inv_freq.dtype)
-            rotary_pos_emb = torch.outer(seq, self.rotary_pos_emb.inv_freq)
+        cu_seqlens = self._make_cu_seqlens(hidden_states, grid_thw)
+        token_coords = self._make_token_coords(grid_thw, hidden_states.device)
+        hidden_states = self._apply_progressive_patches(hidden_states, grid_thw)
+
+        rotary_pos_emb = self.rotary_pos_emb(
+            grid_thw,
+            batch_size=grid_thw.shape[0] if grid_thw is not None else 1,
+            seq_len=hidden_states.shape[0],
+        )
+        if rotary_pos_emb.shape[0] != hidden_states.shape[0]:
+            seq = torch.arange(
+                hidden_states.shape[0],
+                device=hidden_states.device,
+                dtype=self.rotary_pos_emb.inv_freq.dtype,
+            )
+            rotary_pos_emb = torch.outer(seq, self.rotary_pos_emb.inv_freq.to(seq.device))
         emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-        cos = emb.cos()
-        sin = emb.sin()
+        cos = emb.cos().to(hidden_states.dtype)
+        sin = emb.sin().to(hidden_states.dtype)
         position_embeddings = (cos, sin)
-
-        # Prepare cu_seqlens for attention backends (FA2/SDPA)
-        # Use a single contiguous sequence matching the current hidden_states length to avoid
-        # mismatches between grid metadata and the actual tokenized sequence length.
-        total = hidden_states.shape[1]
-        cu_seqlens = torch.tensor([0, total], device=hidden_states.device, dtype=torch.int32)
 
         deepstack_feature_lists: list[torch.Tensor] = []
         deepstack_idx = 0
@@ -1192,9 +1223,9 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
         for layer_idx, block in enumerate(self.blocks):
             hidden_states = block(
                 hidden_states,
-                position_embeddings,
-                cu_seqlens,
-                token_coords,
+                position_embeddings=position_embeddings,
+                cu_seqlens=cu_seqlens,
+                token_coords=token_coords,
             )
             if (
                 self.enable_deepstack
@@ -1209,12 +1240,9 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
         vision_embeddings = self.merger(merged_tokens)
 
         if self.enable_deepstack:
-            if len(deepstack_feature_lists) < len(self.deepstack_visual_indexes):
-                feature_dim = vision_embeddings.shape[-1]
-                dtype = vision_embeddings.dtype
-                device = vision_embeddings.device
-                for _ in range(len(self.deepstack_visual_indexes) - len(deepstack_feature_lists)):
-                    deepstack_feature_lists.append(torch.zeros(0, feature_dim, device=device, dtype=dtype))
+            feature_dim = vision_embeddings.shape[-1]
+            while len(deepstack_feature_lists) < len(self.deepstack_visual_indexes):
+                deepstack_feature_lists.append(vision_embeddings.new_zeros((0, feature_dim)))
             return vision_embeddings, deepstack_feature_lists
         return vision_embeddings
 
@@ -1231,11 +1259,28 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
     config_class = ArlowTextConfig
     input_modalities = "text"
 
-    def __init__(self, config: ArlowTextConfig):
+    def __init__(
+        self,
+        config: ArlowTextConfig,
+        vision_config: ArlowVisionConfig | None = None,
+        use_gated_cross_attention: bool | None = None,
+        gated_cross_attention_start_layer: int | None = None,
+    ):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.has_sliding_layers = "sliding_attention" in config.layer_types
+        self.vision_config = vision_config
+        self.use_gated_cross_attention = (
+            getattr(config, "use_gated_cross_attention", False)
+            if use_gated_cross_attention is None
+            else use_gated_cross_attention
+        )
+        self.gated_cross_attention_start_layer = (
+            getattr(config, "gated_cross_attention_start_layer", None)
+            if gated_cross_attention_start_layer is None
+            else gated_cross_attention_start_layer
+        )
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         self.layers = nn.ModuleList(
@@ -1247,12 +1292,12 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
 
         self.visual_gates: torch.nn.Parameter | None = None
         self._gated_cross_attention_start_layer: int | None = None
-        if getattr(config, "use_gated_cross_attention", False):
+        if self.use_gated_cross_attention:
             deepstack_indexes: list[int] = []
-            if hasattr(config, "vision_config") and config.vision_config is not None:
-                deepstack_indexes = getattr(config.vision_config, "deepstack_visual_indexes", [])
+            if self.vision_config is not None:
+                deepstack_indexes = getattr(self.vision_config, "deepstack_visual_indexes", [])
 
-            start_layer = config.gated_cross_attention_start_layer
+            start_layer = self.gated_cross_attention_start_layer
             if start_layer is None:
                 start_layer = min(deepstack_indexes) if len(deepstack_indexes) > 0 else config.num_hidden_layers - 1
             self._gated_cross_attention_start_layer = max(0, min(start_layer, config.num_hidden_layers - 1))
@@ -1419,7 +1464,7 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
                 if deepstack_layer is not None and deepstack_layer.numel() > 0:
                     deepstack_layer = deepstack_layer.to(hidden_states.device, hidden_states.dtype)
                     apply_layer = True
-                    if getattr(self.config, "use_gated_cross_attention", False):
+                    if self.use_gated_cross_attention:
                         start_layer = self._gated_cross_attention_start_layer or 0
                         apply_layer = layer_idx >= start_layer
                     if apply_layer:
@@ -1455,14 +1500,19 @@ class ArlowForCausalLM(ArlowTextPreTrainedModel, GenerationMixin):
     """
 
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
+    _tp_plan = {"lm_head": "colwise_gather_output"}
+    _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
     def __init__(self, config: ArlowTextConfig):
         super().__init__(config)
-        self.model = ArlowTextModel(config)
-        self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        text_config = config.text_config if hasattr(config, "text_config") else config
+        self.model = ArlowTextModel(text_config)
+        self.vocab_size = text_config.vocab_size
+        self.lm_head = nn.Linear(text_config.hidden_size, text_config.vocab_size, bias=False)
 
         self.post_init()
+        self._tp_plan["lm_head"] = "colwise_gather_output"
+        self._pp_plan["lm_head"] = (["hidden_states"], ["logits"])
 
     @can_return_tuple
     def forward(
@@ -1582,7 +1632,12 @@ class ArlowModel(ArlowPreTrainedModel):
         self.visual = ArlowVLVisionModel._from_config(config.vision_config)
 
         # Text model (language decoder)
-        self.language_model = ArlowTextModel._from_config(config.text_config)
+        self.language_model = ArlowTextModel._from_config(
+            config.text_config,
+            vision_config=config.vision_config,
+            use_gated_cross_attention=config.use_gated_cross_attention,
+            gated_cross_attention_start_layer=config.gated_cross_attention_start_layer,
+        )
 
         # Cache for rope deltas
         self.rope_deltas = None
@@ -1616,13 +1671,7 @@ class ArlowModel(ArlowPreTrainedModel):
         grid_thw: torch.LongTensor | None = None,
         return_deepstack: bool = False,
     ) -> list[torch.Tensor] | tuple[list[torch.Tensor], list[list[torch.Tensor]] | None]:
-        """Shared helper to extract visual features from the vision encoder.
-
-        Args:
-            pixel_values: Batched images or videos already tensorized.
-            grid_thw: Grid metadata (temporal, height, width) for each input.
-            return_deepstack: If True, also returns per-layer deepstack projections.
-        """
+        """Shared helper to extract token-level visual features from the vision encoder."""
         # Get dtype from vision model, fallback to float32
         target_dtype = self.visual.get_dtype() if hasattr(self.visual, "get_dtype") else torch.float32
         pixel_values = pixel_values.to(dtype=target_dtype)
@@ -1634,86 +1683,43 @@ class ArlowModel(ArlowPreTrainedModel):
             embeds = visual_outputs
             deepstack_tokens = None
 
-        # Compute split sizes based on grid metadata
-        split_sizes: list[int] = []
-        if grid_thw is not None:
-            spm = self.config.vision_config.spatial_merge_size
-            t_in = grid_thw[:, 0]
-            h = grid_thw[:, 1]
-            w = grid_thw[:, 2]
-            base_per_item = torch.maximum(h * w, torch.ones_like(h))
-            total_len = embeds.shape[0]
-
-            # Try candidate 1: assume t already patched
-            counts1 = (t_in * base_per_item).sum().item()
-            if counts1 != total_len:
-                base_alt = torch.maximum(h // spm, torch.ones_like(h)) * torch.maximum(w // spm, torch.ones_like(w))
-                counts_alt = (t_in * base_alt).sum().item()
-                if counts_alt == total_len:
-                    base_per_item = base_alt
-                    counts1 = counts_alt
-
-            if counts1 == total_len:
-                t_use = t_in
-            else:
-                # Try candidate 2: temporal patched by temporal_patch_size
-                t_patch = self.config.vision_config.temporal_patch_size
-                t2 = (t_in + t_patch - 1) // t_patch
-                counts2 = (t2 * base_per_item).sum().item()
-                if counts2 == total_len:
-                    t_use = t2
-                else:
-                    # Fallback: distribute tokens evenly
-                    base_per_item = torch.ones_like(h)
-                    t_use_list: list[int] = []
-                    remaining = total_len
-                    items_left = len(t_in)
-                    for _ in range(items_left):
-                        size = max(1, remaining // max(items_left, 1))
-                        t_use_list.append(size)
-                        remaining -= size
-                        items_left -= 1
-                    if remaining > 0:
-                        t_use_list[-1] += remaining
-                    t_use = torch.tensor(t_use_list, device=grid_thw.device)
-
-            split_sizes = (t_use * base_per_item).tolist()
-        else:
+        if grid_thw is None:
             split_sizes = [embeds.shape[0]]
+        else:
+            spm = self.config.vision_config.spatial_merge_size
+            grid_thw = grid_thw.to(device=embeds.device)
+            split_sizes = (grid_thw[:, 0] * (grid_thw[:, 1] // spm) * (grid_thw[:, 2] // spm)).tolist()
+            split_sizes = [int(size) for size in split_sizes]
 
-        # Pool embeddings per segment
-        pooled_embeds: list[torch.Tensor] = []
-        for segment in torch.split(embeds, split_sizes):
-            if segment.numel() == 0:
-                pooled_embeds.append(torch.zeros(1, self.config.hidden_size, device=embeds.device, dtype=embeds.dtype))
-            elif segment.dim() == 1:
-                pooled_embeds.append(segment.unsqueeze(0))
-            else:
-                pooled_embeds.append(segment.mean(dim=0, keepdim=True))
+            if sum(split_sizes) != embeds.shape[0]:
+                temporal_patch = self.config.vision_config.temporal_patch_size
+                patched_t = (grid_thw[:, 0] + temporal_patch - 1) // temporal_patch
+                patched_split_sizes = (patched_t * (grid_thw[:, 1] // spm) * (grid_thw[:, 2] // spm)).tolist()
+                patched_split_sizes = [int(size) for size in patched_split_sizes]
 
-        # Pool deepstack tokens if requested
-        deepstack_pooled: list[list[torch.Tensor]] | None = None
+                if sum(patched_split_sizes) == embeds.shape[0]:
+                    split_sizes = patched_split_sizes
+                else:
+                    raise ValueError(
+                        f"Visual feature split mismatch: grid_thw implies {sum(split_sizes)} merged tokens, "
+                        f"but vision encoder returned {embeds.shape[0]} tokens. grid_thw={grid_thw.tolist()}"
+                    )
+
+        visual_features = list(torch.split(embeds, split_sizes, dim=0))
+
+        deepstack_flat: list[list[torch.Tensor]] | None = None
         if return_deepstack and deepstack_tokens is not None and len(deepstack_tokens) > 0:
-            deepstack_pooled = []
+            deepstack_flat = []
             for layer_tokens in deepstack_tokens:
-                layer_segments = torch.split(layer_tokens, split_sizes)
-                layer_outputs: list[torch.Tensor] = []
-                for segment in layer_segments:
-                    if segment.numel() == 0:
-                        layer_outputs.append(
-                            torch.zeros(
-                                1, self.config.hidden_size, device=layer_tokens.device, dtype=layer_tokens.dtype
-                            )
-                        )
-                    elif segment.dim() == 1:
-                        layer_outputs.append(segment.unsqueeze(0))
-                    else:
-                        layer_outputs.append(segment.mean(dim=0, keepdim=True))
-                deepstack_pooled.append(layer_outputs)
+                if layer_tokens.shape[0] != embeds.shape[0]:
+                    raise ValueError(
+                        f"DeepStack token count mismatch: expected {embeds.shape[0]}, got {layer_tokens.shape[0]}."
+                    )
+                deepstack_flat.append([layer_tokens[i : i + 1] for i in range(layer_tokens.shape[0])])
 
         if return_deepstack:
-            return pooled_embeds, deepstack_pooled
-        return pooled_embeds
+            return visual_features, deepstack_flat
+        return visual_features
 
     @can_return_tuple
     @auto_docstring

@@ -470,5 +470,5 @@ class ArlowImageProcessingTest(ImageProcessingTestMixin, unittest.TestCase):
             # Grid dimensions should vary based on input resolution
             grids = process_out.image_grid_thw
             # Verify that different input sizes produce different grid dimensions
-            grid_set = set((g[1].item(), g[2].item()) for g in grids)
+            grid_set = {(g[1].item(), g[2].item()) for g in grids}
             self.assertGreater(len(grid_set), 1)  # Should have at least 2 different grid sizes

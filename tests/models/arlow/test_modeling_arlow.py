@@ -18,9 +18,9 @@ if is_torch_available():
         ArlowForCausalLM,
         ArlowForQuestionAnswering,
         ArlowForSequenceClassification,
-        ArlowTextConfig,
         ArlowForTokenClassification,
         ArlowModel,
+        ArlowTextConfig,
     )
     from transformers.models.arlow.image_processing_pil_arlow import ArlowImageProcessorPil
     from transformers.models.arlow.modeling_arlow import ArlowRMSNorm, ArlowTextRotaryEmbedding
@@ -32,6 +32,15 @@ if is_torch_available():
         x1 = x[..., : x.shape[-1] // 2]
         x2 = x[..., x.shape[-1] // 2 :]
         return torch.cat((-x2, x1), dim=-1)
+
+    def _merged_token_count(grid_thw, merge_size):
+        if hasattr(grid_thw, "detach"):
+            grid_thw = grid_thw.detach().cpu()
+        return int((grid_thw[:, 0] * (grid_thw[:, 1] // merge_size) * (grid_thw[:, 2] // merge_size)).sum().item())
+
+    def _repeat_visual_token(token_id, grid_thw, merge_size):
+        count = _merged_token_count(grid_thw, merge_size)
+        return [token_id] * count
 
 
 class ArlowModelTester(CausalLMModelTester):
@@ -347,14 +356,13 @@ class ArlowIntegrationTest(unittest.TestCase):
         )
         video = torch.randn(24, 3, 112, 112)
         outputs = video_processor(videos=[video], return_metadata=True)
-        grid = outputs["video_grid_thw"][0]
-        grid = grid.tolist() if hasattr(grid, "tolist") else grid
-        tokens = int(grid[0]) * int(grid[1]) * int(grid[2])
-        self.assertLessEqual(tokens, video_processor.max_tokens_per_video)
+        grid = outputs["video_grid_thw"]
+        merged_tokens = _merged_token_count(grid, video_processor.merge_size)
+        self.assertLessEqual(merged_tokens, video_processor.max_tokens_per_video)
         metadata = outputs["video_metadata"][0]
         self.assertEqual(
             len(metadata.frames_indices),
-            int(grid[0]) * video_processor.temporal_patch_size,
+            int(grid[0, 0]) * video_processor.temporal_patch_size,
         )
 
     def test_video_processor_motion_adaptive_sampling(self):
@@ -496,7 +504,7 @@ class ArlowIntegrationTest(unittest.TestCase):
         self.assertTrue(model.visual.enable_deepstack)
 
         pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
-        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+        image_grid_thw = torch.tensor([[1, 2, 2]], device=torch_device)
 
         pooled, deepstack = model.get_image_features(
             pixel_values,
@@ -612,7 +620,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
         # Grid dimensions: (num_images, 3) as [temporal=1, height, width]
         # After patching: 28/14 = 2 patches per dimension
-        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+        image_grid_thw = torch.tensor([[1, 2, 2]], device=torch_device)
 
         with torch.no_grad():
             outputs = model(
@@ -658,14 +666,18 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
         model = ArlowForConditionalGeneration(config).to(torch_device).eval()
 
-        # Text with video placeholder
-        input_ids = torch.tensor([[1, 2, 11, 13, 12, 3, 4, 5]], device=torch_device)
-
         # Video: (batch, channels, temporal, height, width)
         pixel_values_videos = torch.randn(1, 3, 4, 28, 28, device=torch_device)
 
         # Grid: (num_videos, 3) as [temporal, height, width] after patching
         video_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)  # 4/2=2, 28/14=2
+        video_tokens = _repeat_visual_token(config.video_token_id, video_grid_thw, config.vision_config.spatial_merge_size)
+
+        # Text with video placeholders matching the merged visual token count
+        input_ids = torch.tensor(
+            [[1, 2, config.vision_start_token_id, *video_tokens, config.vision_end_token_id, 3, 4, 5]],
+            device=torch_device,
+        )
 
         with torch.no_grad():
             outputs = model(
@@ -710,15 +722,34 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
         model = ArlowForConditionalGeneration(config).to(torch_device).eval()
 
-        # Text with both image and video placeholders
-        input_ids = torch.tensor([[1, 11, 10, 12, 2, 3, 11, 13, 12, 4, 5]], device=torch_device)
-
         # Image and video inputs
         pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
         pixel_values_videos = torch.randn(1, 3, 4, 28, 28, device=torch_device)
 
-        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+        image_grid_thw = torch.tensor([[1, 2, 2]], device=torch_device)
         video_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+        image_tokens = _repeat_visual_token(config.image_token_id, image_grid_thw, config.vision_config.spatial_merge_size)
+        video_tokens = _repeat_visual_token(config.video_token_id, video_grid_thw, config.vision_config.spatial_merge_size)
+
+        # Text with both image and video placeholders matching merged visual token counts
+        input_ids = torch.tensor(
+            [
+                [
+                    1,
+                    config.vision_start_token_id,
+                    *image_tokens,
+                    config.vision_end_token_id,
+                    2,
+                    3,
+                    config.vision_start_token_id,
+                    *video_tokens,
+                    config.vision_end_token_id,
+                    4,
+                    5,
+                ]
+            ],
+            device=torch_device,
+        )
 
         with torch.no_grad():
             outputs = model(
@@ -765,7 +796,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
         input_ids = torch.tensor([[1, 2, 11, 10, 3, 4, 5]], device=torch_device)
         pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
-        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+        image_grid_thw = torch.tensor([[1, 2, 2]], device=torch_device)
 
         # Labels for training
         labels = input_ids.clone()
@@ -864,7 +895,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
         input_ids = torch.tensor([[1, 11, 10, 3]], device=torch_device)
         pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
-        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+        image_grid_thw = torch.tensor([[1, 2, 2]], device=torch_device)
 
         with torch.no_grad():
             generated = model.generate(
@@ -911,7 +942,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
         # Test get_rope_index method
         input_ids = torch.tensor([[1, 2, 11, 10, 3, 4, 5]], device=torch_device)
-        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+        image_grid_thw = torch.tensor([[1, 2, 2]], device=torch_device)
 
         position_ids, rope_deltas = model.get_rope_index(
             input_ids=input_ids,
@@ -1023,7 +1054,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
         input_ids = torch.tensor([[1, 2, 11, 10, 12, 3]], device=torch_device)
         pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
-        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+        image_grid_thw = torch.tensor([[1, 2, 2]], device=torch_device)
 
         with torch.no_grad():
             _ = model(
@@ -1051,7 +1082,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
         # Test image input
         pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
-        grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+        grid_thw = torch.tensor([[1, 2, 2]], device=torch_device)
 
         with torch.no_grad():
             vision_embeddings = vision_model(pixel_values, grid_thw)
@@ -1095,7 +1126,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
         input_ids = torch.tensor([[1, 2, 11, 10, 3, 4, 5]], device=torch_device)
         pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
-        image_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
+        image_grid_thw = torch.tensor([[1, 2, 2]], device=torch_device)
         labels = input_ids.clone()
 
         outputs = model(
