@@ -371,6 +371,9 @@ class ArlowConfig(PreTrainedConfig):
             Whether to use gated cross-attention in upper layers.
         gated_cross_attention_start_layer (`int`, *optional*):
             Layer index to start gated cross-attention (if enabled).
+        text_deepstack_injection_layers (`list[int]`, *optional*):
+            Text decoder layer indexes where captured DeepStack visual features are injected. When unset, the
+            injection layers are spread across the text decoder according to the number of captured vision layers.
         image_token_id (`int`, *optional*, defaults to 131072):
             Token ID for image placeholders.
         video_token_id (`int`, *optional*, defaults to 131073):
@@ -432,6 +435,7 @@ class ArlowConfig(PreTrainedConfig):
         timestamp_alignment=False,
         use_gated_cross_attention=False,
         gated_cross_attention_start_layer=None,
+        text_deepstack_injection_layers: list[int] | None = None,
         image_token_id=131072,
         video_token_id=131073,
         vision_start_token_id=3,
@@ -507,6 +511,37 @@ class ArlowConfig(PreTrainedConfig):
         self.timestamp_alignment = timestamp_alignment
         self.use_gated_cross_attention = use_gated_cross_attention
         self.gated_cross_attention_start_layer = gated_cross_attention_start_layer
+        visual_deepstack_count = len(getattr(self.vision_config, "deepstack_visual_indexes", []))
+        if text_deepstack_injection_layers is None:
+            if visual_deepstack_count > 0:
+                text_deepstack_injection_layers = [
+                    min(
+                        text_config.num_hidden_layers - 1,
+                        max(0, ((slot + 1) * text_config.num_hidden_layers) // (visual_deepstack_count + 1)),
+                    )
+                    for slot in range(visual_deepstack_count)
+                ]
+            else:
+                text_deepstack_injection_layers = []
+        else:
+            text_deepstack_injection_layers = list(text_deepstack_injection_layers)
+            if len(set(text_deepstack_injection_layers)) != len(text_deepstack_injection_layers):
+                raise ValueError("text_deepstack_injection_layers must not contain duplicate layer indexes.")
+            invalid_layers = [
+                idx for idx in text_deepstack_injection_layers if idx < 0 or idx >= text_config.num_hidden_layers
+            ]
+            if invalid_layers:
+                raise ValueError(
+                    "text_deepstack_injection_layers contains indexes outside the text decoder depth: "
+                    f"{invalid_layers}."
+                )
+        if len(text_deepstack_injection_layers) != visual_deepstack_count:
+            raise ValueError(
+                "text_deepstack_injection_layers must have the same length as "
+                f"vision_config.deepstack_visual_indexes ({visual_deepstack_count}), got "
+                f"{len(text_deepstack_injection_layers)}."
+            )
+        self.text_deepstack_injection_layers = text_deepstack_injection_layers
         self.image_token_id = image_token_id
         self.video_token_id = video_token_id
         self.vision_start_token_id = vision_start_token_id

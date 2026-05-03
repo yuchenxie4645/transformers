@@ -199,6 +199,7 @@ class ArlowProcessor(ProcessorMixin):
             merge_len = self.image_processor.merge_size**2 if hasattr(self.image_processor, "merge_size") else 1
             index = 0
             placeholder_idx = 0
+            image_compound = f"{self.vision_start_token}{self.image_token}{self.vision_end_token}"
             for i in range(len(text)):
                 while text[i] is not None and self.image_token in text[i]:
                     views = 1
@@ -220,9 +221,14 @@ class ArlowProcessor(ProcessorMixin):
                             num_image_tokens = int(torch.prod(grid_entry).item()) // merge_len
                         else:
                             num_image_tokens = int(np.prod(grid_entry)) // merge_len
-                        placeholder_tokens += "<|placeholder|>" * num_image_tokens
+                        placeholder_tokens += (
+                            self.vision_start_token + "<|placeholder|>" * num_image_tokens + self.vision_end_token
+                        )
                         index += 1
-                    text[i] = text[i].replace(self.image_token, placeholder_tokens, 1)
+                    if image_compound in text[i]:
+                        text[i] = text[i].replace(image_compound, placeholder_tokens, 1)
+                    else:
+                        text[i] = text[i].replace(self.image_token, placeholder_tokens, 1)
                     placeholder_idx += 1
                 if text[i] is not None:
                     text[i] = text[i].replace("<|placeholder|>", self.image_token)
@@ -248,10 +254,13 @@ class ArlowProcessor(ProcessorMixin):
                             "Not enough video grid metadata to expand placeholders. "
                             "Check video preprocessing and prompt placeholders."
                         )
-                    # build per-frame blocks
-                    video_placeholder = ""
-                    frame_seqlen = video_grid_thw[index][1:].prod() // merge_len
-                    num_video_frames = int(video_grid_thw[index][0])
+                    # Build one contiguous visual span per video grid row so M-RoPE consumes one video item.
+                    grid_entry = video_grid_thw[index]
+                    if isinstance(grid_entry, torch.Tensor):
+                        num_video_tokens = int(torch.prod(grid_entry).item()) // merge_len
+                    else:
+                        num_video_tokens = int(np.prod(grid_entry)) // merge_len
+                    num_video_frames = int(grid_entry[0])
 
                     # compute timestamps if metadata exists, otherwise just omit
                     curr_timestamps = None
@@ -288,13 +297,15 @@ class ArlowProcessor(ProcessorMixin):
                             elif len(curr_timestamps) > num_video_frames:
                                 curr_timestamps = curr_timestamps[:num_video_frames]
 
-                    for frame_idx in range(num_video_frames):
-                        if curr_timestamps is not None:
-                            curr_time = curr_timestamps[frame_idx]
-                            video_placeholder += f"<{curr_time:.1f} seconds>"
-                        video_placeholder += (
-                            self.vision_start_token + "<|placeholder|>" * frame_seqlen + self.vision_end_token
-                        )
+                    timestamp_prefix = ""
+                    if curr_timestamps is not None:
+                        timestamp_prefix = "".join(f"<{curr_time:.1f} seconds>" for curr_time in curr_timestamps)
+                    video_placeholder = (
+                        timestamp_prefix
+                        + self.vision_start_token
+                        + "<|placeholder|>" * num_video_tokens
+                        + self.vision_end_token
+                    )
 
                     compound = f"{self.vision_start_token}{self.video_token}{self.vision_end_token}"
                     if compound in text[i]:

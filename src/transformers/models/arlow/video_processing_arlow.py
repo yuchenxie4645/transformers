@@ -65,9 +65,7 @@ def smart_resize(
 
     h_bar = round(height / factor) * factor
     w_bar = round(width / factor) * factor
-    t_bar = round(num_frames / temporal_factor) * temporal_factor
-    if t_bar <= 0:
-        t_bar = temporal_factor
+    t_bar = math.ceil(num_frames / temporal_factor) * temporal_factor
 
     # Apply constraints on total volumetric pixels (T × H × W)
     frame_pixels = h_bar * w_bar
@@ -85,9 +83,6 @@ def smart_resize(
     if max_frames is not None:
         capped_frames = max(max_frames // temporal_factor, 1) * temporal_factor
         t_bar = min(t_bar, capped_frames)
-
-    # Ensure we never exceed available frames while keeping divisibility
-    t_bar = min(t_bar, (num_frames // temporal_factor) * temporal_factor or temporal_factor)
 
     if return_temporal:
         return t_bar, h_bar, w_bar
@@ -409,19 +404,17 @@ class ArlowVideoProcessor(BaseVideoProcessor):
             grid_w_groups = max(grid_w_patches // merge_size, 1)
 
             temporal_groups = max(1, math.ceil(max(target_frames, 1) / temporal_patch_size))
-            if temporal_groups % temporal_patch_size != 0:
-                temporal_groups = ((temporal_groups + temporal_patch_size - 1) // temporal_patch_size) * temporal_patch_size
 
             if self.max_tokens_per_video is not None:
-                temporal_groups = min(temporal_groups, max(self.max_tokens_per_video, temporal_patch_size))
-                temporal_groups = max(temporal_groups, temporal_patch_size)
+                temporal_groups = min(temporal_groups, max(self.max_tokens_per_video, 1))
+                temporal_groups = max(temporal_groups, 1)
 
                 while (
                     temporal_groups * grid_h_groups * grid_w_groups > self.max_tokens_per_video
-                    and (temporal_groups > temporal_patch_size or grid_h_groups > 1 or grid_w_groups > 1)
+                    and (temporal_groups > 1 or grid_h_groups > 1 or grid_w_groups > 1)
                 ):
-                    if temporal_groups > temporal_patch_size:
-                        temporal_groups -= temporal_patch_size
+                    if temporal_groups > 1:
+                        temporal_groups -= 1
                     elif grid_h_groups >= grid_w_groups and grid_h_groups > 1:
                         grid_h_groups -= 1
                     elif grid_w_groups > 1:
@@ -429,7 +422,7 @@ class ArlowVideoProcessor(BaseVideoProcessor):
                     else:
                         break
 
-                temporal_groups = max(temporal_groups, temporal_patch_size)
+                temporal_groups = max(temporal_groups, 1)
                 grid_h_groups = max(grid_h_groups, 1)
                 grid_w_groups = max(grid_w_groups, 1)
                 resized_height = grid_h_groups * merge_size * patch_size

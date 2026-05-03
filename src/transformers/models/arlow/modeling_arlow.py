@@ -1639,9 +1639,6 @@ class ArlowModel(ArlowPreTrainedModel):
             gated_cross_attention_start_layer=config.gated_cross_attention_start_layer,
         )
 
-        # Cache for rope deltas
-        self.rope_deltas = None
-
         self.post_init()
 
     def get_input_embeddings(self):
@@ -2233,8 +2230,12 @@ class ArlowModel(ArlowPreTrainedModel):
                             deepstack_lists[layer_idx].append(feature.squeeze(0))
 
                 mapped_deepstack: list[torch.Tensor | None] = [None] * self.config.num_hidden_layers
-                vision_layer_indexes = getattr(self.config.vision_config, "deepstack_visual_indexes", [])
-                for slot_idx, layer_id in enumerate(vision_layer_indexes):
+                text_layer_indexes = getattr(
+                    self.config,
+                    "text_deepstack_injection_layers",
+                    getattr(self.config.vision_config, "deepstack_visual_indexes", []),
+                )
+                for slot_idx, layer_id in enumerate(text_layer_indexes):
                     if layer_id >= self.config.num_hidden_layers:
                         continue
                     layer_feats = deepstack_lists[slot_idx]
@@ -2245,24 +2246,19 @@ class ArlowModel(ArlowPreTrainedModel):
             deepstack_visual_embeds = None
 
         # Compute position_ids with M-ROPE if needed
+        current_rope_deltas = rope_deltas
         if position_ids is None:
-            need_new_rope = (
-                not hasattr(self, "rope_deltas")
-                or self.rope_deltas is None
-                or cache_position is None
-                or cache_position[0] == 0
-            )
+            need_new_rope = current_rope_deltas is None or cache_position is None or cache_position[0] == 0
             if need_new_rope:
-                position_ids, rope_deltas = self.get_rope_index(
+                position_ids, current_rope_deltas = self.get_rope_index(
                     input_ids, image_grid_thw, video_grid_thw, attention_mask
                 )
-                self.rope_deltas = rope_deltas
             else:
                 batch_size, seq_length, _ = inputs_embeds.shape
                 position_ids = torch.arange(seq_length, device=inputs_embeds.device)
                 position_ids = position_ids.view(1, 1, -1).expand(3, batch_size, -1)
 
-                delta = (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
+                delta = (cache_position[0] + current_rope_deltas).to(inputs_embeds.device)
                 if delta.ndim == 1:
                     delta = delta.unsqueeze(0)
                 if delta.shape[0] != batch_size:
@@ -2294,7 +2290,7 @@ class ArlowModel(ArlowPreTrainedModel):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            rope_deltas=self.rope_deltas,
+            rope_deltas=current_rope_deltas,
         )
 
 
@@ -2521,16 +2517,16 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
             if model_inputs["cache_position"] is not None and len(model_inputs["cache_position"]) != target_seq_len:
                 model_inputs["cache_position"] = model_inputs["cache_position"][-target_seq_len:]
 
-        # Keep model-level rope deltas in sync and optionally pack 4D position_ids: [text; 3D mrope]
+        # Keep per-request rope deltas in model kwargs and optionally pack 4D position_ids: [text; 3D mrope]
         prefill_stage = (cache_position is not None and cache_position[0] == 0) or cache_length == 0
-        if prefill_stage or getattr(self.model, "rope_deltas", None) is None:
+        if (prefill_stage or rope_deltas is None) and model_inputs.get("input_ids") is not None:
             _, rope_deltas = self.model.get_rope_index(
                 model_inputs.get("input_ids"),
                 image_grid_thw=image_grid_thw,
                 video_grid_thw=video_grid_thw,
                 attention_mask=attention_mask,
             )
-            self.model.rope_deltas = rope_deltas
+            model_inputs["rope_deltas"] = rope_deltas
 
         # After prefill, don't pass pixels again
         if model_inputs["cache_position"] is not None and model_inputs["cache_position"][0] != 0:

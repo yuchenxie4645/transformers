@@ -410,6 +410,9 @@ class ArlowConfig(PreTrainedConfig):
             Whether to use gated cross-attention in upper layers.
         gated_cross_attention_start_layer (`int`, *optional*):
             Layer index to start gated cross-attention (if enabled).
+        text_deepstack_injection_layers (`list[int]`, *optional*):
+            Text decoder layer indexes where captured DeepStack visual features are injected. When unset, the
+            injection layers are spread across the text decoder according to the number of captured vision layers.
         image_token_id (`int`, *optional*, defaults to 131072):
             Token ID for image placeholders.
         video_token_id (`int`, *optional*, defaults to 131073):
@@ -471,6 +474,7 @@ class ArlowConfig(PreTrainedConfig):
         timestamp_alignment=False,
         use_gated_cross_attention=False,
         gated_cross_attention_start_layer=None,
+        text_deepstack_injection_layers: list[int] | None = None,
         image_token_id=131072,
         video_token_id=131073,
         vision_start_token_id=3,
@@ -546,6 +550,37 @@ class ArlowConfig(PreTrainedConfig):
         self.timestamp_alignment = timestamp_alignment
         self.use_gated_cross_attention = use_gated_cross_attention
         self.gated_cross_attention_start_layer = gated_cross_attention_start_layer
+        visual_deepstack_count = len(getattr(self.vision_config, "deepstack_visual_indexes", []))
+        if text_deepstack_injection_layers is None:
+            if visual_deepstack_count > 0:
+                text_deepstack_injection_layers = [
+                    min(
+                        text_config.num_hidden_layers - 1,
+                        max(0, ((slot + 1) * text_config.num_hidden_layers) // (visual_deepstack_count + 1)),
+                    )
+                    for slot in range(visual_deepstack_count)
+                ]
+            else:
+                text_deepstack_injection_layers = []
+        else:
+            text_deepstack_injection_layers = list(text_deepstack_injection_layers)
+            if len(set(text_deepstack_injection_layers)) != len(text_deepstack_injection_layers):
+                raise ValueError("text_deepstack_injection_layers must not contain duplicate layer indexes.")
+            invalid_layers = [
+                idx for idx in text_deepstack_injection_layers if idx < 0 or idx >= text_config.num_hidden_layers
+            ]
+            if invalid_layers:
+                raise ValueError(
+                    "text_deepstack_injection_layers contains indexes outside the text decoder depth: "
+                    f"{invalid_layers}."
+                )
+        if len(text_deepstack_injection_layers) != visual_deepstack_count:
+            raise ValueError(
+                "text_deepstack_injection_layers must have the same length as "
+                f"vision_config.deepstack_visual_indexes ({visual_deepstack_count}), got "
+                f"{len(text_deepstack_injection_layers)}."
+            )
+        self.text_deepstack_injection_layers = text_deepstack_injection_layers
         self.image_token_id = image_token_id
         self.video_token_id = video_token_id
         self.vision_start_token_id = vision_start_token_id
@@ -2269,9 +2304,6 @@ class ArlowModel(ArlowPreTrainedModel):
             gated_cross_attention_start_layer=config.gated_cross_attention_start_layer,
         )
 
-        # Cache for rope deltas
-        self.rope_deltas = None
-
         self.post_init()
 
     def get_input_embeddings(self):
@@ -2863,8 +2895,12 @@ class ArlowModel(ArlowPreTrainedModel):
                             deepstack_lists[layer_idx].append(feature.squeeze(0))
 
                 mapped_deepstack: list[torch.Tensor | None] = [None] * self.config.num_hidden_layers
-                vision_layer_indexes = getattr(self.config.vision_config, "deepstack_visual_indexes", [])
-                for slot_idx, layer_id in enumerate(vision_layer_indexes):
+                text_layer_indexes = getattr(
+                    self.config,
+                    "text_deepstack_injection_layers",
+                    getattr(self.config.vision_config, "deepstack_visual_indexes", []),
+                )
+                for slot_idx, layer_id in enumerate(text_layer_indexes):
                     if layer_id >= self.config.num_hidden_layers:
                         continue
                     layer_feats = deepstack_lists[slot_idx]
@@ -2875,24 +2911,19 @@ class ArlowModel(ArlowPreTrainedModel):
             deepstack_visual_embeds = None
 
         # Compute position_ids with M-ROPE if needed
+        current_rope_deltas = rope_deltas
         if position_ids is None:
-            need_new_rope = (
-                not hasattr(self, "rope_deltas")
-                or self.rope_deltas is None
-                or cache_position is None
-                or cache_position[0] == 0
-            )
+            need_new_rope = current_rope_deltas is None or cache_position is None or cache_position[0] == 0
             if need_new_rope:
-                position_ids, rope_deltas = self.get_rope_index(
+                position_ids, current_rope_deltas = self.get_rope_index(
                     input_ids, image_grid_thw, video_grid_thw, attention_mask
                 )
-                self.rope_deltas = rope_deltas
             else:
                 batch_size, seq_length, _ = inputs_embeds.shape
                 position_ids = torch.arange(seq_length, device=inputs_embeds.device)
                 position_ids = position_ids.view(1, 1, -1).expand(3, batch_size, -1)
 
-                delta = (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
+                delta = (cache_position[0] + current_rope_deltas).to(inputs_embeds.device)
                 if delta.ndim == 1:
                     delta = delta.unsqueeze(0)
                 if delta.shape[0] != batch_size:
@@ -2924,7 +2955,7 @@ class ArlowModel(ArlowPreTrainedModel):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            rope_deltas=self.rope_deltas,
+            rope_deltas=current_rope_deltas,
         )
 
 
@@ -3151,16 +3182,16 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
             if model_inputs["cache_position"] is not None and len(model_inputs["cache_position"]) != target_seq_len:
                 model_inputs["cache_position"] = model_inputs["cache_position"][-target_seq_len:]
 
-        # Keep model-level rope deltas in sync and optionally pack 4D position_ids: [text; 3D mrope]
+        # Keep per-request rope deltas in model kwargs and optionally pack 4D position_ids: [text; 3D mrope]
         prefill_stage = (cache_position is not None and cache_position[0] == 0) or cache_length == 0
-        if prefill_stage or getattr(self.model, "rope_deltas", None) is None:
+        if (prefill_stage or rope_deltas is None) and model_inputs.get("input_ids") is not None:
             _, rope_deltas = self.model.get_rope_index(
                 model_inputs.get("input_ids"),
                 image_grid_thw=image_grid_thw,
                 video_grid_thw=video_grid_thw,
                 attention_mask=attention_mask,
             )
-            self.model.rope_deltas = rope_deltas
+            model_inputs["rope_deltas"] = rope_deltas
 
         # After prefill, don't pass pixels again
         if model_inputs["cache_position"] is not None and model_inputs["cache_position"][0] != 0:
@@ -3350,6 +3381,7 @@ class ArlowProcessor(ProcessorMixin):
             merge_len = self.image_processor.merge_size**2 if hasattr(self.image_processor, "merge_size") else 1
             index = 0
             placeholder_idx = 0
+            image_compound = f"{self.vision_start_token}{self.image_token}{self.vision_end_token}"
             for i in range(len(text)):
                 while text[i] is not None and self.image_token in text[i]:
                     views = 1
@@ -3371,9 +3403,14 @@ class ArlowProcessor(ProcessorMixin):
                             num_image_tokens = int(torch.prod(grid_entry).item()) // merge_len
                         else:
                             num_image_tokens = int(np.prod(grid_entry)) // merge_len
-                        placeholder_tokens += "<|placeholder|>" * num_image_tokens
+                        placeholder_tokens += (
+                            self.vision_start_token + "<|placeholder|>" * num_image_tokens + self.vision_end_token
+                        )
                         index += 1
-                    text[i] = text[i].replace(self.image_token, placeholder_tokens, 1)
+                    if image_compound in text[i]:
+                        text[i] = text[i].replace(image_compound, placeholder_tokens, 1)
+                    else:
+                        text[i] = text[i].replace(self.image_token, placeholder_tokens, 1)
                     placeholder_idx += 1
                 if text[i] is not None:
                     text[i] = text[i].replace("<|placeholder|>", self.image_token)
@@ -3399,10 +3436,13 @@ class ArlowProcessor(ProcessorMixin):
                             "Not enough video grid metadata to expand placeholders. "
                             "Check video preprocessing and prompt placeholders."
                         )
-                    # build per-frame blocks
-                    video_placeholder = ""
-                    frame_seqlen = video_grid_thw[index][1:].prod() // merge_len
-                    num_video_frames = int(video_grid_thw[index][0])
+                    # Build one contiguous visual span per video grid row so M-RoPE consumes one video item.
+                    grid_entry = video_grid_thw[index]
+                    if isinstance(grid_entry, torch.Tensor):
+                        num_video_tokens = int(torch.prod(grid_entry).item()) // merge_len
+                    else:
+                        num_video_tokens = int(np.prod(grid_entry)) // merge_len
+                    num_video_frames = int(grid_entry[0])
 
                     # compute timestamps if metadata exists, otherwise just omit
                     curr_timestamps = None
@@ -3439,13 +3479,15 @@ class ArlowProcessor(ProcessorMixin):
                             elif len(curr_timestamps) > num_video_frames:
                                 curr_timestamps = curr_timestamps[:num_video_frames]
 
-                    for frame_idx in range(num_video_frames):
-                        if curr_timestamps is not None:
-                            curr_time = curr_timestamps[frame_idx]
-                            video_placeholder += f"<{curr_time:.1f} seconds>"
-                        video_placeholder += (
-                            self.vision_start_token + "<|placeholder|>" * frame_seqlen + self.vision_end_token
-                        )
+                    timestamp_prefix = ""
+                    if curr_timestamps is not None:
+                        timestamp_prefix = "".join(f"<{curr_time:.1f} seconds>" for curr_time in curr_timestamps)
+                    video_placeholder = (
+                        timestamp_prefix
+                        + self.vision_start_token
+                        + "<|placeholder|>" * num_video_tokens
+                        + self.vision_end_token
+                    )
 
                     compound = f"{self.vision_start_token}{self.video_token}{self.vision_end_token}"
                     if compound in text[i]:
