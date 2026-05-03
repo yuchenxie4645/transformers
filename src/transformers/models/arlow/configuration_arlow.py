@@ -109,8 +109,10 @@ class ArlowVisionConfig(PreTrainedConfig):
             else:
                 deepstack_visual_indexes = []
         else:
-            deepstack_visual_indexes = sorted(set(idx for idx in deepstack_visual_indexes if 0 <= idx < depth))
+            deepstack_visual_indexes = sorted({idx for idx in deepstack_visual_indexes if 0 <= idx < depth})
         self.deepstack_visual_indexes = deepstack_visual_indexes
+
+        self.validate_architecture()
 
         head_dim = embed_dim // num_heads
         if mrope_sections is None:
@@ -127,6 +129,12 @@ class ArlowVisionConfig(PreTrainedConfig):
                 )
             self.mrope_sections = mrope_sections
 
+    def validate_architecture(self):
+        if self.num_heads <= 0:
+            raise ValueError("num_heads must be positive.")
+        if self.embed_dim % self.num_heads != 0:
+            raise ValueError(f"embed_dim ({self.embed_dim}) must be divisible by num_heads ({self.num_heads}).")
+
 
 class ArlowTextConfig(PreTrainedConfig):
     r"""
@@ -137,6 +145,21 @@ class ArlowTextConfig(PreTrainedConfig):
 
     model_type = "arlow_text"
     base_config_key = "text_config"
+    keys_to_ignore_at_inference = ["past_key_values"]
+    base_model_tp_plan = {
+        "layers.*.self_attn.q_proj": "colwise",
+        "layers.*.self_attn.k_proj": "colwise",
+        "layers.*.self_attn.v_proj": "colwise",
+        "layers.*.self_attn.o_proj": "rowwise",
+        "layers.*.mlp.gate_proj": "colwise",
+        "layers.*.mlp.up_proj": "colwise",
+        "layers.*.mlp.down_proj": "rowwise",
+    }
+    base_model_pp_plan = {
+        "embed_tokens": (["input_ids"], ["inputs_embeds"]),
+        "layers": (["hidden_states", "attention_mask"], ["hidden_states"]),
+        "norm": (["hidden_states"], ["hidden_states"]),
+    }
     ignore_keys_at_rope_validation = {"mrope_sections"}
 
     def __init__(
@@ -178,6 +201,8 @@ class ArlowTextConfig(PreTrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
+        if self.num_key_value_heads is None:
+            self.num_key_value_heads = self.num_attention_heads
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
@@ -188,6 +213,13 @@ class ArlowTextConfig(PreTrainedConfig):
         self.attention_dropout = attention_dropout
         self.resid_dropout = resid_dropout
         self.mlp_dropout = mlp_dropout
+        if self.num_attention_heads <= 0:
+            raise ValueError("num_attention_heads must be positive.")
+        if head_dim is None and self.hidden_size % self.num_attention_heads != 0:
+            raise ValueError(
+                f"hidden_size ({self.hidden_size}) must be divisible by num_attention_heads "
+                f"({self.num_attention_heads}) when head_dim is not set."
+            )
         self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
 
         # Provide default M-ROPE sections for text model as well
@@ -202,6 +234,7 @@ class ArlowTextConfig(PreTrainedConfig):
             self.mrope_sections = [t, h, w]
         else:
             self.mrope_sections = mrope_sections
+        self.validate_architecture()
 
         # Validate rope parameters
         if self.rope_parameters is not None and "type" in self.rope_parameters:
@@ -230,6 +263,24 @@ class ArlowTextConfig(PreTrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+
+    def validate_architecture(self):
+        if self.num_attention_heads <= 0:
+            raise ValueError("num_attention_heads must be positive.")
+        if self.num_key_value_heads <= 0:
+            raise ValueError("num_key_value_heads must be positive.")
+        if self.num_attention_heads % self.num_key_value_heads != 0:
+            raise ValueError(
+                f"num_attention_heads ({self.num_attention_heads}) must be divisible by "
+                f"num_key_value_heads ({self.num_key_value_heads})."
+            )
+        if self.head_dim <= 0:
+            raise ValueError("head_dim must be positive.")
+        if sum(self.mrope_sections) != self.head_dim:
+            raise ValueError(
+                f"Sum of mrope_sections {self.mrope_sections} (={sum(self.mrope_sections)}) "
+                f"must equal head_dim ({self.head_dim})."
+            )
 
 
 class ArlowConfig(PreTrainedConfig):
@@ -507,6 +558,7 @@ class ArlowConfig(PreTrainedConfig):
             )
 
         self._mrope_ratio = [section / self.head_dim for section in self.mrope_sections]
+        self.validate_architecture()
         vision_head_dim = self.vision_config.embed_dim // self.vision_config.num_heads
         scaled_sections = self._scale_mrope_sections_from_ratio(vision_head_dim, self._mrope_ratio)
         self.vision_config.mrope_sections = scaled_sections
@@ -565,6 +617,24 @@ class ArlowConfig(PreTrainedConfig):
             total -= 1
 
         return base
+
+    def validate_architecture(self):
+        if self.num_attention_heads <= 0:
+            raise ValueError("num_attention_heads must be positive.")
+        if self.num_key_value_heads <= 0:
+            raise ValueError("num_key_value_heads must be positive.")
+        if self.num_attention_heads % self.num_key_value_heads != 0:
+            raise ValueError(
+                f"num_attention_heads ({self.num_attention_heads}) must be divisible by "
+                f"num_key_value_heads ({self.num_key_value_heads})."
+            )
+        if self.vision_config.num_heads <= 0:
+            raise ValueError("vision_config.num_heads must be positive.")
+        if self.vision_config.embed_dim % self.vision_config.num_heads != 0:
+            raise ValueError(
+                f"vision_config.embed_dim ({self.vision_config.embed_dim}) must be divisible by "
+                f"vision_config.num_heads ({self.vision_config.num_heads})."
+            )
 
 
 __all__ = ["ArlowConfig", "ArlowTextConfig", "ArlowVisionConfig"]

@@ -481,10 +481,8 @@ class ArlowAttention(nn.Module):
         if sdpa_incremental_decode:
             attention_mask = None
 
-        # Dispatch to proper attention implementation
-        attention_interface = eager_attention_forward
-        if getattr(self.config, "_attn_implementation", "eager") != "eager" and not sdpa_incremental_decode:
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attn_impl = "eager" if sdpa_incremental_decode else getattr(self.config, "_attn_implementation", "eager")
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(attn_impl, eager_attention_forward)
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -706,7 +704,7 @@ class ArlowVLAttention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         cu_seqlens: torch.Tensor | None = None,
         token_coords: torch.Tensor | None = None,
-        **kwargs,
+        **kwargs: Unpack[FlashAttentionKwargs],
     ) -> torch.Tensor:
         """
         Args:
@@ -735,7 +733,6 @@ class ArlowVLAttention(nn.Module):
         value_states = value_states.unsqueeze(0).transpose(1, 2)
 
         # Dispatch to attention backends (FA2/SDPA/eager)
-        attention_interface: Callable = eager_attention_forward
         # Use the same attribute name as text model if set on the vision config via parent
         attn_impl = getattr(self, "_attn_implementation", None)
         if attn_impl is None:
@@ -745,8 +742,7 @@ class ArlowVLAttention(nn.Module):
             attn_impl = getattr(getattr(self, "config", None), "_attn_implementation", "eager")
         if getattr(self.config, "use_deformable_attention", False):
             attn_impl = "eager"
-        if attn_impl != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[attn_impl]
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(attn_impl, eager_attention_forward)
 
         bias_mask: torch.Tensor | None = None
         if getattr(self.config, "use_deformable_attention", False) and token_coords is not None:
@@ -1348,8 +1344,8 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
                 None if position_ids is None else tuple(position_ids.shape),
                 None if text_position_ids is None else tuple(text_position_ids.shape),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to log ArlowTextModel.forward tensor shapes: %s", exc)
 
         # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
@@ -1532,12 +1528,6 @@ class ArlowForCausalLM(ArlowTextPreTrainedModel, GenerationMixin):
             is_first_iteration=is_first_iteration,
             **kwargs,
         )
-
-    # reorder cache (beam)
-    def _reorder_cache(self, past_key_values, beam_idx):
-        if past_key_values is not None and hasattr(past_key_values, "reorder_cache"):
-            past_key_values.reorder_cache(beam_idx)
-        return past_key_values
 
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLForConditionalGeneration
@@ -2542,11 +2532,6 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
             model_inputs["pixel_values_videos"] = None
 
         return model_inputs
-
-    def _reorder_cache(self, past_key_values, beam_idx):
-        if past_key_values is not None and hasattr(past_key_values, "reorder_cache"):
-            past_key_values.reorder_cache(beam_idx)
-        return past_key_values
 
 
 class ArlowForSequenceClassification(ArlowPreTrainedModel):

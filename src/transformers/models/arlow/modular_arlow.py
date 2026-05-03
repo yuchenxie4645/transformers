@@ -136,9 +136,7 @@ class ArlowVisionConfig(PreTrainedConfig):
         self.deformable_attention_window = deformable_attention_window
         self.deformable_attention_strength = deformable_attention_strength
         self.initializer_range = initializer_range
-        self.max_position_embeddings = (
-            max_position_embeddings if max_position_embeddings is not None else 32768
-        )
+        self.max_position_embeddings = max_position_embeddings if max_position_embeddings is not None else 32768
         if deepstack_visual_indexes is None:
             if depth >= 6:
                 approx = {
@@ -150,8 +148,10 @@ class ArlowVisionConfig(PreTrainedConfig):
             else:
                 deepstack_visual_indexes = []
         else:
-            deepstack_visual_indexes = sorted(set(idx for idx in deepstack_visual_indexes if 0 <= idx < depth))
+            deepstack_visual_indexes = sorted({idx for idx in deepstack_visual_indexes if 0 <= idx < depth})
         self.deepstack_visual_indexes = deepstack_visual_indexes
+
+        self.validate_architecture()
 
         head_dim = embed_dim // num_heads
         if mrope_sections is None:
@@ -168,6 +168,12 @@ class ArlowVisionConfig(PreTrainedConfig):
                 )
             self.mrope_sections = mrope_sections
 
+    def validate_architecture(self):
+        if self.num_heads <= 0:
+            raise ValueError("num_heads must be positive.")
+        if self.embed_dim % self.num_heads != 0:
+            raise ValueError(f"embed_dim ({self.embed_dim}) must be divisible by num_heads ({self.num_heads}).")
+
 
 class ArlowTextConfig(PreTrainedConfig):
     r"""
@@ -178,6 +184,21 @@ class ArlowTextConfig(PreTrainedConfig):
 
     model_type = "arlow_text"
     base_config_key = "text_config"
+    keys_to_ignore_at_inference = ["past_key_values"]
+    base_model_tp_plan = {
+        "layers.*.self_attn.q_proj": "colwise",
+        "layers.*.self_attn.k_proj": "colwise",
+        "layers.*.self_attn.v_proj": "colwise",
+        "layers.*.self_attn.o_proj": "rowwise",
+        "layers.*.mlp.gate_proj": "colwise",
+        "layers.*.mlp.up_proj": "colwise",
+        "layers.*.mlp.down_proj": "rowwise",
+    }
+    base_model_pp_plan = {
+        "embed_tokens": (["input_ids"], ["inputs_embeds"]),
+        "layers": (["hidden_states", "attention_mask"], ["hidden_states"]),
+        "norm": (["hidden_states"], ["hidden_states"]),
+    }
     ignore_keys_at_rope_validation = {"mrope_sections"}
 
     def __init__(
@@ -219,6 +240,8 @@ class ArlowTextConfig(PreTrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = num_key_value_heads
+        if self.num_key_value_heads is None:
+            self.num_key_value_heads = self.num_attention_heads
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
@@ -229,6 +252,13 @@ class ArlowTextConfig(PreTrainedConfig):
         self.attention_dropout = attention_dropout
         self.resid_dropout = resid_dropout
         self.mlp_dropout = mlp_dropout
+        if self.num_attention_heads <= 0:
+            raise ValueError("num_attention_heads must be positive.")
+        if head_dim is None and self.hidden_size % self.num_attention_heads != 0:
+            raise ValueError(
+                f"hidden_size ({self.hidden_size}) must be divisible by num_attention_heads "
+                f"({self.num_attention_heads}) when head_dim is not set."
+            )
         self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
 
         # Provide default M-ROPE sections for text model as well
@@ -243,6 +273,7 @@ class ArlowTextConfig(PreTrainedConfig):
             self.mrope_sections = [t, h, w]
         else:
             self.mrope_sections = mrope_sections
+        self.validate_architecture()
 
         # Validate rope parameters
         if self.rope_parameters is not None and "type" in self.rope_parameters:
@@ -271,6 +302,24 @@ class ArlowTextConfig(PreTrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
+
+    def validate_architecture(self):
+        if self.num_attention_heads <= 0:
+            raise ValueError("num_attention_heads must be positive.")
+        if self.num_key_value_heads <= 0:
+            raise ValueError("num_key_value_heads must be positive.")
+        if self.num_attention_heads % self.num_key_value_heads != 0:
+            raise ValueError(
+                f"num_attention_heads ({self.num_attention_heads}) must be divisible by "
+                f"num_key_value_heads ({self.num_key_value_heads})."
+            )
+        if self.head_dim <= 0:
+            raise ValueError("head_dim must be positive.")
+        if sum(self.mrope_sections) != self.head_dim:
+            raise ValueError(
+                f"Sum of mrope_sections {self.mrope_sections} (={sum(self.mrope_sections)}) "
+                f"must equal head_dim ({self.head_dim})."
+            )
 
 
 class ArlowConfig(PreTrainedConfig):
@@ -548,6 +597,7 @@ class ArlowConfig(PreTrainedConfig):
             )
 
         self._mrope_ratio = [section / self.head_dim for section in self.mrope_sections]
+        self.validate_architecture()
         vision_head_dim = self.vision_config.embed_dim // self.vision_config.num_heads
         scaled_sections = self._scale_mrope_sections_from_ratio(vision_head_dim, self._mrope_ratio)
         self.vision_config.mrope_sections = scaled_sections
@@ -607,6 +657,24 @@ class ArlowConfig(PreTrainedConfig):
 
         return base
 
+    def validate_architecture(self):
+        if self.num_attention_heads <= 0:
+            raise ValueError("num_attention_heads must be positive.")
+        if self.num_key_value_heads <= 0:
+            raise ValueError("num_key_value_heads must be positive.")
+        if self.num_attention_heads % self.num_key_value_heads != 0:
+            raise ValueError(
+                f"num_attention_heads ({self.num_attention_heads}) must be divisible by "
+                f"num_key_value_heads ({self.num_key_value_heads})."
+            )
+        if self.vision_config.num_heads <= 0:
+            raise ValueError("vision_config.num_heads must be positive.")
+        if self.vision_config.embed_dim % self.vision_config.num_heads != 0:
+            raise ValueError(
+                f"vision_config.embed_dim ({self.vision_config.embed_dim}) must be divisible by "
+                f"vision_config.num_heads ({self.vision_config.num_heads})."
+            )
+
 
 @dataclass
 class ArlowMultimodalModelOutputWithPast(ModelOutput):
@@ -665,6 +733,7 @@ class ArlowRMSNorm(nn.Module):
 
     def extra_repr(self):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
+
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLRotaryEmbedding
 class ArlowTextRotaryEmbedding(nn.Module):
@@ -758,6 +827,7 @@ class ArlowTextRotaryEmbedding(nn.Module):
         sin = emb.sin() * self.attention_scaling
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
+
 # Inspired by transformers.models.llama.modeling_llama.rotate_half
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
     """Rotate the hidden states using the standard half-split RoPE layout."""
@@ -788,6 +858,7 @@ def apply_interleaved_mrope(freqs: torch.Tensor, mrope_section: list[int]) -> to
         freqs_t[..., idx] = freqs[dim, ..., idx]
     return freqs_t
 
+
 # Inspired by transformers.models.gemma.modeling_gemma.apply_rotary_pos_emb
 def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     cos = cos.unsqueeze(unsqueeze_dim)
@@ -795,6 +866,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
+
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.apply_rotary_pos_emb_vision
 def apply_rotary_pos_emb_vision(
@@ -810,6 +882,7 @@ def apply_rotary_pos_emb_vision(
     q_embed = q_embed.to(orig_q_dtype)
     k_embed = k_embed.to(orig_k_dtype)
     return q_embed, k_embed
+
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.VisionRotaryEmbedding
 class ArlowVLRotaryEmbedding(nn.Module):
@@ -831,7 +904,7 @@ class ArlowVLRotaryEmbedding(nn.Module):
         self.rope_type = "default"
         if config is not None:
             if isinstance(config, ArlowVisionConfig):
-                dim = (config.embed_dim // config.num_heads)
+                dim = config.embed_dim // config.num_heads
             else:
                 # Fallback path if text config passed -- E264
                 dim = getattr(config, "head_dim", None) or (config.hidden_size // config.num_attention_heads)
@@ -946,6 +1019,7 @@ class ArlowVLRotaryEmbedding(nn.Module):
         concatenated = torch.cat(freqs_list, dim=0)
         return concatenated.to(dtype=dtype)
 
+
 # Inspired by transformers.models.gemma.modeling_gemma.repeat_kv
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
@@ -953,6 +1027,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         return hidden_states
     hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
 
 # Inspired by transformers.models.gemma.modeling_gemma.eager_attention_forward
 def eager_attention_forward(
@@ -979,6 +1054,7 @@ def eager_attention_forward(
     attn_output = attn_output.transpose(1, 2).contiguous()
 
     return attn_output, attn_weights
+
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLAttention and transformers.models.gemma.modeling_gemma.GemmaAttention
 class ArlowAttention(nn.Module):
@@ -1051,13 +1127,8 @@ class ArlowAttention(nn.Module):
         if sdpa_incremental_decode:
             attention_mask = None
 
-        # Dispatch to proper attention implementation
-        attention_interface = eager_attention_forward
-        if (
-            getattr(self.config, "_attn_implementation", "eager") != "eager"
-            and not sdpa_incremental_decode
-        ):
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attn_impl = "eager" if sdpa_incremental_decode else getattr(self.config, "_attn_implementation", "eager")
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(attn_impl, eager_attention_forward)
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -1077,6 +1148,7 @@ class ArlowAttention(nn.Module):
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
+
 # Inspired by transformers.models.gemma.modeling_gemma.GemmaMLP
 class ArlowVLMLP(nn.Module):
     def __init__(self, config: ArlowConfig):
@@ -1093,6 +1165,7 @@ class ArlowVLMLP(nn.Module):
         x = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         output = self.dropout(x)
         return output
+
 
 # Inspired by transformers.models.gemma.modeling_gemma.GemmaDecoderLayer and transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLDecoderLayer
 class ArlowDecoderLayer(GradientCheckpointingLayer):
@@ -1140,6 +1213,7 @@ class ArlowDecoderLayer(GradientCheckpointingLayer):
 
         return (hidden_states,)
 
+
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.PatchEmbed
 class ArlowVLPatchEmbed(nn.Module):
     """Convert images/videos to patch embeddings."""
@@ -1174,13 +1248,9 @@ class ArlowVLPatchEmbed(nn.Module):
 
         if hidden_states.dim() == 3:
             batch_size, seq_len, patch_dim = hidden_states.shape
-            expected_dim = (
-                self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size
-            )
+            expected_dim = self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size
             if patch_dim != expected_dim:
-                raise ValueError(
-                    f"Expected flattened patch dimension {expected_dim}, but received {patch_dim}."
-                )
+                raise ValueError(f"Expected flattened patch dimension {expected_dim}, but received {patch_dim}.")
             hidden_states = hidden_states.reshape(
                 batch_size * seq_len,
                 self.in_channels,
@@ -1208,6 +1278,7 @@ class ArlowVLPatchEmbed(nn.Module):
         batch_size = projected.shape[0]
         projected = projected.reshape(batch_size, self.embed_dim, -1).transpose(1, 2)
         return projected
+
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.PatchMerger
 class ArlowVLPatchMerger(nn.Module):
@@ -1237,6 +1308,7 @@ class ArlowVLPatchMerger(nn.Module):
         output = self.mlp(x)
         return output
 
+
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.VisionAttention
 class ArlowVLAttention(nn.Module):
     """Vision self-attention with RoPE."""
@@ -1262,7 +1334,7 @@ class ArlowVLAttention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         cu_seqlens: torch.Tensor | None = None,
         token_coords: torch.Tensor | None = None,
-        **kwargs,
+        **kwargs: Unpack[FlashAttentionKwargs],
     ) -> torch.Tensor:
         """
         Args:
@@ -1291,7 +1363,6 @@ class ArlowVLAttention(nn.Module):
         value_states = value_states.unsqueeze(0).transpose(1, 2)
 
         # Dispatch to attention backends (FA2/SDPA/eager)
-        attention_interface: Callable = eager_attention_forward
         # Use the same attribute name as text model if set on the vision config via parent
         attn_impl = getattr(self, "_attn_implementation", None)
         if attn_impl is None:
@@ -1301,8 +1372,7 @@ class ArlowVLAttention(nn.Module):
             attn_impl = getattr(getattr(self, "config", None), "_attn_implementation", "eager")
         if getattr(self.config, "use_deformable_attention", False):
             attn_impl = "eager"
-        if attn_impl != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[attn_impl]
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(attn_impl, eager_attention_forward)
 
         bias_mask: torch.Tensor | None = None
         if getattr(self.config, "use_deformable_attention", False) and token_coords is not None:
@@ -1375,6 +1445,7 @@ class ArlowVLAttention(nn.Module):
         attn_output = self.proj(attn_output)
 
         return attn_output
+
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLVisionBlock
 class ArlowVLBlock(GradientCheckpointingLayer):
@@ -1596,7 +1667,15 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
                 start_idx += total_patches
 
                 if num_patches_per_frame == 0:
-                    all_embeddings.append(torch.zeros(batch_size, 0, spatial_merge_size**2 * embed_dim, device=hidden_states.device, dtype=hidden_states.dtype))
+                    all_embeddings.append(
+                        torch.zeros(
+                            batch_size,
+                            0,
+                            spatial_merge_size**2 * embed_dim,
+                            device=hidden_states.device,
+                            dtype=hidden_states.dtype,
+                        )
+                    )
                     continue
 
                 img_patches = img_patches.reshape(batch_size, t, h, w, embed_dim)
@@ -1710,7 +1789,9 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
                     mode="trilinear",
                     align_corners=False,
                 ).squeeze(0)
-                refined = self.progressive_proj(upsampled.permute(1, 2, 3, 0).reshape(total, embed_dim)).to(tokens.dtype)
+                refined = self.progressive_proj(upsampled.permute(1, 2, 3, 0).reshape(total, embed_dim)).to(
+                    tokens.dtype
+                )
                 tokens = tokens.clone()
                 tokens[:total] = view_tokens + refined
                 updated_states.append(tokens)
@@ -1766,6 +1847,7 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
                     deepstack_feature_lists.append(torch.zeros(0, feature_dim, device=device, dtype=dtype))
             return vision_embeddings, deepstack_feature_lists
         return vision_embeddings
+
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLTextModel
 class ArlowTextModel(ArlowTextPreTrainedModel):
@@ -1892,8 +1974,8 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
                 None if position_ids is None else tuple(position_ids.shape),
                 None if text_position_ids is None else tuple(text_position_ids.shape),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to log ArlowTextModel.forward tensor shapes: %s", exc)
 
         # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
@@ -1992,6 +2074,7 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
             attentions=all_self_attns,
         )
 
+
 # Inspired by transformers.models.gemma.modeling_gemma.GemmaForCausalLM
 class ArlowForCausalLM(ArlowTextPreTrainedModel, GenerationMixin):
     """
@@ -2076,11 +2159,6 @@ class ArlowForCausalLM(ArlowTextPreTrainedModel, GenerationMixin):
             **kwargs,
         )
 
-    # reorder cache (beam)
-    def _reorder_cache(self, past_key_values, beam_idx):
-        if past_key_values is not None and hasattr(past_key_values, "reorder_cache"):
-            past_key_values.reorder_cache(beam_idx)
-        return past_key_values
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLForConditionalGeneration
 class ArlowModel(ArlowPreTrainedModel):
@@ -2237,9 +2315,7 @@ class ArlowModel(ArlowPreTrainedModel):
         pooled_embeds: list[torch.Tensor] = []
         for segment in torch.split(embeds, split_sizes):
             if segment.numel() == 0:
-                pooled_embeds.append(
-                    torch.zeros(1, self.config.hidden_size, device=embeds.device, dtype=embeds.dtype)
-                )
+                pooled_embeds.append(torch.zeros(1, self.config.hidden_size, device=embeds.device, dtype=embeds.dtype))
             elif segment.dim() == 1:
                 pooled_embeds.append(segment.unsqueeze(0))
             else:
@@ -2255,7 +2331,9 @@ class ArlowModel(ArlowPreTrainedModel):
                 for segment in layer_segments:
                     if segment.numel() == 0:
                         layer_outputs.append(
-                            torch.zeros(1, self.config.hidden_size, device=layer_tokens.device, dtype=layer_tokens.dtype)
+                            torch.zeros(
+                                1, self.config.hidden_size, device=layer_tokens.device, dtype=layer_tokens.dtype
+                            )
                         )
                     elif segment.dim() == 1:
                         layer_outputs.append(segment.unsqueeze(0))
@@ -2305,8 +2383,15 @@ class ArlowModel(ArlowPreTrainedModel):
             pooled_tensor = torch.zeros(1, hidden_size, dtype=dtype, device=device)
         else:
             pooled_list = self._get_visual_features(pixel_values, image_grid_thw, return_deepstack=False)
-            pooled_tensor = torch.cat(pooled_list, dim=0) if len(pooled_list) > 0 else torch.zeros(
-                1, self.config.hidden_size, device=self.get_input_embeddings().weight.device, dtype=self.get_input_embeddings().weight.dtype
+            pooled_tensor = (
+                torch.cat(pooled_list, dim=0)
+                if len(pooled_list) > 0
+                else torch.zeros(
+                    1,
+                    self.config.hidden_size,
+                    device=self.get_input_embeddings().weight.device,
+                    dtype=self.get_input_embeddings().weight.dtype,
+                )
             )
 
         output_hidden_states = kwargs.get("output_hidden_states", self.config.output_hidden_states)
@@ -2315,7 +2400,9 @@ class ArlowModel(ArlowPreTrainedModel):
         last_hidden_state = pooled_tensor.unsqueeze(1)
         pooler_output = pooled_tensor
         hidden_states = (
-            tuple(last_hidden_state for _ in range(self.config.num_hidden_layers + 1)) if output_hidden_states else None
+            tuple(last_hidden_state for _ in range(self.config.num_hidden_layers + 1))
+            if output_hidden_states
+            else None
         )
         attentions = (
             tuple(
@@ -2377,8 +2464,15 @@ class ArlowModel(ArlowPreTrainedModel):
             pooled_tensor = torch.zeros(1, hidden_size, dtype=dtype, device=device)
         else:
             pooled_list = self._get_visual_features(pixel_values_videos, video_grid_thw, return_deepstack=False)
-            pooled_tensor = torch.cat(pooled_list, dim=0) if len(pooled_list) > 0 else torch.zeros(
-                1, self.config.hidden_size, device=self.get_input_embeddings().weight.device, dtype=self.get_input_embeddings().weight.dtype
+            pooled_tensor = (
+                torch.cat(pooled_list, dim=0)
+                if len(pooled_list) > 0
+                else torch.zeros(
+                    1,
+                    self.config.hidden_size,
+                    device=self.get_input_embeddings().weight.device,
+                    dtype=self.get_input_embeddings().weight.dtype,
+                )
             )
 
         output_hidden_states = kwargs.get("output_hidden_states", self.config.output_hidden_states)
@@ -2387,7 +2481,9 @@ class ArlowModel(ArlowPreTrainedModel):
         last_hidden_state = pooled_tensor.unsqueeze(1)
         pooler_output = pooled_tensor
         hidden_states = (
-            tuple(last_hidden_state for _ in range(self.config.num_hidden_layers + 1)) if output_hidden_states else None
+            tuple(last_hidden_state for _ in range(self.config.num_hidden_layers + 1))
+            if output_hidden_states
+            else None
         )
         attentions = (
             tuple(
@@ -2429,7 +2525,9 @@ class ArlowModel(ArlowPreTrainedModel):
                 )
                 special_image_mask = special_image_mask.all(-1)
             else:
-                special_image_mask = torch.zeros(inputs_embeds.shape[:2], dtype=torch.bool, device=inputs_embeds.device)
+                special_image_mask = torch.zeros(
+                    inputs_embeds.shape[:2], dtype=torch.bool, device=inputs_embeds.device
+                )
 
             if self.config.video_token_id is not None:
                 special_video_mask = inputs_embeds == self.get_input_embeddings()(
@@ -2437,7 +2535,9 @@ class ArlowModel(ArlowPreTrainedModel):
                 )
                 special_video_mask = special_video_mask.all(-1)
             else:
-                special_video_mask = torch.zeros(inputs_embeds.shape[:2], dtype=torch.bool, device=inputs_embeds.device)
+                special_video_mask = torch.zeros(
+                    inputs_embeds.shape[:2], dtype=torch.bool, device=inputs_embeds.device
+                )
         else:
             if self.config.image_token_id is not None:
                 special_image_mask = input_ids == self.config.image_token_id
@@ -2690,7 +2790,9 @@ class ArlowModel(ArlowPreTrainedModel):
                 image_embeds_list = image_outputs
 
             image_features_tensor = (
-                torch.cat(image_embeds_list, dim=0) if len(image_embeds_list) > 0 else torch.zeros(0, hidden_dim, device=device, dtype=dtype)
+                torch.cat(image_embeds_list, dim=0)
+                if len(image_embeds_list) > 0
+                else torch.zeros(0, hidden_dim, device=device, dtype=dtype)
             ).to(device=device, dtype=dtype)
 
             image_mask, _ = self.get_placeholder_mask(
@@ -2713,7 +2815,9 @@ class ArlowModel(ArlowPreTrainedModel):
                 video_embeds_list = video_outputs
 
             video_features_tensor = (
-                torch.cat(video_embeds_list, dim=0) if len(video_embeds_list) > 0 else torch.zeros(0, hidden_dim, device=device, dtype=dtype)
+                torch.cat(video_embeds_list, dim=0)
+                if len(video_embeds_list) > 0
+                else torch.zeros(0, hidden_dim, device=device, dtype=dtype)
             ).to(device=device, dtype=dtype)
 
             _, video_mask = self.get_placeholder_mask(
@@ -3059,11 +3163,6 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
 
         return model_inputs
 
-    def _reorder_cache(self, past_key_values, beam_idx):
-        if past_key_values is not None and hasattr(past_key_values, "reorder_cache"):
-            past_key_values.reorder_cache(beam_idx)
-        return past_key_values
-
 
 class ArlowProcessorKwargs(ProcessingKwargs, total=False):
     _defaults = {
@@ -3224,9 +3323,7 @@ class ArlowProcessor(ProcessorMixin):
 
                 for pos in reversed(occurrences):
                     if placeholder_idx >= len(image_num_crops):
-                        raise ValueError(
-                            "Mismatch between number of image placeholders in text and image inputs."
-                        )
+                        raise ValueError("Mismatch between number of image placeholders in text and image inputs.")
                     crops = image_num_crops[placeholder_idx]
                     if crops > 0:
                         formatted = (
