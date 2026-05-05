@@ -41,7 +41,6 @@ from .video_processing_auto import AutoVideoProcessor
 
 
 logger = logging.get_logger(__name__)
-
 if TYPE_CHECKING:
     # This significantly improves completion suggestion performance when
     # the transformers package is used with Microsoft's Pylance language server.
@@ -78,6 +77,7 @@ else:
             ("emu3", "Emu3Processor"),
             ("ernie4_5_vl_moe", "Ernie4_5_VLMoeProcessor"),
             ("evolla", "EvollaProcessor"),
+            ("exaone4_5", "Exaone4_5_Processor"),
             ("flava", "FlavaProcessor"),
             ("florence2", "Florence2Processor"),
             ("fuyu", "FuyuProcessor"),
@@ -91,6 +91,7 @@ else:
             ("glm_image", "Glm4vProcessor"),
             ("glmasr", "GlmAsrProcessor"),
             ("got_ocr2", "GotOcr2Processor"),
+            ("granite4_vision", "Granite4VisionProcessor"),
             ("granite_speech", "GraniteSpeechProcessor"),
             ("granite_speech_plus", "GraniteSpeechProcessor"),
             ("grounding-dino", "GroundingDinoProcessor"),
