@@ -39,6 +39,7 @@ CONFIG_MAPPING_NAMES.update(
         "arlow_text": "ArlowTextConfig",
         "EvollaModel": "EvollaConfig",
         "mlcd": "MLCDVisionConfig",
+        "parakeet_tdt": "ParakeetTDTConfig",
         "vibevoice_acoustic_tokenizer_decoder": "VibeVoiceAcousticTokenizerDecoderConfig",
         "vibevoice_acoustic_tokenizer_encoder": "VibeVoiceAcousticTokenizerEncoderConfig",
     }
@@ -52,6 +53,7 @@ SPECIAL_MODEL_TYPE_TO_MODULE_NAME.update(
     {
         "arlow_text": "arlow",
         "EvollaModel": "evolla",
+        "parakeet_tdt": "parakeet",
         "vibevoice_acoustic_tokenizer_encoder": "vibevoice_acoustic_tokenizer",
         "vibevoice_acoustic_tokenizer_decoder": "vibevoice_acoustic_tokenizer",
     }
