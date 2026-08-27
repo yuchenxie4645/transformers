@@ -30,10 +30,22 @@ imported by GitHub Actions steps that run a bare Python with no third-party pack
 """
 
 import json
+import logging
 import os
 import time
 import urllib.error
 import urllib.request
+
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    # StreamHandler defaults to stderr, keeping diagnostics visible in CI logs without polluting stdout
+    # that some workflow steps capture as machine-readable output.
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
+logger.propagate = False
 
 
 def build_github_headers(token=None):
@@ -49,7 +61,7 @@ def build_github_headers(token=None):
 
 
 def _log_rate_limit_headers(response_headers, prefix=""):
-    """Print all GitHub rate-limit response headers for diagnostics."""
+    """Log all GitHub rate-limit response headers for diagnostics."""
     limit = response_headers.get("X-RateLimit-Limit", "n/a")
     used = response_headers.get("X-RateLimit-Used", "n/a")
     remaining = response_headers.get("X-RateLimit-Remaining", "n/a")
@@ -74,7 +86,7 @@ def _log_rate_limit_headers(response_headers, prefix=""):
         parts.append(f"Retry-After={retry_after}s")
 
     tag = f"[{prefix}] " if prefix else ""
-    print(f"{tag}GitHub rate-limit: {', '.join(parts)}")
+    logger.info("%sGitHub rate-limit: %s", tag, ", ".join(parts))
 
 
 _token_status_logged = False
@@ -106,7 +118,7 @@ def _log_token_status(token=None):
     try:
         status, response_headers, body = _request("https://api.github.com/rate_limit", build_github_headers(token))
     except urllib.error.URLError as e:
-        print(f"[token check] Could not reach GitHub API: {e}")
+        logger.info("[token check] Could not reach GitHub API: %s", e)
         return
 
     if status == 401:
@@ -122,7 +134,7 @@ def _log_token_status(token=None):
             )
 
     if status != 200:
-        print(f"[token check] Unexpected status {status} from /rate_limit: {body[:200]!r}")
+        logger.info("[token check] Unexpected status %s from /rate_limit: %r", status, body[:200])
         return
 
     # Parse the JSON body for richer quota info (headers only carry a subset).
@@ -145,7 +157,7 @@ def _log_token_status(token=None):
         reset_str = "n/a"
 
     auth_status = "AUTHENTICATED" if token else "UNAUTHENTICATED"
-    print(f"[token check] {auth_status} — limit={limit}, remaining={remaining}, reset={reset_str}")
+    logger.info("[token check] %s — limit=%s, remaining=%s, reset=%s", auth_status, limit, remaining, reset_str)
 
     if remaining == "0":
         msg = f"[token check] Rate-limit quota EXHAUSTED (remaining=0). Resets at {reset_str}."
@@ -210,6 +222,11 @@ def _request(url, headers, method="GET", data=None):
             return response.status, response.headers, response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as error:
         return error.code, error.headers, error.read().decode("utf-8", errors="replace")
+    except ConnectionError as error:
+        # http.client.RemoteDisconnected (and siblings like ConnectionResetError) are OSError
+        # subclasses that urllib does not always wrap in URLError — re-raise so callers see a
+        # consistent urllib.error.URLError and can decide whether to retry.
+        raise urllib.error.URLError(reason=error) from error
 
 
 def github_request(url, token=None, method="GET", payload=None, max_retries=8):
@@ -219,17 +236,23 @@ def github_request(url, token=None, method="GET", payload=None, max_retries=8):
     the response with e.g. ``result["jobs"]`` and raised a bare ``KeyError`` when GitHub returned an
     error payload instead of data).
 
-    **Rate limiting is the only thing that is ever retried.** Both the primary limit
-    (``X-RateLimit-Remaining: 0`` + ``X-RateLimit-Reset``) and the secondary limit are waited out
-    (``Retry-After`` / reset epoch when present, otherwise ~1 min, growing per attempt) up to
-    ``max_retries`` times, and the token is always kept -- retrying without it would only lower the
-    limit. Everything else fails hard immediately with ``RuntimeError`` (no retry):
+    Two categories of failures are retried up to ``max_retries`` times:
+
+      * **Rate limiting** — both the primary limit (``X-RateLimit-Remaining: 0`` +
+        ``X-RateLimit-Reset``) and the secondary limit are waited out (``Retry-After`` / reset epoch
+        when present, otherwise ~1 min, growing per attempt). The token is always kept — retrying
+        without it would only lower the limit.
+      * **Transient network errors** (``urllib.error.URLError``, including
+        ``http.client.RemoteDisconnected`` and other ``ConnectionError`` subclasses) — retried with
+        exponential backoff (1 s, 2 s, 4 s … capped at 60 s).
+
+    Everything else fails hard immediately with ``RuntimeError`` (no retry):
 
       * a 401 with a token: the token is bad/revoked/expired. It is *never* retried and *never* falls
         back to an unauthenticated request, because the anonymous 60-request/hour limit is exhausted
         almost at once while crawling a large run and every subsequent call comes back 403 -- an
         expired credential masquerading as a rate limit.
-      * 5xx server errors, network failures, 404s, permission 403s, and any other non-2xx status:
+      * 5xx server errors, 404s, permission 403s, and any other non-2xx HTTP status:
         raised at once so callers fail loudly instead of indexing into an error payload or masking a
         real outage behind silent retries.
     """
@@ -249,10 +272,19 @@ def github_request(url, token=None, method="GET", payload=None, max_retries=8):
         try:
             status, response_headers, body = _request(url, headers, method=method, data=data)
         except urllib.error.URLError as error:
-            # Network-level failure (DNS, connection reset, timeout): not a rate limit, so fail hard.
-            raise RuntimeError(f"GitHub API request to {method} {url} failed: {error}") from error
+            # Transient network-level failure (DNS, connection reset, RemoteDisconnected, timeout).
+            # Retry with exponential backoff rather than failing immediately, because these are
+            # almost always transient (the runner saw RemoteDisconnected mid-TLS handshake).
+            if attempt < max_retries - 1:
+                wait = min(2**attempt, 60)
+                logger.warning("[%s] Network error on %s %s (%s) — retrying in %ss", label, method, url, error, wait)
+                time.sleep(wait)
+                continue
+            raise RuntimeError(
+                f"GitHub API request to {method} {url} failed after {max_retries} attempts: {error}"
+            ) from error
 
-        print(f"[{label}] {method} {url} → HTTP {status}")
+        logger.info("[%s] %s %s → HTTP %s", label, method, url, status)
         # Rate-limit headers are absent on 401 (auth rejected before rate-limit machinery runs).
         if status != 401:
             _log_rate_limit_headers(response_headers, prefix=label)
@@ -260,7 +292,7 @@ def github_request(url, token=None, method="GET", payload=None, max_retries=8):
         wait = _rate_limit_wait(status, response_headers, body, attempt)
         if wait is not None:
             next_label = f"retry {attempt + 1}/{max_retries - 1}"
-            print(f"[{label}] Rate limited (HTTP {status}) — waiting {wait}s before {next_label}")
+            logger.info("[%s] Rate limited (HTTP %s) — waiting %ss before %s", label, status, wait, next_label)
             time.sleep(wait)
             continue
 
