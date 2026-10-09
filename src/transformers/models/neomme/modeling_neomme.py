@@ -34,8 +34,7 @@ from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, torch_compilable_check
-from ...utils.deprecation import deprecate_kwarg
-from ...utils.generic import can_return_tuple, maybe_autocast
+from ...utils.generic import can_return_tuple
 from ...utils.output_capturing import capture_outputs
 from .configuration_neomme import NeoMMEConfig
 
@@ -91,7 +90,6 @@ class NeoMMEPatchEmbeddings(nn.Module):
 class NeoMMERotaryEmbedding(nn.Module):
     """Two-axis interleaved M-RoPE with per-layer-type frequency spectra."""
 
-    @deprecate_kwarg("device", version="5.18")
     def __init__(self, config: NeoMMEConfig, device=None):
         super().__init__()
         self.max_seq_len_cached = config.max_position_embeddings
@@ -114,7 +112,6 @@ class NeoMMERotaryEmbedding(nn.Module):
             setattr(self, f"{layer_type}_attention_scaling", curr_attention_scaling)
 
     @staticmethod
-    @deprecate_kwarg("device", version="5.18")
     def compute_default_rope_parameters(
         config: NeoMMEConfig, device=None, layer_type: str | None = None, **kwargs
     ) -> tuple[torch.Tensor, float]:
@@ -143,24 +140,33 @@ class NeoMMERotaryEmbedding(nn.Module):
         return inv_freq.to(device), attention_factor
 
     @torch.no_grad()
-    @dynamic_rope_update
+    @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(
         self, x: torch.Tensor, position_ids: torch.LongTensor, layer_type: str | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Build cos/sin from two-axis `position_ids` of shape `(2, batch, seq_len)`."""
-        # Same axias 2D rope as in Qwen-VIT models, all will be standardized by @raushan
-        inv_freq = getattr(self, f"{layer_type}_inv_freq")  # (rotary_dim // 2,)
+        inv_freq = getattr(self, f"{layer_type}_inv_freq")
         attention_scaling = getattr(self, f"{layer_type}_attention_scaling")
 
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
-        with maybe_autocast(device_type=device_type, enabled=False):
-            row_angles = position_ids[0].float().unsqueeze(-1) * inv_freq[0::2]
-            column_angles = position_ids[1].float().unsqueeze(-1) * inv_freq[1::2]
+        # One row of positions per M-RoPE axis: (num_axes, bs, positions)
+        position_ids = position_ids.expand(2, -1, -1)
+        # (2, batch, seq_len, rotary_dim // 2)
+        freqs = position_ids[..., None].float() * inv_freq.to(device=x.device, dtype=torch.float)
+        cos = freqs.cos() * attention_scaling
+        sin = freqs.sin() * attention_scaling
 
-            angles = torch.stack([row_angles, column_angles], dim=-1).flatten(-2)
-            cos = (angles.cos() * attention_scaling).to(x.dtype)
-            sin = (angles.sin() * attention_scaling).to(x.dtype)
-        return torch.cat([cos, cos], dim=-1), torch.cat([sin, sin], dim=-1)
+        cos = self.recomposition_frequencies(cos)
+        sin = self.recomposition_frequencies(sin)
+        return cos.to(x.dtype), sin.to(x.dtype)
+
+    def recomposition_frequencies(self, freq):
+        """
+        Recompose the frequencies into the final spatial layout used per each grid.
+        """
+        # in contrast to the H-H-W-W layout, row/col here interleave as row0-col0-row1-col1
+        # i.e. `mrope_section = [head_dim//4, head_dim//4]`
+        freq_row, freq_col = freq[0][..., 0::2], freq[1][..., 1::2]
+        angles = torch.stack([freq_row, freq_col], dim=-1).flatten(-2)
+        return torch.cat([angles, angles], dim=-1)
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:

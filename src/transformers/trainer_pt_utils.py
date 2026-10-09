@@ -15,7 +15,6 @@
 Torch utilities for the Trainer class.
 """
 
-import contextlib
 import copy
 import datetime
 import io
@@ -858,13 +857,11 @@ class BatchRebalanceSampler(Sampler):
         best_spread = float("inf")
         best_counts = list(counts)
 
-        # Each iteration moves exactly one sample between groups, so worst-case
-        # convergence is O(n). `effective_batch_size` (= n) covers the move-dominated
-        # regime (large batch, small K) that a fixed `K * 30` cap could cut off
-        # prematurely; `K * 30` stays as a floor for the detection-dominated regime
-        # (tiny batch, n ~= K) where convergence is reached via `spread == 0` / `seen`
-        # rather than the move budget. `best_counts` is tracked below, so hitting the
-        # cap only degrades the result gracefully (no samples are dropped).
+        # Each iteration moves one sample between groups, so worst-case convergence is O(n).
+        # `effective_batch_size` (= n) covers the move-dominated regime (large batch, small K) that a
+        # fixed `K * 30` cap could cut off; `K * 30` stays a floor for the detection-dominated regime
+        # (tiny batch, n ~= K), where convergence comes from `spread == 0` / `seen` instead. Hitting
+        # the cap only degrades the result: `best_counts` is tracked below, so nothing is dropped.
         for _ in range(max(K * 30, self.effective_batch_size)):
             key = tuple(counts)
             if key in seen:
@@ -1265,19 +1262,19 @@ def save_metrics(self, split, metrics, combined=True):
         return
 
     path = os.path.join(self.args.output_dir, f"{split}_results.json")
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=4, sort_keys=True)
 
     if combined:
         path = os.path.join(self.args.output_dir, "all_results.json")
         if os.path.exists(path):
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 all_metrics = json.load(f)
         else:
             all_metrics = {}
 
         all_metrics.update(metrics)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(all_metrics, f, indent=4, sort_keys=True)
 
 
@@ -1649,9 +1646,6 @@ def safe_globals():
     See: https://pytorch.org/docs/stable/notes/serialization.html#torch.serialization.add_safe_globals
     See: https://github.com/huggingface/accelerate/pull/3036
     """
-    if version.parse(torch.__version__).release < version.parse("2.6").release:
-        return contextlib.nullcontext()
-
     np_core = np._core if version.parse(np.__version__) >= version.parse("2.0.0") else np.core
     allowlist = [np_core.multiarray._reconstruct, np.ndarray, np.dtype]
     # numpy >1.25 defines numpy.dtypes.UInt32DType, but below works for

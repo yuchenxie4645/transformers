@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import copy
 import os
 import re
 import sys
@@ -90,12 +91,6 @@ class GradientCheckpointingLayer(nn.Module):
 
             if not self._can_checkpoint_with_cache:
                 # different names for the same thing in different layers
-                # TODO cyril: this one without `S` can be removed after deprecation cycle
-                if "past_key_value" in kwargs and kwargs["past_key_value"] is not None:
-                    kwargs["past_key_value"] = None
-                    message += " `past_key_value=None`,"
-                    do_warn = True
-
                 if "past_key_values" in kwargs and kwargs["past_key_values"] is not None:
                     kwargs["past_key_values"] = None
                     message += " `past_key_values=None`,"
@@ -409,6 +404,11 @@ class MtpModel(PreTrainedModel):
         """Tie the embedding/head/rotary layer with the main model."""
         # The embeddings and head are shared between main model and MTP layers
         self.embed_tokens = main_model.get_input_embeddings()
+        # Some models may subclass nn.Embedding directly, but here we do not want the added norm (note that we cannot simply set it to
+        # nn.Identity, as it would modify the main model inplace as well)
+        if hasattr(self.embed_tokens, "embed_norm"):
+            self.embed_tokens = copy.deepcopy(self.embed_tokens)
+            self.embed_tokens.embed_norm = nn.Identity()
         self.shared_head = main_model.lm_head
         # Use the same rotary class (it only has non-persistent buffers); models with learned
         # position biases (e.g. Inkling) have none
@@ -551,7 +551,8 @@ class MtpModel(PreTrainedModel):
 
             # Roll by 1 and append for next layer
             input_ids = torch.cat([input_ids[:, 1:], next_mtp_token], dim=-1)
-            attention_mask = torch.cat([attention_mask[:, 1:], attention_mask.new_ones(batch_size, 1)], dim=-1)  # type: ignore
+            if attention_mask is not None:
+                attention_mask = torch.cat([attention_mask[:, 1:], attention_mask.new_ones(batch_size, 1)], dim=-1)  # type: ignore
             position_ids = torch.cat([position_ids[:, 1:], position_ids[:, -1:] + 1], dim=-1)
 
             # Need to cat ful_ids as well for the processors

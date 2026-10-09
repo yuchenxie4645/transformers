@@ -147,6 +147,39 @@ class Chunk(ConversionOps):
         return Concatenate(self.dim, self.num_shards_attribute)
 
 
+class Split(ConversionOps):
+    """Split a tensor along `dim` into one piece per target, sized like that target's model parameter.
+    WARNING this op is not TP-safe, a sharded fused tensor needs each target's local slice, not the full parameter sizes."""
+
+    def __init__(self, dim: int = 0):
+        self.dim = dim
+
+    @torch.no_grad
+    def convert(
+        self,
+        input_dict: dict[str, torch.Tensor],
+        source_patterns: list[str],
+        target_patterns: list[str],
+        full_layer_name: str,
+        model: PreTrainedModel,
+        **kwargs,
+    ) -> dict[str, torch.Tensor]:
+        if len(input_dict) > 1:
+            raise ValueError("Undefined Operation encountered")
+        tensors = next(iter(input_dict.values()))
+        tensor = tensors[0] if isinstance(tensors, list) else tensors
+        sizes = [
+            model.get_parameter(full_layer_name.replace(target_patterns[0], target)).shape[self.dim]
+            for target in target_patterns
+        ]
+        chunks = torch.split(tensor, sizes, dim=self.dim)
+        return {target: chunk.contiguous() for target, chunk in zip(target_patterns, chunks)}
+
+    @property
+    def reverse_op(self) -> ConversionOps:
+        return Concatenate(self.dim)
+
+
 class Concatenate(ConversionOps):
     """Concatenate tensors along `dim`. Additionally, if concatenating an aribitrary number of tensors, `num_shards_attribute` is
     a config field to read to know how many tensors to recreate when using the opposite Ops."""
@@ -1761,6 +1794,11 @@ def convert_and_load_state_dict_in_model(
                 for target_name, param in realized_value.items():
                     param = param[0] if isinstance(param, list) else param
                     param_device = get_device(device_map, target_name)
+                    # Exception for params that are so huge that they need conversions on cpu no matter what - we put them back on
+                    # the correct device now (if the device_map managed to make them fit on any device, as usually they will stay on
+                    # cpu and this is a no-op)
+                    if getattr(mapping, "force_cpu", False) and param_device != "disk":
+                        param = param.to(param_device)
                     # Offloading support
                     if param_device == "disk" and (target_name not in model_buffers or offload_buffers):
                         disk_offload_index = offload_and_maybe_resave_param(
