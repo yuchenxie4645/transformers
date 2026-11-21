@@ -58,9 +58,11 @@ else:
         [
             ("arlow", {"torchvision": "ArlowVideoProcessor"}),
             ("cosmos3_omni", {"torchvision": "Qwen3VLVideoProcessor"}),
+            ("dots3_note", {"torchvision": "Qwen3VLVideoProcessor"}),
             ("exaone4_5", {"torchvision": "Qwen2VLVideoProcessor"}),
             ("hyperclovax_vision_v2", {"torchvision": "Qwen2VLVideoProcessor"}),
             ("instructblip", {"torchvision": "InstructBlipVideoVideoProcessor"}),
+            ("lfm3_vl", {"torchvision": "Qwen3VLVideoProcessor"}),
             ("minicpmv4_7", {"torchvision": "MiniCPMV4_6VideoProcessor"}),
             ("muse_spark", {"torchvision": "MuseGlimmerVideoProcessor"}),
             ("pe_audio_video", {"torchvision": "PeVideoVideoProcessor"}),
