@@ -41,6 +41,8 @@ CONFIG_MAPPING_NAMES = OrderedDict(
         ("arcee", "ArceeConfig"),
         ("aria", "AriaConfig"),
         ("aria_text", "AriaTextConfig"),
+        ("arlow", "ArlowConfig"),
+        ("arlow_text", "ArlowTextConfig"),
         ("audio-spectrogram-transformer", "ASTConfig"),
         ("audioflamingo3", "AudioFlamingo3Config"),
         ("audioflamingo3_encoder", "AudioFlamingo3EncoderConfig"),
@@ -848,6 +850,7 @@ SPECIAL_MODEL_TYPE_TO_MODULE_NAME = OrderedDict(
         ("apertus1p5_text", "apertus1p5"),
         ("apertus1p5_vision_tokenizer", "apertus1p5"),
         ("aria_text", "aria"),
+        ("arlow_text", "arlow"),
         ("audio-spectrogram-transformer", "audio_spectrogram_transformer"),
         ("audioflamingo3_encoder", "audioflamingo3"),
         ("bert-generation", "bert_generation"),
@@ -1152,6 +1155,7 @@ SPECIAL_MODEL_TYPE_TO_MODULE_NAME = OrderedDict(
 
 VIDEO_PROCESSOR_MAPPING_NAMES = OrderedDict(
     [
+        ("arlow", {"torchvision": "ArlowVideoProcessor"}),
         ("cohere_compass", {"torchvision": "CohereCompassVideoProcessor"}),
         ("cosmos3_edge", {"torchvision": "Cosmos3EdgeVideoProcessor"}),
         ("embedding_gemma2", {"torchvision": "EmbeddingGemma2VideoProcessor"}),
@@ -1236,6 +1240,7 @@ PROCESSOR_MAPPING_NAMES = OrderedDict(
         ("altclip", "AltCLIPProcessor"),
         ("apertus1p5", "Apertus1p5Processor"),
         ("aria", "AriaProcessor"),
+        ("arlow", "ArlowProcessor"),
         ("audioflamingo3", "AudioFlamingo3Processor"),
         ("aya_vision", "AyaVisionProcessor"),
         ("bark", "BarkProcessor"),
@@ -1402,6 +1407,7 @@ IMAGE_PROCESSOR_MAPPING_NAMES = OrderedDict(
     [
         ("apertus1p5", {"torchvision": "Apertus1p5ImageProcessor"}),
         ("aria", {"pil": "AriaImageProcessorPil", "torchvision": "AriaImageProcessor"}),
+        ("arlow", {"pil": "ArlowImageProcessorPil", "torchvision": "ArlowImageProcessor"}),
         ("beit", {"pil": "BeitImageProcessorPil", "torchvision": "BeitImageProcessor"}),
         ("bit", {"pil": "BitImageProcessorPil", "torchvision": "BitImageProcessor"}),
         ("blip", {"pil": "BlipImageProcessorPil", "torchvision": "BlipImageProcessor"}),

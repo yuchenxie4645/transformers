@@ -74,7 +74,6 @@ else:
             ("aimv2_vision_model", {"torchvision": "CLIPImageProcessor", "pil": "CLIPImageProcessorPil"}),
             ("align", {"torchvision": "EfficientNetImageProcessor", "pil": "EfficientNetImageProcessorPil"}),
             ("altclip", {"torchvision": "CLIPImageProcessor", "pil": "CLIPImageProcessorPil"}),
-            ("arlow", {"torchvision": "ArlowImageProcessor", "pil": "ArlowImageProcessorPil"}),
             ("aya_vision", {"torchvision": "GotOcr2ImageProcessor", "pil": "GotOcr2ImageProcessorPil"}),
             ("blip-2", {"torchvision": "BlipImageProcessor", "pil": "BlipImageProcessorPil"}),
             ("clipseg", {"torchvision": "ViTImageProcessor", "pil": "ViTImageProcessorPil"}),

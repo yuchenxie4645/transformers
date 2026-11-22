@@ -56,7 +56,6 @@ else:
     # Merge non-standard mapping names with auto-inferred `VIDEO_PROCESSOR_MAPPING_NAMES`
     MISSING_VIDEO_PROCESSOR_MAPPING_NAMES = OrderedDict(
         [
-            ("arlow", {"torchvision": "ArlowVideoProcessor"}),
             ("cosmos3_omni", {"torchvision": "Qwen3VLVideoProcessor"}),
             ("dots3_note", {"torchvision": "Qwen3VLVideoProcessor"}),
             ("exaone4_5", {"torchvision": "Qwen2VLVideoProcessor"}),

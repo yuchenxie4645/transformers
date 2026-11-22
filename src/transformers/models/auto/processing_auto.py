@@ -57,7 +57,6 @@ else:
     MISSING_PROCESSOR_MAPPING_NAMES = OrderedDict(
         [
             ("aimv2", "CLIPProcessor"),
-            ("arlow", "ArlowProcessor"),
             ("diffusion_gemma", "Gemma4Processor"),
             ("edgetam", "Sam2Processor"),
             ("glm4v_moe", "Glm4vProcessor"),

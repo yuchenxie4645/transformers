@@ -35,8 +35,6 @@ _CallableT = TypeVar("_CallableT", bound=Callable[..., Any])
 # New models should follow consistent naming instead of being added here!
 CONFIG_MAPPING_NAMES.update(
     {
-        "arlow": "ArlowConfig",
-        "arlow_text": "ArlowTextConfig",
         "EvollaModel": "EvollaConfig",
         "mimi_decoder": "MimiDecoderConfig",
         "mimi_encoder": "MimiEncoderConfig",
@@ -56,7 +54,6 @@ CONFIG_MAPPING_NAMES = OrderedDict(**{"gpt-sw3": "GPT2Config"}, **CONFIG_MAPPING
 
 SPECIAL_MODEL_TYPE_TO_MODULE_NAME.update(
     {
-        "arlow_text": "arlow",
         "EvollaModel": "evolla",
         "mimi_encoder": "mimi",
         "mimi_decoder": "mimi",
