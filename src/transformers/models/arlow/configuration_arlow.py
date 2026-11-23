@@ -4,130 +4,99 @@
 #             the file from the modular. If any change should be done, please apply the change to the
 #                          modular_arlow.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
+# Copyright 2026 Arlow Constellations. All rights reserved.
+# Written and edited by IRIS.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import math
+from dataclasses import fields
 
-from ...configuration_utils import PreTrainedConfig, layer_type_validation
+from huggingface_hub.dataclasses import strict
+
+from ...configuration_utils import PreTrainedConfig
+from ...modeling_rope_utils import RopeParameters
+from ...utils import auto_docstring
 
 
+@auto_docstring(checkpoint="yuchenxie/ArlowGPT-3B-Foundational-Preview")
+@strict
 class ArlowVisionConfig(PreTrainedConfig):
     r"""
-    Configuration for the vision transformer component of Arlow multimodal models.
-
-    Args:
-        depth (`int`, *optional*, defaults to 2):
-            Number of hidden layers in the vision transformer.
-        embed_dim (`int`, *optional*, defaults to 32):
-            Dimensionality of the vision encoder embeddings.
-        hidden_size (`int`, *optional*, defaults to 64):
-            Dimensionality after vision projection to match text model.
-        hidden_act (`str`, *optional*, defaults to `"gelu_pytorch_tanh"`):
-            The non-linear activation function in the vision encoder.
-        mlp_ratio (`int`, *optional*, defaults to 4):
-            Ratio of mlp hidden dim to embedding dim.
-        num_heads (`int`, *optional*, defaults to 4):
-            Number of attention heads in the vision transformer.
-        in_channels (`int`, *optional*, defaults to 3):
-            Number of input image channels.
-        patch_size (`int`, *optional*, defaults to 14):
-            Size of image patches.
-        spatial_merge_size (`int`, *optional*, defaults to 2):
-            Spatial merge factor for patch merging.
-        temporal_patch_size (`int`, *optional*, defaults to 2):
-            Temporal patch size for video inputs.
-        use_deformable_attention (`bool`, *optional*, defaults to False):
-            Whether to apply deformable attention bias for high-resolution regions.
-        use_progressive_patches (`bool`, *optional*, defaults to False):
-            Whether to inject progressive multi-scale patch features.
-        token_pruning_ratio (`float`, *optional*, defaults to 0.0):
-            Ratio of tokens to prune per region (0.0 means no pruning).
-        deformable_attention_window (`float`, *optional*, defaults to 0.25):
-            Normalized radius (in THW coordinates) used to compute deformable attention locality bias.
-        deformable_attention_strength (`float`, *optional*, defaults to 4.0):
-            Scaling factor applied to deformable attention bias.
-        deepstack_visual_indexes (`list[int]`, *optional*):
-            Vision block indexes from which to capture DeepStack skip features. Defaults to a
-            depth-aware spread when unset (empty when depth < 6).
-        mrope_sections (`list[int]`, *optional*):
-            Multimodal RoPE allocation across [temporal, height, width] (sum must equal head dimension).
-        initializer_range (`float`, *optional*, defaults to 0.02):
-            Standard deviation for weight initialization.
+    use_deformable_attention (`bool`, *optional*, defaults to `False`):
+        Whether to apply deformable attention bias for high-resolution regions.
+    use_progressive_patches (`bool`, *optional*, defaults to `False`):
+        Whether to inject progressive multi-scale patch features.
+    deformable_attention_window (`float`, *optional*, defaults to 0.25):
+        Normalized radius (in THW coordinates) used to compute deformable attention locality bias.
+    deformable_attention_strength (`float`, *optional*, defaults to 4.0):
+        Scaling factor applied to deformable attention bias.
+    deepstack_visual_indexes (`list[int]`, *optional*):
+        Vision block indexes from which to capture DeepStack skip features. Defaults to a
+        depth-aware spread when unset (empty when depth < 6).
+    mrope_sections (`list[int]`, *optional*):
+        Multimodal RoPE allocation across [temporal, height, width] (sum must equal head dimension).
     """
 
     model_type = "arlow"
     base_config_key = "vision_config"
+    attribute_map = {"num_attention_heads": "num_heads"}
 
-    def __init__(
-        self,
-        depth: int = 2,
-        embed_dim: int = 32,
-        hidden_size: int = 64,
-        hidden_act: str = "gelu_pytorch_tanh",
-        mlp_ratio: int = 4,
-        num_heads: int = 4,
-        in_channels: int = 3,
-        patch_size: int = 14,
-        spatial_merge_size: int = 2,
-        temporal_patch_size: int = 2,
-        use_deformable_attention: bool = False,
-        use_progressive_patches: bool = False,
-        token_pruning_ratio: float = 0.0,
-        deformable_attention_window: float = 0.25,
-        deformable_attention_strength: float = 4.0,
-        deepstack_visual_indexes: list[int] | None = None,
-        mrope_sections: list[int] | None = None,
-        initializer_range: float = 0.02,
-        max_position_embeddings: int | None = None,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.depth = depth
-        self.embed_dim = embed_dim
-        self.hidden_size = hidden_size
-        self.hidden_act = hidden_act
-        self.mlp_ratio = mlp_ratio
-        self.num_heads = num_heads
-        self.num_attention_heads = num_heads
-        self.in_channels = in_channels
-        self.patch_size = patch_size
-        self.spatial_merge_size = spatial_merge_size
-        self.temporal_patch_size = temporal_patch_size
-        self.use_deformable_attention = use_deformable_attention
-        self.use_progressive_patches = use_progressive_patches
-        self.token_pruning_ratio = token_pruning_ratio
-        self.deformable_attention_window = deformable_attention_window
-        self.deformable_attention_strength = deformable_attention_strength
-        self.initializer_range = initializer_range
-        self.max_position_embeddings = max_position_embeddings if max_position_embeddings is not None else 32768
-        if deepstack_visual_indexes is None:
-            if depth >= 6:
-                approx = {
-                    max(0, depth // 4),
-                    max(0, depth // 2),
-                    max(0, depth - 4),
-                }
-                deepstack_visual_indexes = sorted(idx for idx in approx if 0 <= idx < depth)
-            else:
-                deepstack_visual_indexes = []
-        else:
-            deepstack_visual_indexes = sorted({idx for idx in deepstack_visual_indexes if 0 <= idx < depth})
-        self.deepstack_visual_indexes = deepstack_visual_indexes
+    depth: int = 2
+    embed_dim: int = 32
+    hidden_size: int = 64
+    hidden_act: str = "gelu_pytorch_tanh"
+    mlp_ratio: int = 4
+    num_heads: int = 4
+    in_channels: int = 3
+    patch_size: int = 14
+    spatial_merge_size: int = 2
+    temporal_patch_size: int = 2
+    use_deformable_attention: bool = False
+    use_progressive_patches: bool = False
+    deformable_attention_window: float = 0.25
+    deformable_attention_strength: float = 4.0
+    deepstack_visual_indexes: list[int] | None = None
+    mrope_sections: list[int] | None = None
+    initializer_range: float = 0.02
+    max_position_embeddings: int | None = None
 
+    def __post_init__(self, **kwargs):
         self.validate_architecture()
+        if self.max_position_embeddings is None:
+            self.max_position_embeddings = 32768
 
-        head_dim = embed_dim // num_heads
-        if mrope_sections is None:
+        if self.deepstack_visual_indexes is None:
+            if self.depth >= 6:
+                approx = {max(0, self.depth // 4), max(0, self.depth // 2), max(0, self.depth - 4)}
+                self.deepstack_visual_indexes = sorted(idx for idx in approx if 0 <= idx < self.depth)
+            else:
+                self.deepstack_visual_indexes = []
+        else:
+            self.deepstack_visual_indexes = sorted(
+                {idx for idx in self.deepstack_visual_indexes if 0 <= idx < self.depth}
+            )
+
+        head_dim = self.embed_dim // self.num_heads
+        if self.mrope_sections is None:
             t = max(1, head_dim // 3)
             h = max(1, (head_dim - t) // 2)
-            w = max(1, head_dim - t - h)
-            if t + h + w != head_dim:
-                w = head_dim - t - h
-            self.mrope_sections = [t, h, w]
-        else:
-            if sum(mrope_sections) != head_dim:
-                raise ValueError(
-                    f"Sum of mrope_sections {mrope_sections} (={sum(mrope_sections)}) must equal head_dim ({head_dim})."
-                )
-            self.mrope_sections = mrope_sections
+            self.mrope_sections = [t, h, head_dim - t - h]
+        elif sum(self.mrope_sections) != head_dim:
+            raise ValueError(
+                f"Sum of mrope_sections {self.mrope_sections} (={sum(self.mrope_sections)}) must equal head_dim ({head_dim})."
+            )
+
+        super().__post_init__(**kwargs)
 
     def validate_architecture(self):
         if self.num_heads <= 0:
@@ -136,16 +105,37 @@ class ArlowVisionConfig(PreTrainedConfig):
             raise ValueError(f"embed_dim ({self.embed_dim}) must be divisible by num_heads ({self.num_heads}).")
 
 
+@auto_docstring(checkpoint="yuchenxie/ArlowGPT-3B-Foundational-Preview")
+@strict
 class ArlowTextConfig(PreTrainedConfig):
     r"""
-    Text-only configuration for Arlow.
+    resid_dropout (`float`, *optional*, defaults to 0.0):
+        Dropout ratio for residual connections.
+    mlp_dropout (`float`, *optional*, defaults to 0.0):
+        Dropout ratio for MLP layers.
+    mrope_sections (`list[int]`, *optional*):
+        Multimodal RoPE allocation across [temporal, height, width] (sum must equal `head_dim`). Defaults to an
+        even split of `head_dim`.
 
-    This configuration is used by text-only models like `ArlowTextModel` and `ArlowForCausalLM`.
-    """
+    Example:
+
+    ```python
+    >>> from transformers import ArlowTextConfig, ArlowTextModel
+
+    >>> # Initializing a text-only Arlow configuration
+    >>> configuration = ArlowTextConfig()
+
+    >>> # Initializing a model from the configuration
+    >>> model = ArlowTextModel(configuration)
+
+    >>> # Accessing the model configuration
+    >>> configuration = model.config
+    ```"""
 
     model_type = "arlow_text"
     base_config_key = "text_config"
-    keys_to_ignore_at_inference = ["past_key_values"]
+    keys_to_ignore_at_inference = ["cache"]
+    default_theta = 100000.0
     base_model_tp_plan = {
         "layers.*.self_attn.q_proj": "colwise",
         "layers.*.self_attn.k_proj": "colwise",
@@ -162,91 +152,53 @@ class ArlowTextConfig(PreTrainedConfig):
     }
     ignore_keys_at_rope_validation = {"mrope_sections"}
 
-    def __init__(
-        self,
-        vocab_size=131074,
-        hidden_size=2304,
-        intermediate_size=9216,
-        num_hidden_layers=32,
-        num_attention_heads=24,
-        num_key_value_heads=4,
-        hidden_act="silu",
-        max_position_embeddings=32768,
-        initializer_range=0.02,
-        rms_norm_eps=1e-6,
-        use_cache=True,
-        pad_token_id=None,
-        bos_token_id=None,
-        eos_token_id=None,
-        tie_word_embeddings=False,
-        rope_theta=100000.0,
-        rope_parameters=None,
-        rope_scaling=None,  # Deprecated, use rope_parameters
-        attention_bias=False,
-        attention_dropout=0.0,
-        resid_dropout=0.0,
-        mlp_dropout=0.0,
-        head_dim=None,
-        use_sliding_window=False,
-        sliding_window=4096,
-        max_window_layers=28,
-        layer_types=None,
-        mrope_sections=None,
-        **kwargs,
-    ):
-        self.vocab_size = vocab_size
-        self.max_position_embeddings = max_position_embeddings
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-        self.num_key_value_heads = num_key_value_heads
+    vocab_size: int = 131074
+    hidden_size: int = 2304
+    intermediate_size: int = 9216
+    num_hidden_layers: int = 32
+    num_attention_heads: int = 24
+    num_key_value_heads: int | None = 4
+    hidden_act: str = "silu"
+    max_position_embeddings: int = 32768
+    initializer_range: float = 0.02
+    rms_norm_eps: float = 1e-6
+    use_cache: bool = True
+    pad_token_id: int | None = None
+    bos_token_id: int | None = None
+    eos_token_id: int | list[int] | None = None
+    tie_word_embeddings: bool = False
+    rope_parameters: RopeParameters | dict | None = None
+    attention_bias: bool = False
+    attention_dropout: float | int = 0.0
+    resid_dropout: float | int = 0.0
+    mlp_dropout: float | int = 0.0
+    head_dim: int | None = None
+    use_sliding_window: bool = False
+    sliding_window: int | None = 4096
+    max_window_layers: int = 28
+    layer_types: list[str] | None = None
+    mrope_sections: list[int] | None = None
+
+    def __post_init__(self, **kwargs):
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads
-        self.hidden_act = hidden_act
-        self.initializer_range = initializer_range
-        self.rms_norm_eps = rms_norm_eps
-        self.use_cache = use_cache
-        self.rope_theta = rope_theta
-        self.rope_parameters = rope_scaling or rope_parameters
-        self.attention_bias = attention_bias
-        self.attention_dropout = attention_dropout
-        self.resid_dropout = resid_dropout
-        self.mlp_dropout = mlp_dropout
         if self.num_attention_heads <= 0:
             raise ValueError("num_attention_heads must be positive.")
-        if head_dim is None and self.hidden_size % self.num_attention_heads != 0:
-            raise ValueError(
-                f"hidden_size ({self.hidden_size}) must be divisible by num_attention_heads "
-                f"({self.num_attention_heads}) when head_dim is not set."
-            )
-        self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
+        if self.head_dim is None:
+            if self.hidden_size % self.num_attention_heads != 0:
+                raise ValueError(
+                    f"hidden_size ({self.hidden_size}) must be divisible by num_attention_heads "
+                    f"({self.num_attention_heads}) when head_dim is not set."
+                )
+            self.head_dim = self.hidden_size // self.num_attention_heads
 
-        # Provide default M-ROPE sections for text model as well
-        if mrope_sections is None:
-            # Split head_dim approximately equally across [T, H, W]
+        if self.mrope_sections is None:
             t = max(1, self.head_dim // 3)
             h = max(1, (self.head_dim - t) // 2)
-            w = max(1, self.head_dim - t - h)
-            # Adjust last to ensure exact sum
-            if t + h + w != self.head_dim:
-                w = self.head_dim - t - h
-            self.mrope_sections = [t, h, w]
-        else:
-            self.mrope_sections = mrope_sections
+            self.mrope_sections = [t, h, self.head_dim - t - h]
         self.validate_architecture()
 
-        # Validate rope parameters
-        if self.rope_parameters is not None and "type" in self.rope_parameters:
-            self.rope_parameters["rope_type"] = self.rope_parameters["type"]
-        self.standardize_rope_params()
-        self.validate_rope()
-
-        # Layer types configuration (supports full/sliding attention)
-        self.use_sliding_window = use_sliding_window
-        self.sliding_window = sliding_window if self.use_sliding_window else None
-        self.max_window_layers = max_window_layers
-        self.layer_types = layer_types
+        self.sliding_window = self.sliding_window if self.use_sliding_window else None
         if self.layer_types is None:
             self.layer_types = [
                 "sliding_attention"
@@ -254,15 +206,8 @@ class ArlowTextConfig(PreTrainedConfig):
                 else "full_attention"
                 for i in range(self.num_hidden_layers)
             ]
-        layer_type_validation(self.layer_types, self.num_hidden_layers)
 
-        super().__init__(
-            pad_token_id=pad_token_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings,
-            **kwargs,
-        )
+        super().__post_init__(**kwargs)
 
     def validate_architecture(self):
         if self.num_attention_heads <= 0:
@@ -283,234 +228,76 @@ class ArlowTextConfig(PreTrainedConfig):
             )
 
 
+@auto_docstring(checkpoint="yuchenxie/ArlowGPT-3B-Foundational-Preview")
+@strict
 class ArlowConfig(PreTrainedConfig):
     r"""
-    Configuration class for Arlow multimodal models.
+    use_gated_cross_attention (`bool`, *optional*, defaults to `False`):
+        Whether to use gated cross-attention in upper layers.
+    gated_cross_attention_start_layer (`int`, *optional*):
+        Layer index to start gated cross-attention (if enabled).
+    text_deepstack_injection_layers (`list[int]`, *optional*):
+        Text decoder layer indexes where captured DeepStack visual features are injected. When unset, the
+        injection layers are spread across the text decoder according to the number of captured vision layers.
+    vision_start_token_id (`int`, *optional*, defaults to 3):
+        Token ID marking start of vision input.
+    vision_end_token_id (`int`, *optional*, defaults to 4):
+        Token ID marking end of vision input.
+    frame_separator_token_id (`int`, *optional*):
+        Token ID for separating video frames.
 
-    This is the configuration for the main Arlow vision-language model. Use ArlowTextConfig if you need
-    a text-only configuration.
+    Text backbone arguments (`vocab_size`, `hidden_size`, `num_hidden_layers`, ...) can also be passed at the top
+    level, in which case they are used to build `text_config`.
 
-    Instantiating with defaults yields configuration similar to Arlow-Base
-    [yuchenxie/ArlowGPT-3B-Foundational-Preview](https://huggingface.co/yuchenxie/ArlowGPT-3B-Foundational-Preview).
+    Example:
 
-    Configuration objects inherit from [`PretrainedConfig`] and control model outputs.
+    ```python
+    >>> from transformers import ArlowConfig, ArlowForConditionalGeneration
 
-    Args:
-        vocab_size (`int`, *optional*, defaults to 131074):
-            Vocabulary size of the model.
-        hidden_size (`int`, *optional*, defaults to 2304):
-            Dimension of hidden representations.
-        intermediate_size (`int`, *optional*, defaults to 9216):
-            Dimension of MLP representations.
-        num_hidden_layers (`int`, *optional*, defaults to 32):
-            Number of hidden layers in the Transformer decoder.
-        num_attention_heads (`int`, *optional*, defaults to 24):
-            Number of attention heads per layer.
-        num_key_value_heads (`int`, *optional*, defaults to 4):
-            Number of key_value heads for Grouped Query Attention.
-        hidden_act (`str`, *optional*, defaults to `"silu"`):
-            Non-linear activation function.
-        max_position_embeddings (`int`, *optional*, defaults to 32768):
-            Maximum sequence length.
-        initializer_range (`float`, *optional*, defaults to 0.02):
-            Standard deviation for weight initialization.
-        rms_norm_eps (`float`, *optional*, defaults to 1e-06):
-            Epsilon for RMS normalization layers.
-        use_cache (`bool`, *optional*, defaults to `True`):
-            Whether to return past key/values for faster decoding.
-        pad_token_id (`int`, *optional*):
-            Padding token ID.
-        bos_token_id (`int`, *optional*):
-            Beginning of sequence token ID.
-        eos_token_id (`int`, *optional*):
-            End of sequence token ID.
-        tie_word_embeddings (`bool`, *optional*, defaults to `False`):
-            Whether to tie input/output embeddings.
-        rope_theta (`float`, *optional*, defaults to 100000.0):
-            Base period of RoPE embeddings.
-        rope_parameters (`Dict`, *optional*):
-            RoPE scaling configuration. For backwards compatibility, `rope_scaling` is also accepted.
-        attention_bias (`bool`, *optional*, defaults to `False`):
-            Whether to use bias in attention projections.
-        attention_dropout (`float`, *optional*, defaults to 0.0):
-            Dropout ratio for attention probabilities.
-        resid_dropout (`float`, *optional*, defaults to 0.0):
-            Dropout ratio for residual connections.
-        mlp_dropout (`float`, *optional*, defaults to 0.0):
-            Dropout ratio for MLP layers.
-        head_dim (`int`, *optional*):
-            Attention head dimension. Defaults to hidden_size // num_attention_heads.
-        use_sliding_window (`bool`, *optional*, defaults to `False`):
-            Whether to use sliding window attention.
-        sliding_window (`int`, *optional*, defaults to 4096):
-            Sliding window size.
-        max_window_layers (`int`, *optional*, defaults to 28):
-            Number of layers using full attention before switching to sliding window.
-        layer_types (`list`, *optional*):
-            Attention pattern for each layer.
-        text_config (`Union[ArlowTextConfig, dict]`, *optional*):
-            Text backbone configuration. If not provided, it is built from the text-related
-            arguments listed above.
-        vision_config (`Union[PreTrainedConfig, dict]`, *optional*):
-            Vision backbone configuration.
-        mm_tokens_per_image (`int`, *optional*, defaults to 512):
-            Number of tokens per image after vision projection.
-        mm_tokens_per_video (`int`, *optional*, defaults to 1024):
-            Number of tokens per video after temporal resampling.
-        video_max_frames (`int`, *optional*, defaults to 768):
-            Maximum number of video frames to extract.
-        video_sample_strategy (`str`, *optional*, defaults to "uniform"):
-            Video frame sampling strategy: "uniform", "motion_adaptive", or "fps_based".
-        dynamic_resolution (`bool`, *optional*, defaults to True):
-            Whether to use dynamic resolution for images.
-        pan_and_scan (`bool`, *optional*, defaults to False):
-            Whether to use pan-and-scan to keep token budgets constant.
-        timestamp_alignment (`bool`, *optional*, defaults to False):
-            Whether to enable timestamp supervision for video grounding.
-        use_gated_cross_attention (`bool`, *optional*, defaults to False):
-            Whether to use gated cross-attention in upper layers.
-        gated_cross_attention_start_layer (`int`, *optional*):
-            Layer index to start gated cross-attention (if enabled).
-        text_deepstack_injection_layers (`list[int]`, *optional*):
-            Text decoder layer indexes where captured DeepStack visual features are injected. When unset, the
-            injection layers are spread across the text decoder according to the number of captured vision layers.
-        image_token_id (`int`, *optional*, defaults to 131072):
-            Token ID for image placeholders.
-        video_token_id (`int`, *optional*, defaults to 131073):
-            Token ID for video placeholders.
-        vision_start_token_id (`int`, *optional*, defaults to 3):
-            Token ID marking start of vision input.
-        vision_end_token_id (`int`, *optional*, defaults to 4):
-            Token ID marking end of vision input.
-        frame_separator_token_id (`int`, *optional*):
-            Token ID for separating video frames.
-        mrope_sections (`list`, *optional*):
-            M-ROPE sections for [temporal, height, width] dimensions.
-            Defaults to split based on head_dim.
-    """
+    >>> # Initializing an Arlow style configuration
+    >>> configuration = ArlowConfig()
+
+    >>> # Initializing a model from the configuration
+    >>> model = ArlowForConditionalGeneration(configuration)
+
+    >>> # Accessing the model configuration
+    >>> configuration = model.config
+    ```"""
 
     model_type = "arlow"
-    sub_configs = {"vision_config": ArlowVisionConfig, "text_config": ArlowTextConfig}
-    keys_to_ignore_at_inference = ["past_key_values"]
+    sub_configs_defaults = {"vision_config": ArlowVisionConfig, "text_config": ArlowTextConfig}
+    keys_to_ignore_at_inference = ["cache"]
     ignore_keys_at_rope_validation = {"mrope_sections"}
 
-    def __init__(
-        self,
-        vocab_size=131074,
-        hidden_size=2304,
-        intermediate_size=9216,
-        num_hidden_layers=32,
-        num_attention_heads=24,
-        num_key_value_heads=4,
-        hidden_act="silu",
-        max_position_embeddings=32768,
-        initializer_range=0.02,
-        rms_norm_eps=1e-6,
-        use_cache=True,
-        pad_token_id=None,
-        bos_token_id=None,
-        eos_token_id=None,
-        tie_word_embeddings=False,
-        rope_theta=100000.0,
-        rope_parameters=None,
-        rope_scaling=None,  # Deprecated, use rope_parameters
-        attention_bias=False,
-        attention_dropout=0.0,
-        resid_dropout=0.0,
-        mlp_dropout=0.0,
-        head_dim=None,
-        use_sliding_window=False,
-        sliding_window=4096,
-        max_window_layers=28,
-        layer_types=None,
-        text_config: ArlowTextConfig | dict | None = None,
-        # Multimodal parameters
-        vision_config=None,
-        mm_tokens_per_image=512,
-        mm_tokens_per_video=1024,
-        video_max_frames=768,
-        video_sample_strategy="uniform",
-        dynamic_resolution=True,
-        pan_and_scan=False,
-        timestamp_alignment=False,
-        use_gated_cross_attention=False,
-        gated_cross_attention_start_layer=None,
-        text_deepstack_injection_layers: list[int] | None = None,
-        image_token_id=131072,
-        video_token_id=131073,
-        vision_start_token_id=3,
-        vision_end_token_id=4,
-        frame_separator_token_id=None,
-        mrope_sections=None,
-        **kwargs,
-    ):
-        if isinstance(text_config, dict):
-            text_config = self.sub_configs["text_config"](**text_config)
-        elif text_config is None:
-            text_config = self.sub_configs["text_config"](
-                vocab_size=vocab_size,
-                hidden_size=hidden_size,
-                intermediate_size=intermediate_size,
-                num_hidden_layers=num_hidden_layers,
-                num_attention_heads=num_attention_heads,
-                num_key_value_heads=num_key_value_heads,
-                hidden_act=hidden_act,
-                max_position_embeddings=max_position_embeddings,
-                initializer_range=initializer_range,
-                rms_norm_eps=rms_norm_eps,
-                use_cache=use_cache,
-                pad_token_id=pad_token_id,
-                bos_token_id=bos_token_id,
-                eos_token_id=eos_token_id,
-                tie_word_embeddings=tie_word_embeddings,
-                rope_theta=rope_theta,
-                rope_parameters=rope_parameters,
-                rope_scaling=rope_scaling,
-                attention_bias=attention_bias,
-                attention_dropout=attention_dropout,
-                resid_dropout=resid_dropout,
-                mlp_dropout=mlp_dropout,
-                head_dim=head_dim,
-                use_sliding_window=use_sliding_window,
-                sliding_window=sliding_window,
-                max_window_layers=max_window_layers,
-                layer_types=layer_types,
-                mrope_sections=mrope_sections,
-            )
-        else:
-            if rope_scaling is not None or rope_parameters is not None:
-                text_config.rope_parameters = rope_scaling or rope_parameters
-            if head_dim is not None:
-                text_config.head_dim = head_dim
-            if mrope_sections is not None:
-                text_config.mrope_sections = mrope_sections
-            if layer_types is not None:
-                text_config.layer_types = layer_types
-            if max_window_layers is not None:
-                text_config.max_window_layers = max_window_layers
-            if use_sliding_window is not None:
-                text_config.use_sliding_window = use_sliding_window
-                text_config.sliding_window = sliding_window if use_sliding_window else None
+    text_config: dict | PreTrainedConfig | None = None
+    vision_config: dict | PreTrainedConfig | None = None
+    use_gated_cross_attention: bool = False
+    gated_cross_attention_start_layer: int | None = None
+    text_deepstack_injection_layers: list[int] | None = None
+    image_token_id: int = 131072
+    video_token_id: int = 131073
+    vision_start_token_id: int = 3
+    vision_end_token_id: int = 4
+    frame_separator_token_id: int | None = None
+    tie_word_embeddings: bool = False
 
-        self.text_config = text_config
+    def __post_init__(self, **kwargs):
+        # Flat hub configs carry the text backbone arguments at the top level
+        text_keys = [field.name for field in fields(ArlowTextConfig)] + ["rope_scaling", "rope_theta"]
+        text_kwargs = {key: kwargs.pop(key) for key in text_keys if key in kwargs}
+        if self.text_config is None:
+            self.text_config = {**text_kwargs, "tie_word_embeddings": self.tie_word_embeddings}
+        elif isinstance(self.text_config, PreTrainedConfig):
+            self._apply_text_config_overrides(self.text_config, text_kwargs)
 
-        if isinstance(vision_config, dict):
-            self.vision_config = self.sub_configs["vision_config"](**vision_config)
-        elif vision_config is None:
-            self.vision_config = self.sub_configs["vision_config"]()
-        else:
-            self.vision_config = vision_config
+        super().__post_init__(**kwargs)
+
+        text_config = self.text_config
+        if not self.tie_word_embeddings and text_config.tie_word_embeddings:
+            self.tie_word_embeddings = True
         self.vision_config.hidden_size = text_config.hidden_size
 
-        self.mm_tokens_per_image = mm_tokens_per_image
-        self.mm_tokens_per_video = mm_tokens_per_video
-        self.video_max_frames = video_max_frames
-        self.video_sample_strategy = video_sample_strategy
-        self.dynamic_resolution = dynamic_resolution
-        self.pan_and_scan = pan_and_scan
-        self.timestamp_alignment = timestamp_alignment
-        self.use_gated_cross_attention = use_gated_cross_attention
-        self.gated_cross_attention_start_layer = gated_cross_attention_start_layer
+        text_deepstack_injection_layers = self.text_deepstack_injection_layers
         visual_deepstack_count = len(getattr(self.vision_config, "deepstack_visual_indexes", []))
         if text_deepstack_injection_layers is None:
             if visual_deepstack_count > 0:
@@ -542,50 +329,37 @@ class ArlowConfig(PreTrainedConfig):
                 f"{len(text_deepstack_injection_layers)}."
             )
         self.text_deepstack_injection_layers = text_deepstack_injection_layers
-        self.image_token_id = image_token_id
-        self.video_token_id = video_token_id
-        self.vision_start_token_id = vision_start_token_id
-        self.vision_end_token_id = vision_end_token_id
-        self.frame_separator_token_id = frame_separator_token_id
 
-        self.vocab_size = text_config.vocab_size
-        self.max_position_embeddings = text_config.max_position_embeddings
-        self.hidden_size = text_config.hidden_size
-        self.intermediate_size = text_config.intermediate_size
-        self.num_hidden_layers = text_config.num_hidden_layers
-        self.num_attention_heads = text_config.num_attention_heads
-        self.num_key_value_heads = text_config.num_key_value_heads
-        self.hidden_act = text_config.hidden_act
-        self.initializer_range = text_config.initializer_range
-        self.rms_norm_eps = text_config.rms_norm_eps
-        self.use_cache = text_config.use_cache
-        self.rope_theta = getattr(text_config, "rope_theta", rope_theta)
-        self.rope_parameters = text_config.rope_parameters
-        self.attention_bias = text_config.attention_bias
-        self.attention_dropout = text_config.attention_dropout
-        self.resid_dropout = text_config.resid_dropout
-        self.mlp_dropout = text_config.mlp_dropout
-        self.head_dim = text_config.head_dim
+        # The decoder reads the text backbone settings directly off the composite config
+        for key in (
+            "vocab_size",
+            "max_position_embeddings",
+            "hidden_size",
+            "intermediate_size",
+            "num_hidden_layers",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "hidden_act",
+            "initializer_range",
+            "rms_norm_eps",
+            "use_cache",
+            "rope_parameters",
+            "attention_bias",
+            "attention_dropout",
+            "resid_dropout",
+            "mlp_dropout",
+            "head_dim",
+            "layer_types",
+            "use_sliding_window",
+            "sliding_window",
+            "max_window_layers",
+            "mrope_sections",
+            "pad_token_id",
+            "bos_token_id",
+            "eos_token_id",
+        ):
+            setattr(self, key, getattr(text_config, key))
 
-        if self.rope_parameters is not None and "type" in self.rope_parameters:
-            self.rope_parameters["rope_type"] = self.rope_parameters["type"]
-        self.standardize_rope_params()
-        self.validate_rope()
-
-        self.layer_types = text_config.layer_types
-        if self.layer_types is None:
-            self.layer_types = [
-                "sliding_attention"
-                if text_config.sliding_window is not None and i >= text_config.max_window_layers
-                else "full_attention"
-                for i in range(self.num_hidden_layers)
-            ]
-        layer_type_validation(self.layer_types, self.num_hidden_layers)
-        self.use_sliding_window = text_config.use_sliding_window
-        self.sliding_window = text_config.sliding_window
-        self.max_window_layers = text_config.max_window_layers
-
-        self.mrope_sections = text_config.mrope_sections
         if sum(self.mrope_sections) != self.head_dim:
             raise ValueError(
                 f"Sum of mrope_sections {self.mrope_sections} (={sum(self.mrope_sections)}) "
@@ -595,16 +369,24 @@ class ArlowConfig(PreTrainedConfig):
         self._mrope_ratio = [section / self.head_dim for section in self.mrope_sections]
         self.validate_architecture()
         vision_head_dim = self.vision_config.embed_dim // self.vision_config.num_heads
-        scaled_sections = self._scale_mrope_sections_from_ratio(vision_head_dim, self._mrope_ratio)
-        self.vision_config.mrope_sections = scaled_sections
+        self.vision_config.mrope_sections = self._scale_mrope_sections_from_ratio(vision_head_dim, self._mrope_ratio)
 
-        super().__init__(
-            pad_token_id=text_config.pad_token_id,
-            bos_token_id=text_config.bos_token_id,
-            eos_token_id=text_config.eos_token_id,
-            tie_word_embeddings=text_config.tie_word_embeddings,
-            **kwargs,
-        )
+    @staticmethod
+    def _apply_text_config_overrides(text_config: "ArlowTextConfig", text_kwargs: dict) -> None:
+        rope_parameters = text_kwargs.get("rope_scaling") or text_kwargs.get("rope_parameters")
+        if rope_parameters is not None:
+            rope_parameters = dict(rope_parameters)
+            rope_parameters.setdefault("rope_theta", text_kwargs.get("rope_theta", text_config.default_theta))
+            text_config.rope_parameters = rope_parameters
+            text_config.standardize_rope_params()
+        for key in ("head_dim", "mrope_sections", "layer_types", "max_window_layers"):
+            if text_kwargs.get(key) is not None:
+                setattr(text_config, key, text_kwargs[key])
+        if text_kwargs.get("use_sliding_window") is not None:
+            text_config.use_sliding_window = text_kwargs["use_sliding_window"]
+            text_config.sliding_window = (
+                text_kwargs.get("sliding_window", 4096) if text_config.use_sliding_window else None
+            )
 
     def to_dict(self):
         output = super().to_dict()

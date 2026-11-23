@@ -4,6 +4,20 @@
 #             the file from the modular. If any change should be done, please apply the change to the
 #                          modular_arlow.py file directly. One of our CI enforces this.
 #                🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
+# Copyright 2026 Arlow Constellations. All rights reserved.
+# Written and edited by IRIS.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import numpy as np
 import torch
@@ -12,7 +26,7 @@ from ...feature_extraction_utils import BatchFeature
 from ...image_utils import ImageInput
 from ...processing_utils import MultiModalData, ProcessingKwargs, ProcessorMixin, Unpack
 from ...tokenization_utils_base import PreTokenizedInput, TextInput
-from ...utils import logging
+from ...utils import auto_docstring, logging
 from ...video_utils import VideoInput
 
 
@@ -20,31 +34,24 @@ logger = logging.get_logger(__name__)
 
 
 class ArlowProcessorKwargs(ProcessingKwargs, total=False):
-    _defaults = {
-        "images_kwargs": {},
-        "text_kwargs": {
-            "padding": False,
-            "return_token_type_ids": False,
-            "return_mm_token_type_ids": False,
-        },
-        "videos_kwargs": {"return_metadata": True},
-    }
+    r"""
+    timestamp_alignment (`bool`, *optional*):
+        Whether to inject timestamp prompts for video frames. Overrides the processor default for this call.
+    """
+
+    timestamp_alignment: bool
 
 
 # Inspired by transformers.models.qwen3_vl.processing_qwen3_vl.Qwen3VLProcessor
+@auto_docstring
 class ArlowProcessor(ProcessorMixin):
     r"""
-    Constructs an Arlow processor which wraps an image processor, a tokenizer, and a video processor into a single
-    processor. Follows Qwen3VL's strategy for placeholder expansion and timestamp prompts.
-
-    Args:
-        image_processor: Required image processor.
-        tokenizer: Required tokenizer (`ArlowTokenizer`).
-        video_processor: Required video processor for video support.
-        chat_template: Optional chat template string.
-        timestamp_alignment: Whether to inject timestamp prompts for video frames. Defaults to `False`.
+    timestamp_alignment (`bool`, *optional*, defaults to `False`):
+        Whether to inject timestamp prompts for video frames.
     """
 
+    text_kwargs = {"padding": False, "return_token_type_ids": False}
+    videos_kwargs = {"return_metadata": True}
     attributes = ["image_processor", "tokenizer", "video_processor"]
     image_processor_class = "AutoImageProcessor"
     video_processor_class = "AutoVideoProcessor"
@@ -100,6 +107,7 @@ class ArlowProcessor(ProcessorMixin):
             timestamp_alignment = tokenizer.init_kwargs.get("timestamp_alignment")
         self.timestamp_alignment = bool(timestamp_alignment) if timestamp_alignment is not None else False
 
+    @auto_docstring
     def __call__(
         self,
         images: ImageInput | None = None,
@@ -337,9 +345,8 @@ class ArlowProcessor(ProcessorMixin):
     def _get_num_multimodal_tokens(self, image_sizes=None, video_sizes=None, **kwargs):
         vision_data = {}
         if image_sizes is not None and self.image_processor is not None:
-            images_kwargs = ArlowProcessorKwargs._defaults.get("images_kwargs", {}).copy()
-            images_kwargs.update(kwargs)
-            merge_size = images_kwargs.get("merge_size", None) or getattr(self.image_processor, "merge_size", 1)
+            images_kwargs = dict(kwargs)
+            merge_size = images_kwargs.get("merge_size") or getattr(self.image_processor, "merge_size", 1)
             num_image_patches = [
                 self.image_processor.get_number_of_image_patches(*image_size, images_kwargs)
                 for image_size in image_sizes
@@ -348,8 +355,7 @@ class ArlowProcessor(ProcessorMixin):
             vision_data.update({"num_image_tokens": num_image_tokens, "num_image_patches": num_image_patches})
 
         if video_sizes is not None and self.video_processor is not None:
-            videos_kwargs = ArlowProcessorKwargs._defaults.get("videos_kwargs", {}).copy()
-            videos_kwargs.update(kwargs)
+            videos_kwargs = {**self.videos_kwargs, **kwargs}
             num_video_patches = [
                 self.video_processor.get_number_of_video_patches(*video_size, videos_kwargs)
                 for video_size in video_sizes
