@@ -100,7 +100,9 @@ class ArlowImageProcessor(_ArlowImageProcessorMixin, TorchvisionBackend):
             if patches.ndim == 4:
                 patches = patches.unsqueeze(1)
             if patches.shape[1] % temporal_patch_size != 0:
-                repeats = patches[:, -1:].repeat(1, temporal_patch_size - (patches.shape[1] % temporal_patch_size), 1, 1, 1)
+                repeats = patches[:, -1:].repeat(
+                    1, temporal_patch_size - (patches.shape[1] % temporal_patch_size), 1, 1, 1
+                )
                 patches = torch.cat([patches, repeats], dim=1)
             batch_size, grid_t, channel = patches.shape[:3]
             grid_t = grid_t // temporal_patch_size

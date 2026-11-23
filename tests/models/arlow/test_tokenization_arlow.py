@@ -70,7 +70,9 @@ class ArlowTokenizerTests(TokenizerTesterMixin, unittest.TestCase):
         bpe.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
         bpe.train_from_iterator([cls._data], trainer=trainer)
         bpe_model = json.loads(bpe.to_str())["model"]
-        merges = [tuple(merge) if isinstance(merge, list) else tuple(merge.split(" ")) for merge in bpe_model["merges"]]
+        merges = [
+            tuple(merge) if isinstance(merge, list) else tuple(merge.split(" ")) for merge in bpe_model["merges"]
+        ]
         ArlowTokenizer(vocab=bpe_model["vocab"], merges=merges).save_pretrained(cls.tmpdirname)
 
     def setUp(self):

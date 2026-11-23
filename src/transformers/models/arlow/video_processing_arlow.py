@@ -278,7 +278,9 @@ class ArlowVideoProcessor(BaseVideoProcessor):
             sampled_metadata = []
             for video, metadata in zip(videos, video_metadata):
                 indices = sample_indices_fn(metadata=metadata, video_frames=video)
-                indices = torch.as_tensor(indices, dtype=torch.int64, device=video.device if isinstance(video, torch.Tensor) else None)
+                indices = torch.as_tensor(
+                    indices, dtype=torch.int64, device=video.device if isinstance(video, torch.Tensor) else None
+                )
                 metadata.frames_indices = indices
                 sampled_videos.append(video[indices])
                 sampled_metadata.append(metadata)
@@ -430,9 +432,8 @@ class ArlowVideoProcessor(BaseVideoProcessor):
                 temporal_groups = min(temporal_groups, max(self.max_tokens_per_video, 1))
                 temporal_groups = max(temporal_groups, 1)
 
-                while (
-                    temporal_groups * grid_h_groups * grid_w_groups > self.max_tokens_per_video
-                    and (temporal_groups > 1 or grid_h_groups > 1 or grid_w_groups > 1)
+                while temporal_groups * grid_h_groups * grid_w_groups > self.max_tokens_per_video and (
+                    temporal_groups > 1 or grid_h_groups > 1 or grid_w_groups > 1
                 ):
                     if temporal_groups > 1:
                         temporal_groups -= 1
@@ -508,7 +509,9 @@ class ArlowVideoProcessor(BaseVideoProcessor):
 
             # Ensure divisibility for temporal patching by repeating last frame
             if patches.shape[1] % temporal_patch_size != 0:
-                repeats = patches[:, -1:].repeat(1, temporal_patch_size - (patches.shape[1] % temporal_patch_size), 1, 1, 1)
+                repeats = patches[:, -1:].repeat(
+                    1, temporal_patch_size - (patches.shape[1] % temporal_patch_size), 1, 1, 1
+                )
                 patches = torch.cat([patches, repeats], dim=1)
 
             batch_size, temporal_tokens, channel = patches.shape[:3]
