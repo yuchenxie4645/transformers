@@ -19,7 +19,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Optional
@@ -794,24 +793,6 @@ class ArlowPreTrainedModel(PreTrainedModel):
     _supports_sdpa = True
     _supports_attention_backend = True
     _can_record_outputs = {}
-
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        # Safetensors memory-mapped loading can keep file sections open on Windows and
-        # break save-overwrite flows in local tests (`os error 1224`).
-        if os.name == "nt" and kwargs.get("low_cpu_mem_usage") is None:
-            kwargs["low_cpu_mem_usage"] = False
-        return super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
-
-    def save_pretrained(self, save_directory, *args, **kwargs):
-        # On Windows, writing over an already-loaded safetensors file can fail with
-        # "user-mapped section open" due OS-level mapped-file semantics. When saving
-        # into an existing checkpoint directory, save a variant shard instead.
-        if os.name == "nt" and kwargs.get("variant") is None:
-            default_weights_path = os.path.join(save_directory, "model.safetensors")
-            if os.path.isfile(default_weights_path):
-                kwargs["variant"] = "resave"
-        return super().save_pretrained(save_directory, *args, **kwargs)
 
     def _init_weights(self, module: nn.Module):
         # The vision rotary embedding has no `compute_default_rope_parameters` for the base class to call
