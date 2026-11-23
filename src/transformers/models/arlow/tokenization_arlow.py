@@ -212,6 +212,7 @@ class ArlowTokenizer(TokenizersBackend):
             add_prefix_space=self.add_prefix_space,
             clean_up_tokenization_spaces=clean_up_tokenization_spaces,
             split_special_tokens=split_special_tokens,
+            errors=errors,
             **kwargs,
         )
 
@@ -221,13 +222,14 @@ class ArlowTokenizer(TokenizersBackend):
         self.vision_end_token = "<|vision_end|>"
         self.add_special_tokens(
             {
-                "additional_special_tokens": [
+                "extra_special_tokens": [
                     AddedToken(self.image_token, lstrip=False, rstrip=False, normalized=False, special=True),
                     AddedToken(self.video_token, lstrip=False, rstrip=False, normalized=False, special=True),
                     AddedToken(self.vision_start_token, lstrip=False, rstrip=False, normalized=False, special=True),
                     AddedToken(self.vision_end_token, lstrip=False, rstrip=False, normalized=False, special=True),
                 ]
-            }
+            },
+            replace_extra_special_tokens=False,
         )
 
         self.image_token_id = self.convert_tokens_to_ids(self.image_token)

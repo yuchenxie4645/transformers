@@ -1,3 +1,17 @@
+# Copyright 2026 Arlow Constellations. All rights reserved.
+# Written and edited by IRIS.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Video processor class for Arlow multimodal models."""
 
 import math
@@ -10,8 +24,8 @@ from ...feature_extraction_utils import BatchFeature
 from ...image_processing_utils import get_size_dict
 from ...image_utils import ChannelDimension, PILImageResampling, SizeDict, get_image_size
 from ...processing_utils import Unpack, VideosKwargs
-from ...utils import TensorType, add_start_docstrings, logging
-from ...video_processing_utils import BASE_VIDEO_PROCESSOR_DOCSTRING, BaseVideoProcessor
+from ...utils import TensorType, auto_docstring, logging
+from ...video_processing_utils import BaseVideoProcessor
 from ...video_utils import (
     VideoInput,
     VideoMetadata,
@@ -127,6 +141,23 @@ def motion_adaptive_sampling(frames: np.ndarray, target_frames: int, threshold: 
 
 
 class ArlowVideoProcessorInitKwargs(VideosKwargs, total=False):
+    r"""
+    patch_size (`int`, *optional*, defaults to 14):
+        The spatial patch size of the vision encoder.
+    temporal_patch_size (`int`, *optional*, defaults to 2):
+        The temporal patch size of the vision encoder.
+    merge_size (`int`, *optional*, defaults to 2):
+        The merge size of the vision encoder to LLM encoder.
+    min_frames (`int`, *optional*, defaults to 4):
+        The minimum number of frames that can be sampled.
+    max_frames (`int`, *optional*, defaults to 768):
+        The maximum number of frames that can be sampled.
+    sample_strategy (`str`, *optional*, defaults to "uniform"):
+        Video frame sampling strategy: "uniform", "motion_adaptive", or "fps_based".
+    motion_threshold (`float`, *optional*, defaults to 0.1):
+        Threshold used by the "motion_adaptive" sampling strategy to detect scene changes.
+    """
+
     patch_size: int
     temporal_patch_size: int
     merge_size: int
@@ -137,21 +168,12 @@ class ArlowVideoProcessorInitKwargs(VideosKwargs, total=False):
 
 
 # Inspired by transformers.models.qwen3_vl.video_processing_qwen3_vl.Qwen3VLVideoProcessor
-@add_start_docstrings(
-    "Constructs an Arlow video processor with adaptive sampling and dynamic resizing.",
-    BASE_VIDEO_PROCESSOR_DOCSTRING,
-    """
-        patch_size (`int`, *optional*, defaults to 14):
-            The spatial patch size of the vision encoder.
-        temporal_patch_size (`int`, *optional*, defaults to 2):
-            The temporal patch size of the vision encoder.
-        merge_size (`int`, *optional*, defaults to 2):
-            The merge size of the vision encoder to LLM encoder.
-        sample_strategy (`str`, *optional*, defaults to "uniform"):
-            Video frame sampling strategy: "uniform", "motion_adaptive", or "fps_based".
-    """,
-)
+@auto_docstring
 class ArlowVideoProcessor(BaseVideoProcessor):
+    r"""
+    Constructs an Arlow video processor with adaptive sampling and dynamic resizing.
+    """
+
     resample = PILImageResampling.BICUBIC
     size = {"shortest_edge": 128 * 32 * 32, "longest_edge": 32 * 32 * 768}
     image_mean = [0.5, 0.5, 0.5]
@@ -216,7 +238,6 @@ class ArlowVideoProcessor(BaseVideoProcessor):
         self.max_volume = merged_size["longest_edge"]
         if motion_threshold is not None:
             self.motion_threshold = motion_threshold
-        self._last_selected_frame_indices: list[list[int]] = []
 
     def _further_process_kwargs(
         self,
@@ -463,7 +484,7 @@ class ArlowVideoProcessor(BaseVideoProcessor):
 
         resized_videos = reorder_videos(resized_videos_grouped, grouped_videos_index)
         selected_indices = reorder_videos(selected_indices_grouped, grouped_videos_index)
-        self._last_selected_frame_indices = [indices.detach().cpu().tolist() for indices in selected_indices]
+        selected_frame_indices = [indices.detach().cpu().tolist() for indices in selected_indices]
 
         # Group again to ensure homogeneous shapes after resizing
         grouped_videos, grouped_videos_index = group_videos_by_shape(resized_videos)
@@ -535,7 +556,10 @@ class ArlowVideoProcessor(BaseVideoProcessor):
             "video_grid_thw": video_grid_thw,
         }
 
-        return BatchFeature(data=data, tensor_type=return_tensors)
+        outputs = BatchFeature(data=data, tensor_type=return_tensors)
+        # Ragged per-video index lists cannot be tensor-converted, so attach them after conversion.
+        outputs["selected_frame_indices"] = selected_frame_indices
+        return outputs
 
     @staticmethod
     def _flatten_unpadded_pixel_values(pixel_values, video_grid_thw):
@@ -573,6 +597,7 @@ class ArlowVideoProcessor(BaseVideoProcessor):
 
         return flattened
 
+    @auto_docstring
     def preprocess(
         self,
         videos: VideoInput,
@@ -583,16 +608,17 @@ class ArlowVideoProcessor(BaseVideoProcessor):
             outputs["pixel_values_videos"] = self._flatten_unpadded_pixel_values(
                 outputs["pixel_values_videos"], outputs["video_grid_thw"]
             )
-        if "video_metadata" in outputs and self._last_selected_frame_indices:
+        selected_frame_indices = outputs.pop("selected_frame_indices", None)
+        if "video_metadata" in outputs and selected_frame_indices is not None:
             metadata_list = outputs["video_metadata"]
-            for metadata, indices in zip(metadata_list, self._last_selected_frame_indices):
+            for metadata, indices in zip(metadata_list, selected_frame_indices):
                 if metadata is None:
                     continue
                 metadata.frames_indices = np.asarray(indices, dtype=np.int64)
-        self._last_selected_frame_indices = []
         return outputs
 
 
+@auto_docstring
 class ArlowVideoProcessorFast(ArlowVideoProcessor):
     pass
 
