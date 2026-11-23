@@ -261,19 +261,33 @@ This injects `<{time} seconds>` tokens before each frame for temporal grounding.
 
 [[autodoc]] ArlowVisionConfig
 
+## ArlowTokenizer
+
+[[autodoc]] ArlowTokenizer
+
 ## ArlowProcessor
 
 [[autodoc]] ArlowProcessor
+    - __call__
 
 ## ArlowImageProcessor
 
 [[autodoc]] ArlowImageProcessor
     - preprocess
 
+## ArlowImageProcessorPil
+
+[[autodoc]] ArlowImageProcessorPil
+    - preprocess
+
 ## ArlowVideoProcessor
 
 [[autodoc]] ArlowVideoProcessor
     - preprocess
+
+## ArlowVideoProcessorFast
+
+[[autodoc]] ArlowVideoProcessorFast
 
 ## ArlowTextModel
 
@@ -313,4 +327,19 @@ This injects `<{time} seconds>` tokens before each frame for temporal grounding.
 ## ArlowForQuestionAnswering
 
 [[autodoc]] ArlowForQuestionAnswering
+    - forward
+
+## ArlowTextForSequenceClassification
+
+[[autodoc]] ArlowTextForSequenceClassification
+    - forward
+
+## ArlowTextForTokenClassification
+
+[[autodoc]] ArlowTextForTokenClassification
+    - forward
+
+## ArlowTextForQuestionAnswering
+
+[[autodoc]] ArlowTextForQuestionAnswering
     - forward
