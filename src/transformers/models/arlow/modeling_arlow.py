@@ -56,6 +56,7 @@ from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
 from ...utils.deprecation import deprecate_kwarg
+from ...utils.generic import merge_with_config_defaults
 from .configuration_arlow import ArlowConfig, ArlowTextConfig, ArlowVisionConfig
 
 
@@ -1302,6 +1303,7 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
     @can_return_tuple
     @auto_docstring
     @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
+    @merge_with_config_defaults
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -1385,14 +1387,6 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
         # Ensure output flags are in kwargs for decoder layers
         kwargs["output_hidden_states"] = output_hidden_states
         kwargs["output_attentions"] = output_attentions
-
-        # Gradient checkpointing support
-        if self.gradient_checkpointing and self.training:
-            if use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting use_cache=False."
-                )
-            use_cache = False
 
         if all_hidden_states is not None:
             all_hidden_states += (hidden_states,)
