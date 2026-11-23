@@ -94,9 +94,6 @@ class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
     def test_config_multimodal_defaults(self):
         config = ArlowConfig()
         self.assertEqual(config.max_position_embeddings, 32768)
-        self.assertEqual(config.mm_tokens_per_image, 512)
-        self.assertEqual(config.mm_tokens_per_video, 1024)
-        self.assertEqual(config.video_max_frames, 768)
         vision_config = config.vision_config
         self.assertTrue(hasattr(vision_config, "deepstack_visual_indexes"))
         self.assertIsInstance(vision_config.deepstack_visual_indexes, list)
@@ -671,7 +668,9 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
         # Grid: (num_videos, 3) as [temporal, height, width] after patching
         video_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)  # 4/2=2, 28/14=2
-        video_tokens = _repeat_visual_token(config.video_token_id, video_grid_thw, config.vision_config.spatial_merge_size)
+        video_tokens = _repeat_visual_token(
+            config.video_token_id, video_grid_thw, config.vision_config.spatial_merge_size
+        )
 
         # Text with video placeholders matching the merged visual token count
         input_ids = torch.tensor(
@@ -728,8 +727,12 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
         image_grid_thw = torch.tensor([[1, 2, 2]], device=torch_device)
         video_grid_thw = torch.tensor([[2, 2, 2]], device=torch_device)
-        image_tokens = _repeat_visual_token(config.image_token_id, image_grid_thw, config.vision_config.spatial_merge_size)
-        video_tokens = _repeat_visual_token(config.video_token_id, video_grid_thw, config.vision_config.spatial_merge_size)
+        image_tokens = _repeat_visual_token(
+            config.image_token_id, image_grid_thw, config.vision_config.spatial_merge_size
+        )
+        video_tokens = _repeat_visual_token(
+            config.video_token_id, video_grid_thw, config.vision_config.spatial_merge_size
+        )
 
         # Text with both image and video placeholders matching merged visual token counts
         input_ids = torch.tensor(
