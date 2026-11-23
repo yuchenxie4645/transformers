@@ -1122,7 +1122,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
     def test_vision_encoder_standalone(self):
         """Test vision encoder as a standalone component."""
-        from transformers.models.arlow.modular_arlow import ArlowVisionConfig, ArlowVLVisionModel
+        from transformers import ArlowVisionConfig, ArlowVLVisionModel
 
         config = ArlowVisionConfig(
             depth=2,
