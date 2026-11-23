@@ -49,6 +49,60 @@ class ArlowModelTester(CausalLMModelTester):
         base_model_class = ArlowModel
         causal_lm_class = ArlowForCausalLM
 
+    small_config_overrides = {
+        "max_position_embeddings": 128,
+        "image_token_id": 95,
+        "video_token_id": 96,
+        "vision_start_token_id": 97,
+        "vision_end_token_id": 98,
+        "vision_depth": 2,
+        "vision_embed_dim": 32,
+        "vision_num_heads": 2,
+        "vision_patch_size": 2,
+        "vision_spatial_merge_size": 2,
+        "vision_temporal_patch_size": 2,
+        "vision_max_position_embeddings": 128,
+    }
+
+    def get_config(self):
+        # `ArlowConfig` only exposes sub-configs in its signature, so the small text values are routed explicitly
+        text_config = ArlowTextConfig(
+            vocab_size=self.vocab_size,
+            hidden_size=self.hidden_size,
+            intermediate_size=self.intermediate_size,
+            num_hidden_layers=self.num_hidden_layers,
+            num_attention_heads=self.num_attention_heads,
+            num_key_value_heads=self.num_key_value_heads,
+            head_dim=self.head_dim,
+            hidden_act=self.hidden_act,
+            max_position_embeddings=self.max_position_embeddings,
+            initializer_range=self.initializer_range,
+            pad_token_id=self.pad_token_id,
+            bos_token_id=self.bos_token_id,
+            eos_token_id=self.eos_token_id,
+            tie_word_embeddings=self.tie_word_embeddings,
+        )
+        vision_config = {
+            "depth": self.vision_depth,
+            "embed_dim": self.vision_embed_dim,
+            "hidden_size": self.hidden_size,
+            "num_heads": self.vision_num_heads,
+            "patch_size": self.vision_patch_size,
+            "spatial_merge_size": self.vision_spatial_merge_size,
+            "temporal_patch_size": self.vision_temporal_patch_size,
+            "max_position_embeddings": self.vision_max_position_embeddings,
+            "initializer_range": self.initializer_range,
+        }
+        return self.config_class(
+            text_config=text_config,
+            vision_config=vision_config,
+            image_token_id=self.image_token_id,
+            video_token_id=self.video_token_id,
+            vision_start_token_id=self.vision_start_token_id,
+            vision_end_token_id=self.vision_end_token_id,
+            tie_word_embeddings=self.tie_word_embeddings,
+        )
+
 
 @require_torch
 class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
