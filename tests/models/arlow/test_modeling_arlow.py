@@ -158,6 +158,13 @@ class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
     def test_load_with_mismatched_shapes(self):
         pass
 
+    @unittest.skip(
+        "The only generative class here is the text-only ArlowForCausalLM, which builds just the text decoder and never "
+        "encodes images, so it has no `image_outputs` despite the composite config carrying a `vision_config`"
+    )
+    def test_multimodal_outputs_are_returned(self):
+        pass
+
 
 @require_torch
 class ArlowIntegrationTest(unittest.TestCase):
