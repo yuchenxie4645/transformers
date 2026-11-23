@@ -9,7 +9,12 @@ from transformers.models.arlow.image_processing_arlow import smart_resize
 from transformers.testing_utils import require_torch, require_vision
 from transformers.utils import is_torch_available, is_torchvision_available, is_vision_available
 
-from ...test_image_processing_common import ImageProcessingTestMixin, prepare_image_inputs, prepare_video_inputs
+from ...test_image_processing_common import (
+    ImageProcessingTester,
+    ImageProcessingTestMixin,
+    prepare_image_inputs,
+    prepare_video_inputs,
+)
 from ...test_processing_common import url_to_local_path
 
 
@@ -25,7 +30,7 @@ if is_vision_available():
         from transformers import ArlowImageProcessorFast
 
 
-class ArlowImageProcessingTester:
+class ArlowImageProcessingTester(ImageProcessingTester):
     def __init__(
         self,
         parent,
@@ -45,11 +50,13 @@ class ArlowImageProcessingTester:
         merge_size=2,
         do_convert_rgb=True,
     ):
-        self.parent = parent
-        self.batch_size = batch_size
-        self.min_resolution = min_resolution
-        self.max_resolution = max_resolution
-        self.num_channels = num_channels
+        super().__init__(
+            parent,
+            batch_size=batch_size,
+            num_channels=num_channels,
+            min_resolution=min_resolution,
+            max_resolution=max_resolution,
+        )
         self.num_frames = num_frames
         self.image_mean = IMAGENET_STANDARD_MEAN
         self.image_std = IMAGENET_STANDARD_STD
@@ -107,9 +114,10 @@ class ArlowImageProcessingTest(ImageProcessingTestMixin, unittest.TestCase):
     image_processing_class = ArlowImageProcessorPil if is_vision_available() else None
     fast_image_processing_class = ArlowImageProcessor if is_torchvision_available() else None
 
+    image_processor_tester_class = ArlowImageProcessingTester
+
     def setUp(self):
         super().setUp()
-        self.image_processor_tester = ArlowImageProcessingTester(self)
         # Keep Arlow's custom tests compatible with the shared backend-aware image processing test mixin.
         self.image_processor_list = list(self.image_processing_classes.values())
         self.image_processing_class = self.image_processing_classes.get("pil")

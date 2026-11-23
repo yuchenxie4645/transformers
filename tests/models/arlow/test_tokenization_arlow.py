@@ -5,8 +5,14 @@ import tempfile
 import unicodedata
 import unittest
 
+from tokenizers import Tokenizer, pre_tokenizers
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+
 from transformers import AutoTokenizer
 from transformers.models.arlow.tokenization_arlow import ArlowTokenizer
+
+from ...test_tokenization_common import TokenizerTesterMixin
 
 
 DUMMY_VOCAB = {
@@ -46,7 +52,27 @@ DUMMY_TOKENIZER_JSON = {
 }
 
 
-class ArlowTokenizerTests(unittest.TestCase):
+class ArlowTokenizerTests(TokenizerTesterMixin, unittest.TestCase):
+    tokenizer_class = ArlowTokenizer
+    test_seq2seq = False
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # No public Arlow checkpoint ships a tokenizer, so the shared suite runs on a byte-level BPE trained on the
+        # common fixture text; the full byte alphabet keeps every input encodable.
+        trainer = BpeTrainer(
+            vocab_size=1000,
+            special_tokens=["<|endoftext|>"],
+            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+        )
+        bpe = Tokenizer(BPE())
+        bpe.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+        bpe.train_from_iterator([cls._data], trainer=trainer)
+        bpe_model = json.loads(bpe.to_str())["model"]
+        merges = [tuple(merge) if isinstance(merge, list) else tuple(merge.split(" ")) for merge in bpe_model["merges"]]
+        ArlowTokenizer(vocab=bpe_model["vocab"], merges=merges).save_pretrained(cls.tmpdirname)
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.vocab_file = os.path.join(self.tmp, "vocab.json")

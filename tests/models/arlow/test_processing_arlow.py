@@ -133,12 +133,12 @@ class ArlowProcessorTest(unittest.TestCase):
 
         # Write vocab file
         vocab_path = Path(cls.tmp_dir) / "vocab.json"
-        with open(vocab_path, "w") as f:
+        with open(vocab_path, "w", encoding="utf-8") as f:
             json.dump(vocab, f)
 
         # Write merges file
         merges_path = Path(cls.tmp_dir) / "merges.txt"
-        with open(merges_path, "w") as f:
+        with open(merges_path, "w", encoding="utf-8") as f:
             f.write("#version: 0.2\nh e\nl l\no o\n")
 
         cls.tokenizer = ArlowTokenizer(vocab_file=str(vocab_path), merges_file=str(merges_path))
