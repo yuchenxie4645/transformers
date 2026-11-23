@@ -66,6 +66,12 @@ class ArlowProcessor(ProcessorMixin):
         timestamp_alignment: bool | None = None,
         **kwargs,
     ):
+        """
+        Args:
+            timestamp_alignment (`bool`, *optional*, defaults to `False`):
+                Whether to inject timestamp prompts for video frames. Falls back to the video processor or
+                tokenizer setting when not provided.
+        """
         # multimodal special tokens
         self.image_token = "<image>" if not hasattr(tokenizer, "image_token") else tokenizer.image_token
         self.video_token = "<video>" if not hasattr(tokenizer, "video_token") else tokenizer.video_token
