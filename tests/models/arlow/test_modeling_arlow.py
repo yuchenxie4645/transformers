@@ -134,9 +134,6 @@ class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
     test_pruning = False
     model_tester_class = ArlowModelTester
     rotary_embedding_layer = ArlowTextRotaryEmbedding  # Enables RoPE tests if set
-    test_can_load_with_device_context_manager = False
-    test_can_load_with_global_device_set = False
-    test_disk_offload_safetensors = False
     skip_test_image_features_output_shape = True
     skip_test_video_features_output_shape = True
 
@@ -174,12 +171,6 @@ class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
     )
     def test_training_gradient_checkpointing_use_reentrant_true(self):
         super().test_training_gradient_checkpointing_use_reentrant_true()
-
-    @unittest.skip(
-        "Arlow uses checkpoint_conversion_mapping which causes issues when loading base model from saved task model checkpoint"
-    )
-    def test_load_with_mismatched_shapes(self):
-        pass
 
     @unittest.skip(
         "The only generative class here is the text-only ArlowForCausalLM, which builds just the text decoder and never "
