@@ -53,6 +53,7 @@ from ...tokenization_utils_base import PreTokenizedInput, TextInput
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
 from ...utils.deprecation import deprecate_kwarg
 from ...utils.generic import merge_with_config_defaults
+from ...utils.output_capturing import capture_outputs
 from ...video_utils import VideoInput
 
 
@@ -948,10 +949,10 @@ class ArlowDecoderLayer(GradientCheckpointingLayer):
         use_cache: bool | None = False,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        attn_out, attn_weights = self.self_attn(
+        attn_out, _ = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
@@ -965,12 +966,7 @@ class ArlowDecoderLayer(GradientCheckpointingLayer):
         hidden_states = self.post_attention_layernorm(hidden_states)
         mlp_out = self.mlp(hidden_states)
         hidden_states = residual + self.resid_dropout(mlp_out)
-
-        output_attentions = kwargs.get("output_attentions", False)
-        if output_attentions:
-            return (hidden_states, attn_weights)
-
-        return (hidden_states,)
+        return hidden_states
 
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.PatchEmbed
@@ -1245,7 +1241,10 @@ class ArlowPreTrainedModel(PreTrainedModel):
     _supports_flash_attn = True
     _supports_sdpa = True
     _supports_attention_backend = True
-    _can_record_outputs = {}
+    _can_record_outputs = {
+        "hidden_states": ArlowDecoderLayer,
+        "attentions": ArlowAttention,
+    }
 
     def _init_weights(self, module: nn.Module):
         # The vision rotary embedding has no `compute_default_rope_parameters` for the base class to call
@@ -1704,10 +1703,10 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
         updated[visual_pos_masks, :] = updated[visual_pos_masks, :] + visual_embeds
         return updated
 
-    @can_return_tuple
+    @merge_with_config_defaults
+    @capture_outputs
     @auto_docstring
     @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
-    @merge_with_config_defaults
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -1720,7 +1719,7 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
         visual_pos_masks: torch.Tensor | None = None,
         deepstack_visual_embeds: list[torch.Tensor] | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> BaseModelOutputWithPast:
+    ) -> tuple | BaseModelOutputWithPast:
         r"""
         position_embeddings (`tuple[torch.Tensor, torch.Tensor]`, *optional*):
             Precomputed `(cos, sin)` rotary embeddings, e.g. the multimodal M-RoPE embeddings computed by
@@ -1780,21 +1779,8 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
         if position_embeddings is None:
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
-        # Collect hidden states and attentions for output if requested
-        output_hidden_states = kwargs.get("output_hidden_states", self.config.output_hidden_states)
-        output_attentions = kwargs.get("output_attentions", self.config.output_attentions)
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-
-        # Ensure output flags are in kwargs for decoder layers
-        kwargs["output_hidden_states"] = output_hidden_states
-        kwargs["output_attentions"] = output_attentions
-
-        if all_hidden_states is not None:
-            all_hidden_states += (hidden_states,)
-
         for layer_idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
-            layer_outputs = decoder_layer(
+            hidden_states = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask_mapping[self.config.layer_types[layer_idx]],
                 position_ids=text_position_ids,
@@ -1803,8 +1789,6 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
-
-            hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
 
             if (
                 visual_pos_masks is not None
@@ -1826,18 +1810,10 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
                             deepstack_layer = deepstack_layer * gate
                         hidden_states = self._deepstack_process(hidden_states, visual_pos_masks, deepstack_layer)
 
-            if all_self_attns is not None and isinstance(layer_outputs, tuple) and len(layer_outputs) > 1:
-                all_self_attns += (layer_outputs[1],)
-
-            if all_hidden_states is not None:
-                all_hidden_states += (hidden_states,)
-
         hidden_states = self.norm(hidden_states)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             cache=cache if use_cache else None,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
         )
 
 
