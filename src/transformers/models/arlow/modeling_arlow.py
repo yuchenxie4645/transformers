@@ -1562,15 +1562,6 @@ class ArlowModel(ArlowPreTrainedModel):
     def get_decoder(self):
         return self.language_model
 
-    # Expose embed_tokens at the top-level model for common tests API
-    @property
-    def embed_tokens(self):
-        return self.get_input_embeddings()
-
-    @embed_tokens.setter
-    def embed_tokens(self, value):
-        self.set_input_embeddings(value)
-
     def _get_visual_features(
         self,
         pixel_values: torch.FloatTensor,
