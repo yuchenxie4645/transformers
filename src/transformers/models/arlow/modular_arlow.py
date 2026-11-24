@@ -45,8 +45,6 @@ from ...modeling_outputs import (
     BaseModelOutputWithPooling,
     CausalLMOutputWithPast,
     ModelOutput,
-    QuestionAnsweringModelOutput,
-    TokenClassifierOutput,
 )
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, RopeParameters, dynamic_rope_update
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
@@ -3155,70 +3153,19 @@ class ArlowTextForSequenceClassification(GenericForSequenceClassification, Arlow
 
 
 @auto_docstring
-class ArlowForQuestionAnswering(ArlowPreTrainedModel):
+class ArlowForQuestionAnswering(GenericForQuestionAnswering, ArlowPreTrainedModel):
     """
-    Question answering head that runs purely on the Arlow text decoder, avoiding unnecessary multimodal modules.
+    Question answering head for `ArlowConfig`, built on the full [`ArlowModel`] backbone (vision encoder included).
+    For a text-only backbone, use [`ArlowTextForQuestionAnswering`] with an [`ArlowTextConfig`].
     """
 
-    input_modalities = "text"
-
-    def __init__(self, config: ArlowConfig | ArlowTextConfig):
-        super().__init__(config)
-        text_config = config.text_config if hasattr(config, "text_config") else config
-        self.model = ArlowTextModel._from_config(text_config)
-        self.qa_outputs = nn.Linear(text_config.hidden_size, 2)
-
-        if getattr(config, "gradient_checkpointing", False):
-            self.gradient_checkpointing_enable()
-
-        self.post_init()
+    config: ArlowConfig
 
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
 
     def set_input_embeddings(self, value):
         self.model.set_input_embeddings(value)
-
-    @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
-    @can_return_tuple
-    @auto_docstring
-    def forward(
-        self,
-        input_ids: torch.LongTensor | None = None,
-        attention_mask: torch.Tensor | None = None,
-        position_ids: torch.LongTensor | None = None,
-        cache: Cache | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
-        start_positions: torch.LongTensor | None = None,
-        end_positions: torch.LongTensor | None = None,
-        **kwargs: Unpack[TransformersKwargs],
-    ) -> QuestionAnsweringModelOutput:
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            cache=cache,
-            inputs_embeds=inputs_embeds,
-            **kwargs,
-        )
-
-        sequence_output = outputs.last_hidden_state
-        logits = self.qa_outputs(sequence_output)
-        start_logits, end_logits = logits.split(1, dim=-1)
-        start_logits = start_logits.squeeze(-1).contiguous()
-        end_logits = end_logits.squeeze(-1).contiguous()
-
-        loss = None
-        if start_positions is not None and end_positions is not None:
-            loss = self.loss_function(start_logits, end_logits, start_positions, end_positions, **kwargs)
-
-        return QuestionAnsweringModelOutput(
-            loss=loss,
-            start_logits=start_logits,
-            end_logits=end_logits,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
 
 
 class ArlowTextForQuestionAnswering(GenericForQuestionAnswering, ArlowTextPreTrainedModel):
@@ -3231,75 +3178,13 @@ class ArlowTextForQuestionAnswering(GenericForQuestionAnswering, ArlowTextPreTra
 
 
 @auto_docstring
-class ArlowForTokenClassification(ArlowPreTrainedModel):
+class ArlowForTokenClassification(GenericForTokenClassification, ArlowPreTrainedModel):
     """
-    Token classification head that uses the text backbone directly.
+    Token classification head for `ArlowConfig`, built on the full [`ArlowModel`] backbone (vision encoder included).
+    For a text-only backbone, use [`ArlowTextForTokenClassification`] with an [`ArlowTextConfig`].
     """
 
-    input_modalities = "text"
-
-    def __init__(self, config: ArlowConfig | ArlowTextConfig):
-        super().__init__(config)
-        self.num_labels = config.num_labels
-        text_config = config.text_config if hasattr(config, "text_config") else config
-        self.model = ArlowTextModel._from_config(text_config)
-        if getattr(config, "classifier_dropout", None) is not None:
-            classifier_dropout = config.classifier_dropout
-        elif getattr(config, "hidden_dropout", None) is not None:
-            classifier_dropout = config.hidden_dropout
-        else:
-            classifier_dropout = 0.1
-        self.dropout = nn.Dropout(classifier_dropout)
-        self.score = nn.Linear(text_config.hidden_size, config.num_labels)
-
-        if getattr(config, "gradient_checkpointing", False):
-            self.gradient_checkpointing_enable()
-
-        self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.get_input_embeddings()
-
-    def set_input_embeddings(self, value):
-        self.model.set_input_embeddings(value)
-
-    @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
-    @can_return_tuple
-    @auto_docstring
-    def forward(
-        self,
-        input_ids: torch.LongTensor | None = None,
-        attention_mask: torch.Tensor | None = None,
-        position_ids: torch.LongTensor | None = None,
-        cache: Cache | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
-        labels: torch.LongTensor | None = None,
-        use_cache: bool | None = None,
-        **kwargs: Unpack[TransformersKwargs],
-    ) -> TokenClassifierOutput:
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            cache=cache,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            **kwargs,
-        )
-        sequence_output = outputs.last_hidden_state
-        sequence_output = self.dropout(sequence_output)
-        logits = self.score(sequence_output)
-
-        loss = None
-        if labels is not None:
-            loss = self.loss_function(logits, labels, self.config)
-
-        return TokenClassifierOutput(
-            loss=loss,
-            logits=logits,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+    config: ArlowConfig
 
 
 class ArlowTextForTokenClassification(GenericForTokenClassification, ArlowTextPreTrainedModel):
