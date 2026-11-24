@@ -54,7 +54,12 @@ from ...processing_utils import MultiModalData, ProcessingKwargs, ProcessorMixin
 from ...tokenization_utils_base import PreTokenizedInput, TextInput
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
 from ...utils.deprecation import deprecate_kwarg
-from ...utils.generic import accepts_precomputed_kwargs, merge_with_config_defaults
+from ...utils.generic import (
+    accepts_precomputed_kwargs,
+    get_max_seqlen,
+    is_flash_attention_requested,
+    merge_with_config_defaults,
+)
 from ...utils.output_capturing import capture_outputs
 from ...video_utils import VideoInput
 
@@ -1097,61 +1102,77 @@ class ArlowVLAttention(nn.Module):
         else:
             cu_seqlens = cu_seqlens.to(device=hidden_states.device, dtype=torch.int32)
 
-        # Dispatch to attention backends (FA2/SDPA/eager)
-        # Use the same attribute name as text model if set on the vision config via parent
-        attn_impl = getattr(self, "_attn_implementation", None)
-        if attn_impl is None:
-            attn_impl = getattr(self.proj, "_attn_implementation", None)
-        # Fall back to config if available
-        if attn_impl is None:
-            attn_impl = getattr(getattr(self, "config", None), "_attn_implementation", "eager")
-        if getattr(self.config, "use_deformable_attention", False) or attn_impl == "flash_attention_2":
-            attn_impl = "eager"
-        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(attn_impl, eager_attention_forward)
-
-        lengths = cu_seqlens[1:] - cu_seqlens[:-1]
-        splits = [torch.split(tensor, lengths.tolist(), dim=2) for tensor in (query_states, key_states, value_states)]
-        token_coord_splits = (
-            torch.split(token_coords, lengths.tolist(), dim=0)
-            if getattr(self.config, "use_deformable_attention", False) and token_coords is not None
-            else None
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
         )
+        use_deformable_attention = self.config.use_deformable_attention and token_coords is not None
+        if use_deformable_attention and is_flash_attention_requested(self.config):
+            raise ValueError(
+                "`use_deformable_attention` adds a locality bias to the vision attention scores, which Flash Attention "
+                "does not support. Load the model with `attn_implementation='sdpa'` or `'eager'` for the vision encoder."
+            )
 
-        outputs: list[torch.Tensor] = []
-        for segment_idx, (q, k, v) in enumerate(zip(*splits)):
-            if q.shape[2] == 0:
-                continue
-
-            attention_mask = None
-            if token_coord_splits is not None:
-                coords = token_coord_splits[segment_idx].to(device=q.device, dtype=torch.float32)
-                strength = getattr(self.config, "deformable_attention_strength", 4.0)
-                radius = getattr(self.config, "deformable_attention_window", 0.25)
-                penalty = strength * 100.0
-
-                dist = torch.cdist(coords, coords, p=2)
-                bias = -dist * strength
-                if radius > 0:
-                    bias = torch.where(dist <= radius, bias, bias - penalty)
-                attention_mask = bias[None, None, :, :].to(dtype=q.dtype)
-
-            out, _ = attention_interface(
+        if total_tokens == 0:
+            attn_output = hidden_states.new_zeros((0, self.embed_dim))
+        elif is_flash_attention_requested(self.config):
+            # A single variable-length call attends within each image or video, as delimited by `cu_seqlens`
+            max_seqlen = get_max_seqlen(cu_seqlens, self.config, kwargs=kwargs)
+            attn_output, _ = attention_interface(
                 self,
-                q,
-                k,
-                v,
-                attention_mask=attention_mask,
+                query_states,
+                key_states,
+                value_states,
+                attention_mask=None,
                 scaling=self.scaling,
                 dropout=0.0 if not self.training else self.attention_dropout,
+                cu_seq_lens_q=cu_seqlens,
+                cu_seq_lens_k=cu_seqlens,
+                max_length_q=max_seqlen,
+                max_length_k=max_seqlen,
                 is_causal=False,
                 **kwargs,
             )
-            outputs.append(out)
-
-        if len(outputs) == 0:
-            attn_output = hidden_states.new_zeros((0, self.embed_dim))
+            attn_output = attn_output.reshape(total_tokens, self.embed_dim)
         else:
-            # Local eager/SDPA interfaces return [batch, seq, heads, head_dim].
+            lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+            splits = [
+                torch.split(tensor, lengths.tolist(), dim=2) for tensor in (query_states, key_states, value_states)
+            ]
+            token_coord_splits = (
+                torch.split(token_coords, lengths.tolist(), dim=0) if use_deformable_attention else None
+            )
+
+            outputs: list[torch.Tensor] = []
+            for segment_idx, (q, k, v) in enumerate(zip(*splits)):
+                if q.shape[2] == 0:
+                    continue
+
+                attention_mask = None
+                if token_coord_splits is not None:
+                    coords = token_coord_splits[segment_idx].to(device=q.device, dtype=torch.float32)
+                    strength = self.config.deformable_attention_strength
+                    radius = self.config.deformable_attention_window
+                    penalty = strength * 100.0
+
+                    dist = torch.cdist(coords, coords, p=2)
+                    bias = -dist * strength
+                    if radius > 0:
+                        bias = torch.where(dist <= radius, bias, bias - penalty)
+                    attention_mask = bias[None, None, :, :].to(dtype=q.dtype)
+
+                out, _ = attention_interface(
+                    self,
+                    q,
+                    k,
+                    v,
+                    attention_mask=attention_mask,
+                    scaling=self.scaling,
+                    dropout=0.0 if not self.training else self.attention_dropout,
+                    is_causal=False,
+                    **kwargs,
+                )
+                outputs.append(out)
+            # Eager and SDPA return [batch, seq, heads, head_dim]
             attn_output = torch.cat(outputs, dim=1).reshape(total_tokens, self.embed_dim)
         attn_output = self.proj(attn_output)
 

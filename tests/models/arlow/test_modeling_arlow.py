@@ -2,9 +2,19 @@
 
 import tempfile
 import unittest
+from unittest import mock
+
+import pytest
 
 from transformers import AutoModelForCausalLM, is_torch_available
-from transformers.testing_utils import require_torch, require_torch_bf16, slow, torch_device
+from transformers.testing_utils import (
+    require_flash_attn,
+    require_torch,
+    require_torch_accelerator,
+    require_torch_bf16,
+    slow,
+    torch_device,
+)
 from transformers.utils import is_torchvision_available
 
 from ...causal_lm_tester import CausalLMModelTest, CausalLMModelTester
@@ -1223,16 +1233,11 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
         torch.testing.assert_close(rotated_q, expected_q)
         torch.testing.assert_close(rotated_k, expected_k)
 
+    @require_flash_attn
+    @require_torch_accelerator
+    @pytest.mark.flash_attn_test
     def test_vision_fa2_dispatch_runs_when_available(self):
-        """If FA2 is available, ensure vision path can dispatch without errors."""
-        try:
-            from transformers import is_flash_attn_available
-        except Exception:
-            return  # environment may not expose the helper; bail out silently
-
-        if not is_flash_attn_available():
-            self.skipTest("Flash Attention 2 not available in environment")
-
+        """With Flash Attention 2, the vision encoder runs its variable-length path."""
         from transformers import ArlowForConditionalGeneration, ArlowVisionConfig
 
         config = ArlowConfig(
@@ -1258,21 +1263,24 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
             spatial_merge_size=2,
             temporal_patch_size=2,
         )
-        model = ArlowForConditionalGeneration(config).to(torch_device).eval()
-        # request FA2 on the vision side
-        model.model.visual.config._attn_implementation = "flash_attention_2"
+        model = ArlowForConditionalGeneration._from_config(
+            config, attn_implementation="flash_attention_2", dtype=torch.bfloat16
+        )
+        model = model.to(torch_device).eval()
+        self.assertEqual(model.model.visual.config._attn_implementation, "flash_attention_2")
 
         input_ids = torch.tensor([[1, 2, 11, 10, 12, 3]], device=torch_device)
-        pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
+        pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device, dtype=torch.bfloat16)
         image_grid_thw = torch.tensor([[1, 2, 2]], device=torch_device)
 
         with torch.no_grad():
-            _ = model(
+            outputs = model(
                 input_ids=input_ids,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
                 mm_token_type_ids=_mm_token_type_ids(input_ids, config),
             )
+        self.assertTrue(torch.isfinite(outputs.logits).all())
 
     def test_vision_encoder_standalone(self):
         """Test vision encoder as a standalone component."""
@@ -1302,6 +1310,52 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
         self.assertIsNotNone(vision_embeddings)
         self.assertEqual(vision_embeddings.ndim, 2)  # (tokens, hidden_size)
         self.assertEqual(vision_embeddings.shape[1], config.hidden_size)
+
+    def test_vision_flash_attention_uses_varlen_call(self):
+        """Flash Attention runs one variable-length call over all images and matches the per-image SDPA path."""
+        from transformers import ArlowVisionConfig, ArlowVLVisionModel
+        from transformers.integrations.sdpa_attention import sdpa_attention_forward
+        from transformers.modeling_utils import AttentionInterface
+
+        calls = []
+
+        def varlen_attention(module, query, key, value, attention_mask, cu_seq_lens_q=None, **kwargs):
+            # Stands in for a flash kernel: attends within each `cu_seq_lens_q` segment
+            calls.append(cu_seq_lens_q)
+            for name in ("cu_seq_lens_k", "max_length_q", "max_length_k"):
+                kwargs.pop(name)
+            lengths = (cu_seq_lens_q[1:] - cu_seq_lens_q[:-1]).tolist()
+            outputs = [
+                sdpa_attention_forward(module, q, k, v, None, **kwargs)[0]
+                for q, k, v in zip(*(torch.split(t, lengths, dim=2) for t in (query, key, value)))
+            ]
+            return torch.cat(outputs, dim=1), None
+
+        config = ArlowVisionConfig(depth=2, embed_dim=32, hidden_size=64, num_heads=4, spatial_merge_size=2)
+        model = ArlowVLVisionModel._from_config(config, attn_implementation="sdpa").to(torch_device).eval()
+        grid_thw = torch.tensor([[1, 2, 2], [1, 4, 4]], device=torch_device)
+        pixel_values = torch.randn(20, 3 * 2 * 14 * 14, device=torch_device)
+
+        with mock.patch.dict(AttentionInterface._global_mapping, {"test_flash_varlen": varlen_attention}):
+            with torch.no_grad():
+                expected = model(pixel_values, grid_thw).pooler_output
+                model.config._attn_implementation = "test_flash_varlen"
+                actual = model(pixel_values, grid_thw).pooler_output
+
+            self.assertEqual(len(calls), config.depth)
+            torch.testing.assert_close(calls[0].tolist(), [0, 4, 20])
+            torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+            model.config.use_deformable_attention = True
+            with self.assertRaisesRegex(ValueError, "use_deformable_attention"):
+                model(pixel_values, grid_thw)
+
+        # The deformable locality bias needs an attention mask, which the per-image SDPA path applies
+        model.config._attn_implementation = "sdpa"
+        with torch.no_grad():
+            deformable = model(pixel_values, grid_thw).pooler_output
+        self.assertTrue(torch.isfinite(deformable).all())
+        self.assertFalse(torch.allclose(deformable, expected))
 
     def test_model_gradient_checkpointing_multimodal(self):
         """Test gradient checkpointing with multimodal inputs."""
