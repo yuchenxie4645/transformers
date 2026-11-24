@@ -49,7 +49,7 @@ class ArlowVisionConfig(PreTrainedConfig):
 
     model_type = "arlow"
     base_config_key = "vision_config"
-    attribute_map = {"num_attention_heads": "num_heads"}
+    attribute_map = {"num_attention_heads": "num_heads", "num_hidden_layers": "depth"}
 
     depth: int = 2
     embed_dim: int = 32

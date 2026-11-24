@@ -2,13 +2,13 @@
 
 import unittest
 
-import pytest
-
 from transformers import is_torch_available
 from transformers.testing_utils import require_torch, require_torch_bf16, slow, torch_device
 from transformers.utils import is_torchvision_available
 
 from ...causal_lm_tester import CausalLMModelTest, CausalLMModelTester
+from ...test_modeling_common import floats_tensor
+from ...vlm_tester import VLMModelTest, VLMModelTester
 
 
 if is_torch_available():
@@ -18,11 +18,13 @@ if is_torch_available():
     from transformers import (
         ArlowConfig,
         ArlowForCausalLM,
+        ArlowForConditionalGeneration,
         ArlowForQuestionAnswering,
         ArlowForSequenceClassification,
         ArlowForTokenClassification,
         ArlowModel,
         ArlowTextConfig,
+        ArlowTextModel,
     )
     from transformers.models.arlow.image_processing_pil_arlow import ArlowImageProcessorPil
     from transformers.models.arlow.modeling_arlow import ArlowRMSNorm, ArlowTextRotaryEmbedding
@@ -45,97 +47,20 @@ if is_torch_available():
         return [token_id] * count
 
 
-class ArlowModelTester(CausalLMModelTester):
+class ArlowTextModelTester(CausalLMModelTester):
     if is_torch_available():
-        config_class = ArlowConfig
-        base_model_class = ArlowModel
+        base_model_class = ArlowTextModel
         causal_lm_class = ArlowForCausalLM
 
     small_config_overrides = {
         "max_position_embeddings": 128,
-        "image_token_id": 95,
-        "video_token_id": 96,
-        "vision_start_token_id": 97,
-        "vision_end_token_id": 98,
-        "vision_depth": 2,
-        "vision_embed_dim": 32,
-        "vision_num_heads": 2,
-        "vision_patch_size": 2,
-        "vision_spatial_merge_size": 2,
-        "vision_temporal_patch_size": 2,
-        "vision_max_position_embeddings": 128,
     }
-
-    def get_config(self):
-        # `ArlowConfig` only exposes sub-configs in its signature, so the small text values are routed explicitly
-        text_config = ArlowTextConfig(
-            vocab_size=self.vocab_size,
-            hidden_size=self.hidden_size,
-            intermediate_size=self.intermediate_size,
-            num_hidden_layers=self.num_hidden_layers,
-            num_attention_heads=self.num_attention_heads,
-            num_key_value_heads=self.num_key_value_heads,
-            head_dim=self.head_dim,
-            hidden_act=self.hidden_act,
-            max_position_embeddings=self.max_position_embeddings,
-            initializer_range=self.initializer_range,
-            pad_token_id=self.pad_token_id,
-            bos_token_id=self.bos_token_id,
-            eos_token_id=self.eos_token_id,
-            tie_word_embeddings=self.tie_word_embeddings,
-        )
-        vision_config = {
-            "depth": self.vision_depth,
-            "embed_dim": self.vision_embed_dim,
-            "hidden_size": self.hidden_size,
-            "num_heads": self.vision_num_heads,
-            "patch_size": self.vision_patch_size,
-            "spatial_merge_size": self.vision_spatial_merge_size,
-            "temporal_patch_size": self.vision_temporal_patch_size,
-            "max_position_embeddings": self.vision_max_position_embeddings,
-            "initializer_range": self.initializer_range,
-        }
-        return self.config_class(
-            text_config=text_config,
-            vision_config=vision_config,
-            image_token_id=self.image_token_id,
-            video_token_id=self.video_token_id,
-            vision_start_token_id=self.vision_start_token_id,
-            vision_end_token_id=self.vision_end_token_id,
-            tie_word_embeddings=self.tie_word_embeddings,
-        )
 
 
 @require_torch
-class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
-    all_model_classes = (
-        (
-            ArlowModel,
-            ArlowForCausalLM,
-            ArlowForSequenceClassification,
-            ArlowForTokenClassification,
-            ArlowForQuestionAnswering,
-        )
-        if is_torch_available()
-        else ()
-    )
-    pipeline_model_mapping = (
-        {
-            "feature-extraction": ArlowModel,
-            "text-generation": ArlowForCausalLM,
-            "text-classification": ArlowForSequenceClassification,
-            "token-classification": ArlowForTokenClassification,
-            "question-answering": ArlowForQuestionAnswering,
-        }
-        if is_torch_available()
-        else {}
-    )
-    test_headmasking = False
-    test_pruning = False
-    model_tester_class = ArlowModelTester
+class ArlowTextModelTest(CausalLMModelTest, unittest.TestCase):
+    model_tester_class = ArlowTextModelTester
     rotary_embedding_layer = ArlowTextRotaryEmbedding  # Enables RoPE tests if set
-    skip_test_image_features_output_shape = True
-    skip_test_video_features_output_shape = True
 
     # Need to use `0.8` instead of `0.9` for `test_cpu_offload`
     # This is because we are hitting edge cases with the causal_mask buffer
@@ -144,40 +69,95 @@ class ArlowModelTest(CausalLMModelTest, unittest.TestCase):
     # used in `test_torch_compile_for_training`
     _torch_compile_train_cls = ArlowForCausalLM if is_torch_available() else None
 
+
+class ArlowVision2TextModelTester(VLMModelTester):
+    if is_torch_available():
+        base_model_class = ArlowModel
+        config_class = ArlowConfig
+        conditional_generation_class = ArlowForConditionalGeneration
+        sequence_classification_class = ArlowForSequenceClassification
+
+    small_config_overrides = {
+        "max_position_embeddings": 128,
+        "image_token_id": 3,
+        "video_token_id": 4,
+        "vision_start_token_id": 5,
+        "vision_end_token_id": 6,
+        # 8x8 images in 2x2 patches give a 4x4 patch grid, merged 2x2 into 4 tokens per image
+        "image_size": 8,
+        "patch_size": 2,
+        "temporal_patch_size": 2,
+        "spatial_merge_size": 2,
+        "num_image_tokens": 4,
+        "depth": 2,
+        "embed_dim": 32,
+        "num_heads": 2,
+        "deepstack_visual_indexes": [0, 1],
+    }
+
+    @property
+    def _special_token_ids(self):
+        return super()._special_token_ids | {
+            self.video_token_id,
+            self.vision_start_token_id,
+            self.vision_end_token_id,
+        }
+
+    def create_pixel_values(self, batch_size: int | None = None):
+        # Flattened patches: (total_patches, channels * temporal_patch_size * patch_size**2)
+        batch_size = batch_size if batch_size is not None else self.batch_size
+        patches_per_image = (self.image_size // self.patch_size) ** 2
+        return floats_tensor(
+            [
+                batch_size * patches_per_image,
+                self.num_channels * self.temporal_patch_size * self.patch_size**2,
+            ]
+        )
+
+    def place_image_tokens(self, input_ids, config):
+        # `get_rope_index` locates each image through the token following `vision_start_token_id`
+        input_ids = input_ids.clone()
+        input_ids[:, 0] = self.vision_start_token_id
+        input_ids[:, 1 : 1 + self.num_image_tokens] = self.image_token_id
+        input_ids[:, 1 + self.num_image_tokens] = self.vision_end_token_id
+        return input_ids
+
+    def get_additional_inputs(self, config, input_ids, pixel_values, batch_size: int | None = None):
+        batch_size = batch_size if batch_size is not None else self.batch_size
+        grid_size = self.image_size // self.patch_size
+        return {"image_grid_thw": torch.tensor([[1, grid_size, grid_size]] * batch_size, device=torch_device)}
+
+
+@require_torch
+class ArlowVision2TextModelTest(VLMModelTest, unittest.TestCase):
+    model_tester_class = ArlowVision2TextModelTester
+    # The composite question answering and token classification heads are not part of the default VLM classes
+    all_model_classes = (
+        (
+            ArlowModel,
+            ArlowForConditionalGeneration,
+            ArlowForSequenceClassification,
+            ArlowForQuestionAnswering,
+            ArlowForTokenClassification,
+        )
+        if is_torch_available()
+        else ()
+    )
+    pipeline_model_mapping = (
+        {
+            "feature-extraction": ArlowModel,
+            "image-text-to-text": ArlowForConditionalGeneration,
+        }
+        if is_torch_available()
+        else {}
+    )
+
     def test_config_multimodal_defaults(self):
         config = ArlowConfig()
         self.assertEqual(config.max_position_embeddings, 32768)
         vision_config = config.vision_config
         self.assertTrue(hasattr(vision_config, "deepstack_visual_indexes"))
         self.assertIsInstance(vision_config.deepstack_visual_indexes, list)
-
-    @pytest.mark.xfail(
-        reason="The first checkpointed layer of ArlowForSequenceClassification is a vision block, which the "
-        "text-only test inputs never run"
-    )
-    def test_training_gradient_checkpointing(self):
-        super().test_training_gradient_checkpointing()
-
-    @pytest.mark.xfail(
-        reason="The first checkpointed layer of ArlowForSequenceClassification is a vision block, which the "
-        "text-only test inputs never run"
-    )
-    def test_training_gradient_checkpointing_use_reentrant_false(self):
-        super().test_training_gradient_checkpointing_use_reentrant_false()
-
-    @pytest.mark.xfail(
-        reason="The first checkpointed layer of ArlowForSequenceClassification is a vision block, which the "
-        "text-only test inputs never run"
-    )
-    def test_training_gradient_checkpointing_use_reentrant_true(self):
-        super().test_training_gradient_checkpointing_use_reentrant_true()
-
-    @unittest.skip(
-        "The only generative class here is the text-only ArlowForCausalLM, which builds just the text decoder and never "
-        "encodes images, so it has no `image_outputs` despite the composite config carrying a `vision_config`"
-    )
-    def test_multimodal_outputs_are_returned(self):
-        pass
 
 
 @require_torch
@@ -578,11 +558,8 @@ class ArlowIntegrationTest(unittest.TestCase):
         pixel_values = torch.randn(1, 3, 2, 28, 28, device=torch_device)
         image_grid_thw = torch.tensor([[1, 2, 2]], device=torch_device)
 
-        pooled, deepstack = model.get_image_features(
-            pixel_values,
-            image_grid_thw=image_grid_thw,
-            return_deepstack=True,
-        )
+        image_outputs = model.get_image_features(pixel_values, image_grid_thw=image_grid_thw)
+        pooled, deepstack = image_outputs.pooler_output, image_outputs.deepstack_features
 
         self.assertEqual(len(pooled), 1)
         self.assertEqual(pooled[0].shape, (1, config.hidden_size))
@@ -1225,7 +1202,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
         grid_thw = torch.tensor([[1, 2, 2]], device=torch_device)
 
         with torch.no_grad():
-            vision_embeddings = vision_model(pixel_values, grid_thw)
+            vision_embeddings = vision_model(pixel_values, grid_thw).pooler_output
 
         # Check output shape
         self.assertIsNotNone(vision_embeddings)

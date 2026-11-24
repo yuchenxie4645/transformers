@@ -18,7 +18,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Optional
@@ -45,14 +44,15 @@ from ...modeling_outputs import (
     BaseModelOutputWithPast,
     BaseModelOutputWithPooling,
     CausalLMOutputWithPast,
-    ModelOutput,
+    MultimodalBaseModelOutputWithPast,
+    MultimodalCausalLMOutputWithPast,
 )
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
 from ...utils.deprecation import deprecate_kwarg
-from ...utils.generic import merge_with_config_defaults
+from ...utils.generic import accepts_precomputed_kwargs, merge_with_config_defaults
 from ...utils.output_capturing import capture_outputs
 from .configuration_arlow import ArlowConfig, ArlowTextConfig, ArlowVisionConfig
 
@@ -60,47 +60,16 @@ from .configuration_arlow import ArlowConfig, ArlowTextConfig, ArlowVisionConfig
 logger = logging.get_logger(__name__)
 
 
-@auto_docstring(
-    custom_intro="""
-    Base class for Arlow multimodal outputs, with hidden states and attentions.
-    """
-)
+# Inspired by transformers.models.qwen3_vl.modeling_qwen3_vl.BaseModelOutputWithDeepstackFeatures
+@auto_docstring
 @dataclass
-class ArlowMultimodalModelOutputWithPast(ModelOutput):
+class BaseModelOutputWithDeepstackFeatures(BaseModelOutputWithPooling):
     r"""
-    rope_deltas (`torch.LongTensor` of shape `(batch_size, )`, *optional*):
-        The rope index difference between sequence length and multimodal rope for M-ROPE.
+    deepstack_features (`List[torch.Tensor]`, *optional*):
+        List of hidden-states (feature maps) from deepstack layers.
     """
 
-    last_hidden_state: torch.FloatTensor | None = None
-    cache: Cache | None = None
-    hidden_states: tuple[torch.FloatTensor] | None = None
-    attentions: tuple[torch.FloatTensor] | None = None
-    rope_deltas: torch.LongTensor | None = None
-
-
-@auto_docstring(
-    custom_intro="""
-    Base class for Arlow multimodal causal language model (or autoregressive) outputs.
-    """
-)
-@dataclass
-class ArlowMultimodalCausalLMOutputWithPast(ModelOutput):
-    r"""
-    loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
-        Language modeling loss (for next-token prediction).
-    logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
-        Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
-    rope_deltas (`torch.LongTensor` of shape `(batch_size, )`, *optional*):
-        The rope index difference between sequence length and multimodal rope for M-ROPE.
-    """
-
-    loss: torch.FloatTensor | None = None
-    logits: torch.FloatTensor | None = None
-    cache: Cache | None = None
-    hidden_states: tuple[torch.FloatTensor] | None = None
-    attentions: tuple[torch.FloatTensor] | None = None
-    rope_deltas: torch.LongTensor | None = None
+    deepstack_features: list[torch.Tensor] | None = None
 
 
 @use_kernel_forward_from_hub("RMSNorm")
@@ -777,6 +746,7 @@ class ArlowVLBlock(GradientCheckpointingLayer):
 class ArlowPreTrainedModel(PreTrainedModel):
     config: ArlowConfig
     base_model_prefix = "model"
+    input_modalities = ("image", "video", "text")
     supports_gradient_checkpointing = True
     _no_split_modules = ["ArlowDecoderLayer"]
     _skip_keys_device_placement = ["cache", "rotary_emb.inv_freq"]
@@ -805,6 +775,7 @@ class ArlowPreTrainedModel(PreTrainedModel):
 @auto_docstring
 class ArlowTextPreTrainedModel(ArlowPreTrainedModel):
     config: ArlowTextConfig
+    input_modalities = ("text",)
 
 
 def get_arlow_vision_position_ids(grid_thw: torch.Tensor) -> torch.Tensor:
@@ -846,8 +817,12 @@ def get_arlow_vision_position_ids(grid_thw: torch.Tensor) -> torch.Tensor:
 )
 class ArlowVLVisionModel(ArlowPreTrainedModel):
     config: ArlowVisionConfig
-    input_modalities = ["image", "video"]
+    input_modalities = ("image", "video")
     _no_split_modules = ["ArlowVLBlock"]
+    _can_record_outputs = {
+        "hidden_states": ArlowVLBlock,
+        "attentions": ArlowVLAttention,
+    }
 
     def __init__(self, config: ArlowVisionConfig):
         super().__init__(config)
@@ -1108,12 +1083,14 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
 
         return torch.cat(merged, dim=0) if merged else hidden_states.new_zeros((0, merge_unit * embed_dim))
 
+    @capture_outputs
     @auto_docstring
     def forward(
         self,
         pixel_values: torch.Tensor,
         grid_thw: torch.LongTensor | None = None,
-    ) -> torch.Tensor:
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple | BaseModelOutputWithDeepstackFeatures:
         r"""
         pixel_values (`torch.Tensor`):
             Packed flattened patches, padded flattened patches, or raw image/video tensors.
@@ -1179,12 +1156,11 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
         merged_tokens = self._reshape_for_merger(hidden_states, grid_thw)
         vision_embeddings = self.merger(merged_tokens)
 
-        if self.enable_deepstack:
-            feature_dim = vision_embeddings.shape[-1]
-            while len(deepstack_feature_lists) < len(self.deepstack_visual_indexes):
-                deepstack_feature_lists.append(vision_embeddings.new_zeros((0, feature_dim)))
-            return vision_embeddings, deepstack_feature_lists
-        return vision_embeddings
+        return BaseModelOutputWithDeepstackFeatures(
+            last_hidden_state=hidden_states,
+            pooler_output=vision_embeddings,
+            deepstack_features=deepstack_feature_lists if self.enable_deepstack else None,
+        )
 
 
 # Inspired by transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLTextModel
@@ -1196,7 +1172,6 @@ class ArlowVLVisionModel(ArlowPreTrainedModel):
 )
 class ArlowTextModel(ArlowTextPreTrainedModel):
     config: ArlowTextConfig
-    input_modalities = "text"
 
     def __init__(
         self,
@@ -1503,217 +1478,74 @@ class ArlowModel(ArlowPreTrainedModel):
     def get_decoder(self):
         return self.language_model
 
-    def _get_visual_features(
-        self,
-        pixel_values: torch.FloatTensor,
-        grid_thw: torch.LongTensor | None = None,
-        return_deepstack: bool = False,
-    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], list[list[torch.Tensor]] | None]:
-        """Shared helper to extract token-level visual features from the vision encoder."""
-        # Get dtype from vision model, fallback to float32
-        target_dtype = self.visual.get_dtype() if hasattr(self.visual, "get_dtype") else torch.float32
-        pixel_values = pixel_values.to(dtype=target_dtype)
-
-        visual_outputs = self.visual(pixel_values, grid_thw)
-        if isinstance(visual_outputs, tuple):
-            embeds, deepstack_tokens = visual_outputs
-        else:
-            embeds = visual_outputs
-            deepstack_tokens = None
-
+    def _get_visual_split_sizes(self, grid_thw: torch.LongTensor | None, num_tokens: int) -> list[int]:
+        """Number of merged vision tokens of each image/video, used to split the packed encoder outputs."""
         if grid_thw is None:
-            split_sizes = [embeds.shape[0]]
-        else:
-            spm = self.config.vision_config.spatial_merge_size
-            grid_thw = grid_thw.to(device=embeds.device)
-            split_sizes = (grid_thw[:, 0] * (grid_thw[:, 1] // spm) * (grid_thw[:, 2] // spm)).tolist()
-            split_sizes = [int(size) for size in split_sizes]
+            return [num_tokens]
 
-            if sum(split_sizes) != embeds.shape[0]:
-                temporal_patch = self.config.vision_config.temporal_patch_size
-                patched_t = (grid_thw[:, 0] + temporal_patch - 1) // temporal_patch
-                patched_split_sizes = (patched_t * (grid_thw[:, 1] // spm) * (grid_thw[:, 2] // spm)).tolist()
-                patched_split_sizes = [int(size) for size in patched_split_sizes]
+        merge_size = self.config.vision_config.spatial_merge_size
+        grid_thw = grid_thw.to("cpu")
+        split_sizes = (grid_thw[:, 0] * (grid_thw[:, 1] // merge_size) * (grid_thw[:, 2] // merge_size)).tolist()
+        if sum(split_sizes) != num_tokens:
+            # The vision encoder also accepts grids that count frames instead of temporal patches
+            temporal_patch_size = self.config.vision_config.temporal_patch_size
+            patched_t = (grid_thw[:, 0] + temporal_patch_size - 1) // temporal_patch_size
+            split_sizes = (patched_t * (grid_thw[:, 1] // merge_size) * (grid_thw[:, 2] // merge_size)).tolist()
+            if sum(split_sizes) != num_tokens:
+                raise ValueError(
+                    f"Visual feature split mismatch: the vision encoder returned {num_tokens} merged tokens, which "
+                    f"does not match grid_thw={grid_thw.tolist()}."
+                )
+        return split_sizes
 
-                if sum(patched_split_sizes) == embeds.shape[0]:
-                    split_sizes = patched_split_sizes
-                else:
-                    raise ValueError(
-                        f"Visual feature split mismatch: grid_thw implies {sum(split_sizes)} merged tokens, "
-                        f"but vision encoder returned {embeds.shape[0]} tokens. grid_thw={grid_thw.tolist()}"
-                    )
+    def _encode_visual(
+        self, pixel_values: torch.Tensor, grid_thw: torch.LongTensor | None, **kwargs: Unpack[TransformersKwargs]
+    ) -> BaseModelOutputWithDeepstackFeatures:
+        pixel_values = pixel_values.type(self.visual.dtype)
+        vision_output: BaseModelOutputWithDeepstackFeatures = self.visual(
+            pixel_values, grid_thw=grid_thw, return_dict=True, **kwargs
+        )
+        split_sizes = self._get_visual_split_sizes(grid_thw, vision_output.pooler_output.shape[0])
+        vision_output.pooler_output = torch.split(vision_output.pooler_output, split_sizes)
+        if vision_output.deepstack_features is not None:
+            vision_output.deepstack_features = [
+                torch.split(feature, split_sizes) for feature in vision_output.deepstack_features
+            ]
+        return vision_output
 
-        visual_features = list(torch.split(embeds, split_sizes, dim=0))
-
-        deepstack_flat: list[list[torch.Tensor]] | None = None
-        if return_deepstack and deepstack_tokens is not None and len(deepstack_tokens) > 0:
-            deepstack_flat = []
-            for layer_tokens in deepstack_tokens:
-                if layer_tokens.shape[0] != embeds.shape[0]:
-                    raise ValueError(
-                        f"DeepStack token count mismatch: expected {embeds.shape[0]}, got {layer_tokens.shape[0]}."
-                    )
-                deepstack_flat.append([layer_tokens[i : i + 1] for i in range(layer_tokens.shape[0])])
-
-        if return_deepstack:
-            return visual_features, deepstack_flat
-        return visual_features
-
+    @accepts_precomputed_kwargs(modality="image")
     @can_return_tuple
     @auto_docstring
     def get_image_features(
         self,
-        pixel_values: torch.FloatTensor | None = None,
+        pixel_values: torch.FloatTensor,
         image_grid_thw: torch.LongTensor | None = None,
-        return_deepstack: bool = False,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], list[list[torch.Tensor]] | None] | BaseModelOutputWithPooling:
+    ) -> tuple | BaseModelOutputWithDeepstackFeatures:
         r"""
-        pixel_values (`torch.FloatTensor`, *optional*):
+        pixel_values (`torch.FloatTensor`):
             Flattened image patch tensor produced by the image processor.
         image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
             Image grid metadata in `[temporal, height, width]` format for each image.
-        return_deepstack (`bool`, *optional*, defaults to `False`):
-            Whether to also return DeepStack per-layer pooled visual features.
-        kwargs:
-            Additional optional output flags such as `output_hidden_states` and `output_attentions`.
         """
-        if return_deepstack:
-            if pixel_values is None:
-                hidden_size = self.config.hidden_size
-                dtype = self.get_input_embeddings().weight.dtype
-                device = self.get_input_embeddings().weight.device
-                pooled = [torch.zeros(1, hidden_size, dtype=dtype, device=device)]
-                return pooled, None
-            return self._get_visual_features(pixel_values, image_grid_thw, return_deepstack)
+        return self._encode_visual(pixel_values, image_grid_thw, **kwargs)
 
-        if pixel_values is None:
-            hidden_size = self.config.hidden_size
-            dtype = self.get_input_embeddings().weight.dtype
-            device = self.get_input_embeddings().weight.device
-            pooled_tensor = torch.zeros(1, hidden_size, dtype=dtype, device=device)
-        else:
-            pooled_list = self._get_visual_features(pixel_values, image_grid_thw, return_deepstack=False)
-            pooled_tensor = (
-                torch.cat(pooled_list, dim=0)
-                if len(pooled_list) > 0
-                else torch.zeros(
-                    1,
-                    self.config.hidden_size,
-                    device=self.get_input_embeddings().weight.device,
-                    dtype=self.get_input_embeddings().weight.dtype,
-                )
-            )
-
-        output_hidden_states = kwargs.get("output_hidden_states", self.config.output_hidden_states)
-        output_attentions = kwargs.get("output_attentions", self.config.output_attentions)
-        batch_size = pooled_tensor.shape[0]
-        last_hidden_state = pooled_tensor.unsqueeze(1)
-        pooler_output = pooled_tensor
-        hidden_states = (
-            tuple(last_hidden_state for _ in range(self.config.num_hidden_layers + 1))
-            if output_hidden_states
-            else None
-        )
-        attentions = (
-            tuple(
-                torch.zeros(
-                    batch_size,
-                    self.config.num_attention_heads,
-                    1,
-                    1,
-                    dtype=last_hidden_state.dtype,
-                    device=last_hidden_state.device,
-                )
-                for _ in range(self.config.num_hidden_layers)
-            )
-            if output_attentions
-            else None
-        )
-        return BaseModelOutputWithPooling(
-            last_hidden_state=last_hidden_state,
-            pooler_output=pooler_output,
-            hidden_states=hidden_states,
-            attentions=attentions,
-        )
-
+    @accepts_precomputed_kwargs(modality="video")
     @can_return_tuple
     @auto_docstring
     def get_video_features(
         self,
-        pixel_values_videos: torch.FloatTensor | None = None,
+        pixel_values_videos: torch.FloatTensor,
         video_grid_thw: torch.LongTensor | None = None,
-        return_deepstack: bool = False,
         **kwargs: Unpack[TransformersKwargs],
-    ) -> list[torch.Tensor] | tuple[list[torch.Tensor], list[list[torch.Tensor]] | None] | BaseModelOutputWithPooling:
+    ) -> tuple | BaseModelOutputWithDeepstackFeatures:
         r"""
-        pixel_values_videos (`torch.FloatTensor`, *optional*):
+        pixel_values_videos (`torch.FloatTensor`):
             Flattened video patch tensor produced by the video processor.
         video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
             Video grid metadata in `[temporal, height, width]` format for each video.
-        return_deepstack (`bool`, *optional*, defaults to `False`):
-            Whether to also return DeepStack per-layer pooled visual features.
-        kwargs:
-            Additional optional output flags such as `output_hidden_states` and `output_attentions`.
         """
-        if return_deepstack:
-            if pixel_values_videos is None:
-                hidden_size = self.config.hidden_size
-                dtype = self.get_input_embeddings().weight.dtype
-                device = self.get_input_embeddings().weight.device
-                pooled = [torch.zeros(1, hidden_size, dtype=dtype, device=device)]
-                return pooled, None
-            return self._get_visual_features(pixel_values_videos, video_grid_thw, return_deepstack)
-
-        if pixel_values_videos is None:
-            hidden_size = self.config.hidden_size
-            dtype = self.get_input_embeddings().weight.dtype
-            device = self.get_input_embeddings().weight.device
-            pooled_tensor = torch.zeros(1, hidden_size, dtype=dtype, device=device)
-        else:
-            pooled_list = self._get_visual_features(pixel_values_videos, video_grid_thw, return_deepstack=False)
-            pooled_tensor = (
-                torch.cat(pooled_list, dim=0)
-                if len(pooled_list) > 0
-                else torch.zeros(
-                    1,
-                    self.config.hidden_size,
-                    device=self.get_input_embeddings().weight.device,
-                    dtype=self.get_input_embeddings().weight.dtype,
-                )
-            )
-
-        output_hidden_states = kwargs.get("output_hidden_states", self.config.output_hidden_states)
-        output_attentions = kwargs.get("output_attentions", self.config.output_attentions)
-        batch_size = pooled_tensor.shape[0]
-        last_hidden_state = pooled_tensor.unsqueeze(1)
-        pooler_output = pooled_tensor
-        hidden_states = (
-            tuple(last_hidden_state for _ in range(self.config.num_hidden_layers + 1))
-            if output_hidden_states
-            else None
-        )
-        attentions = (
-            tuple(
-                torch.zeros(
-                    batch_size,
-                    self.config.num_attention_heads,
-                    1,
-                    1,
-                    dtype=last_hidden_state.dtype,
-                    device=last_hidden_state.device,
-                )
-                for _ in range(self.config.num_hidden_layers)
-            )
-            if output_attentions
-            else None
-        )
-        return BaseModelOutputWithPooling(
-            last_hidden_state=last_hidden_state,
-            pooler_output=pooler_output,
-            hidden_states=hidden_states,
-            attentions=attentions,
-        )
+        return self._encode_visual(pixel_values_videos, video_grid_thw, **kwargs)
 
     def get_placeholder_mask(
         self,
@@ -1779,6 +1611,7 @@ class ArlowModel(ArlowPreTrainedModel):
         image_grid_thw: torch.LongTensor | None = None,
         video_grid_thw: torch.LongTensor | None = None,
         attention_mask: torch.Tensor | None = None,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Calculate the 3D rope index based on image and video's temporal, height and width in LLM.
@@ -1937,8 +1770,39 @@ class ArlowModel(ArlowPreTrainedModel):
             return position_ids, mrope_position_deltas
 
     @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
+    def compute_3d_position_ids(
+        self,
+        input_ids: torch.Tensor | None,
+        inputs_embeds: torch.Tensor,
+        image_grid_thw: torch.Tensor | None = None,
+        video_grid_thw: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        cache: Cache | None = None,
+    ) -> torch.Tensor | None:
+        cache_length = 0 if cache is None else cache.get_seq_length()
+        if input_ids is not None and cache_length == 0:
+            position_ids, rope_deltas = self.get_rope_index(
+                input_ids,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                attention_mask=attention_mask,
+            )
+            self.rope_deltas = rope_deltas
+        # Use the rope deltas of the prefill to infer the 3D position ids during incremental decoding
+        elif self.rope_deltas is not None and cache_length > 0:
+            batch_size, seq_length, _ = inputs_embeds.shape
+            position_ids = torch.arange(cache_length, cache_length + seq_length, device=inputs_embeds.device)
+            position_ids = position_ids.view(1, 1, -1).expand(3, batch_size, -1)
+            delta = self.rope_deltas.repeat_interleave(batch_size // self.rope_deltas.shape[0], dim=0)
+            position_ids = position_ids + delta.to(device=inputs_embeds.device)
+        else:
+            # Can't build correct 3D positions. Let the model infer it
+            position_ids = None
+        return position_ids
+
     @can_return_tuple
     @auto_docstring
+    @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -1950,173 +1814,118 @@ class ArlowModel(ArlowPreTrainedModel):
         pixel_values_videos: torch.FloatTensor | None = None,
         image_grid_thw: torch.LongTensor | None = None,
         video_grid_thw: torch.LongTensor | None = None,
-        rope_deltas: torch.LongTensor | None = None,
         use_cache: bool | None = None,
-        **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> ArlowMultimodalModelOutputWithPast:
+        mm_encoder_outputs: dict[str, BaseModelOutputWithPooling] | None = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple | MultimodalBaseModelOutputWithPast:
         r"""
         image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
             Image grid dimensions as `[temporal=1, height, width]` for each image in the batch.
         video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
             Video grid dimensions as `[temporal, height, width]` for each video in the batch.
-        rope_deltas (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-            The rope index difference between sequence length and multimodal rope for M-ROPE.
         """
-        # Get text embeddings
+        if (pixel_values is not None or pixel_values_videos is not None) and mm_encoder_outputs is not None:
+            raise ValueError(
+                "You cannot specify both pixel_values/pixel_values_videos and mm_encoder_outputs at the same time"
+            )
+
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
 
-        vision_deepstack_enabled = getattr(self.visual, "enable_deepstack", False)
-        batch_size, seq_len, hidden_dim = inputs_embeds.shape
-        device = inputs_embeds.device
-        dtype = inputs_embeds.dtype
-
-        image_token_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=device)
-        video_token_mask = torch.zeros((batch_size, seq_len), dtype=torch.bool, device=device)
-        image_deepstack_layers: list[list[torch.Tensor]] | None = None
-        video_deepstack_layers: list[list[torch.Tensor]] | None = None
-
-        # Process vision inputs if provided using masked_scatter
-        if pixel_values is not None:
-            image_outputs = self._get_visual_features(
-                pixel_values,
-                image_grid_thw,
-                return_deepstack=vision_deepstack_enabled,
+        mm_encoder_outputs = mm_encoder_outputs if mm_encoder_outputs is not None else {}
+        if mm_encoder_outputs.get("image") is None and pixel_values is not None:
+            mm_encoder_outputs["image"] = self.get_image_features(
+                pixel_values, image_grid_thw, return_dict=True, **kwargs
             )
-            if isinstance(image_outputs, tuple):
-                image_embeds_list, image_deepstack_layers = image_outputs
-            else:
-                image_embeds_list = image_outputs
+        if mm_encoder_outputs.get("video") is None and pixel_values_videos is not None:
+            mm_encoder_outputs["video"] = self.get_video_features(
+                pixel_values_videos, video_grid_thw, return_dict=True, **kwargs
+            )
 
-            image_features_tensor = (
-                torch.cat(image_embeds_list, dim=0)
-                if len(image_embeds_list) > 0
-                else torch.zeros(0, hidden_dim, device=device, dtype=dtype)
-            ).to(device=device, dtype=dtype)
-
+        image_mask = None
+        video_mask = None
+        deepstack_image_embeds = None
+        deepstack_video_embeds = None
+        if mm_encoder_outputs.get("image") is not None:
+            image_embeds = torch.cat(mm_encoder_outputs["image"].pooler_output, dim=0)
+            image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+            deepstack_image_embeds = mm_encoder_outputs["image"].deepstack_features
             image_mask, _ = self.get_placeholder_mask(
-                input_ids,
-                inputs_embeds=inputs_embeds,
-                image_features=image_features_tensor,
+                input_ids, inputs_embeds=inputs_embeds, image_features=image_embeds
             )
-            image_token_mask = image_mask[..., 0]
-            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_features_tensor)
+            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
-        if pixel_values_videos is not None:
-            video_outputs = self._get_visual_features(
-                pixel_values_videos,
-                video_grid_thw,
-                return_deepstack=vision_deepstack_enabled,
-            )
-            if isinstance(video_outputs, tuple):
-                video_embeds_list, video_deepstack_layers = video_outputs
-            else:
-                video_embeds_list = video_outputs
-
-            video_features_tensor = (
-                torch.cat(video_embeds_list, dim=0)
-                if len(video_embeds_list) > 0
-                else torch.zeros(0, hidden_dim, device=device, dtype=dtype)
-            ).to(device=device, dtype=dtype)
-
+        if mm_encoder_outputs.get("video") is not None:
+            video_embeds = torch.cat(mm_encoder_outputs["video"].pooler_output, dim=0)
+            video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+            deepstack_video_embeds = mm_encoder_outputs["video"].deepstack_features
             _, video_mask = self.get_placeholder_mask(
-                input_ids,
-                inputs_embeds=inputs_embeds,
-                video_features=video_features_tensor,
+                input_ids, inputs_embeds=inputs_embeds, video_features=video_embeds
             )
-            video_token_mask = video_mask[..., 0]
-            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_features_tensor)
+            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
-        visual_pos_mask = image_token_mask | video_token_mask
-        deepstack_visual_embeds: list[torch.Tensor] | None = None
-        if vision_deepstack_enabled:
-            layer_count = len(self.config.vision_config.deepstack_visual_indexes)
-            if layer_count > 0:
-                deepstack_lists: list[list[torch.Tensor]] = [[] for _ in range(layer_count)]
-                image_layer_indices = [0] * layer_count
-                video_layer_indices = [0] * layer_count
-                for b in range(batch_size):
-                    for s in range(seq_len):
-                        if not visual_pos_mask[b, s]:
-                            continue
-                        use_image = image_token_mask[b, s]
-                        source_layers = image_deepstack_layers if use_image else video_deepstack_layers
-                        layer_indices = image_layer_indices if use_image else video_layer_indices
-                        for layer_idx in range(layer_count):
-                            feature: torch.Tensor
-                            if source_layers and len(source_layers) > layer_idx:
-                                layer_list = source_layers[layer_idx]
-                            else:
-                                layer_list = None
-                            if layer_list and layer_indices[layer_idx] < len(layer_list):
-                                feature = layer_list[layer_indices[layer_idx]].to(device=device, dtype=dtype)
-                                layer_indices[layer_idx] += 1
-                            else:
-                                feature = torch.zeros(1, hidden_dim, device=device, dtype=dtype)
-                            deepstack_lists[layer_idx].append(feature.squeeze(0))
+        visual_pos_masks = None
+        deepstack_visual_embeds = None
+        if image_mask is not None and video_mask is not None:
+            image_mask = image_mask[..., 0]
+            video_mask = video_mask[..., 0]
+            visual_pos_masks = image_mask | video_mask
+            if deepstack_image_embeds is not None and deepstack_video_embeds is not None:
+                deepstack_visual_embeds = []
+                image_mask_joint = image_mask[visual_pos_masks]
+                video_mask_joint = video_mask[visual_pos_masks]
+                for img_embed, vid_embed in zip(deepstack_image_embeds, deepstack_video_embeds):
+                    img_embed = torch.cat(img_embed, dim=0)
+                    vid_embed = torch.cat(vid_embed, dim=0)
+                    embed_joint = img_embed.new_zeros(visual_pos_masks.sum(), img_embed.shape[-1])
+                    embed_joint[image_mask_joint, :] = img_embed
+                    embed_joint[video_mask_joint, :] = vid_embed
+                    deepstack_visual_embeds.append(embed_joint)
+        elif image_mask is not None:
+            visual_pos_masks = image_mask[..., 0]
+            if deepstack_image_embeds is not None:
+                deepstack_visual_embeds = [torch.cat(feature, dim=0) for feature in deepstack_image_embeds]
+        elif video_mask is not None:
+            visual_pos_masks = video_mask[..., 0]
+            if deepstack_video_embeds is not None:
+                deepstack_visual_embeds = [torch.cat(feature, dim=0) for feature in deepstack_video_embeds]
 
-                mapped_deepstack: list[torch.Tensor | None] = [None] * self.config.num_hidden_layers
-                text_layer_indexes = getattr(
-                    self.config,
-                    "text_deepstack_injection_layers",
-                    getattr(self.config.vision_config, "deepstack_visual_indexes", []),
-                )
-                for slot_idx, layer_id in enumerate(text_layer_indexes):
-                    if layer_id >= self.config.num_hidden_layers:
-                        continue
-                    layer_feats = deepstack_lists[slot_idx]
-                    if len(layer_feats) > 0:
-                        mapped_deepstack[layer_id] = torch.stack(layer_feats, dim=0)
-                deepstack_visual_embeds = mapped_deepstack
-        if deepstack_visual_embeds is not None and not bool(visual_pos_mask.any()):
-            deepstack_visual_embeds = None
-
-        # Compute position_ids with M-ROPE if needed
-        current_rope_deltas = rope_deltas
-        if position_ids is None:
-            cache_length = cache.get_seq_length() if cache is not None else 0
-            need_new_rope = current_rope_deltas is None or cache_length == 0
-            if need_new_rope:
-                position_ids, current_rope_deltas = self.get_rope_index(
-                    input_ids, image_grid_thw, video_grid_thw, attention_mask
-                )
-            else:
-                batch_size, seq_length, _ = inputs_embeds.shape
-                position_ids = torch.arange(seq_length, device=inputs_embeds.device)
-                position_ids = position_ids.view(1, 1, -1).expand(3, batch_size, -1)
-
-                delta = (cache_length + current_rope_deltas).to(inputs_embeds.device)
-                if delta.ndim == 1:
-                    delta = delta.unsqueeze(0)
-                if delta.shape[0] != batch_size:
-                    repeat_factor = max(1, math.ceil(batch_size / delta.shape[0]))
-                    delta = delta.repeat_interleave(repeat_factor, dim=0)[:batch_size]
-
-                position_ids = position_ids + delta.to(position_ids.device)
-
-        language_extra_kwargs = {}
         if deepstack_visual_embeds is not None:
-            language_extra_kwargs["visual_pos_masks"] = visual_pos_mask
-            language_extra_kwargs["deepstack_visual_embeds"] = deepstack_visual_embeds
+            # The text decoder expects one entry per layer, with the captured features at their injection layers
+            layer_embeds: list[torch.Tensor | None] = [None] * self.config.text_config.num_hidden_layers
+            for layer_idx, embeds in zip(self.config.text_deepstack_injection_layers, deepstack_visual_embeds):
+                layer_embeds[layer_idx] = embeds
+            deepstack_visual_embeds = layer_embeds
+
+        if position_ids is None:
+            position_ids = self.compute_3d_position_ids(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                attention_mask=attention_mask,
+                cache=cache,
+            )
 
         outputs = self.language_model(
-            input_ids=None,  # We're using inputs_embeds instead
+            input_ids=None,
             attention_mask=attention_mask,
             position_ids=position_ids,
             cache=cache,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            position_embeddings=None,
-            **language_extra_kwargs,
+            visual_pos_masks=visual_pos_masks,
+            deepstack_visual_embeds=deepstack_visual_embeds,
             **kwargs,
         )
 
-        return ArlowMultimodalModelOutputWithPast(
+        return MultimodalBaseModelOutputWithPast(
             last_hidden_state=outputs.last_hidden_state,
             cache=outputs.cache,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            rope_deltas=current_rope_deltas,
+            image_outputs=mm_encoder_outputs.get("image"),
+            video_outputs=mm_encoder_outputs.get("video"),
         )
 
 
@@ -2176,7 +1985,7 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         pixel_values: torch.FloatTensor,
         image_grid_thw: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
-    ):
+    ) -> tuple | BaseModelOutputWithDeepstackFeatures:
         r"""
         image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
             Image grid dimensions as `[temporal=1, height, width]` for each image in the batch.
@@ -2189,16 +1998,16 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         pixel_values_videos: torch.FloatTensor,
         video_grid_thw: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
-    ):
+    ) -> tuple | BaseModelOutputWithDeepstackFeatures:
         r"""
         video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
             Video grid dimensions as `[temporal, height, width]` for each video in the batch.
         """
         return self.model.get_video_features(pixel_values_videos, video_grid_thw, **kwargs)
 
-    @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
     @can_return_tuple
     @auto_docstring
+    @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -2211,18 +2020,16 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         pixel_values_videos: torch.FloatTensor | None = None,
         image_grid_thw: torch.LongTensor | None = None,
         video_grid_thw: torch.LongTensor | None = None,
-        rope_deltas: torch.LongTensor | None = None,
         use_cache: bool | None = None,
         logits_to_keep: int | torch.Tensor = 0,
-        **kwargs: Unpack[FlashAttentionKwargs],
-    ) -> ArlowMultimodalCausalLMOutputWithPast:
+        mm_encoder_outputs: dict[str, BaseModelOutputWithPooling] | None = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple | MultimodalCausalLMOutputWithPast:
         r"""
         image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
             Image grid dimensions as `[temporal=1, height, width]` for each image in the batch.
         video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
             Video grid dimensions as `[temporal, height, width]` for each video in the batch.
-        rope_deltas (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
-            The rope index difference between sequence length and multimodal rope for M-ROPE.
 
         Example:
         ```python
@@ -2243,7 +2050,7 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         >>> processor.batch_decode(outputs, skip_special_tokens=True)[0]
         ```
         """
-        outputs: ArlowMultimodalModelOutputWithPast = self.model(
+        outputs: MultimodalBaseModelOutputWithPast = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -2253,8 +2060,8 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
             pixel_values_videos=pixel_values_videos,
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
-            rope_deltas=rope_deltas,
             use_cache=use_cache,
+            mm_encoder_outputs=mm_encoder_outputs,
             **kwargs,
         )
 
@@ -2269,13 +2076,14 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
                 logits=logits, labels=labels_window, vocab_size=self.config.text_config.vocab_size, **kwargs
             )
 
-        return ArlowMultimodalCausalLMOutputWithPast(
+        return MultimodalCausalLMOutputWithPast(
             loss=loss,
             logits=logits,
             cache=outputs.cache,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            rope_deltas=outputs.rope_deltas,
+            image_outputs=outputs.image_outputs,
+            video_outputs=outputs.video_outputs,
         )
 
     def _prepare_position_ids_for_generation(self, inputs_tensor, model_kwargs):
@@ -2330,7 +2138,6 @@ class ArlowForSequenceClassification(GenericForSequenceClassification, ArlowPreT
     """
 
     config: ArlowConfig
-    input_modalities = "text"
 
 
 class ArlowTextForSequenceClassification(GenericForSequenceClassification, ArlowTextPreTrainedModel):
@@ -2339,7 +2146,6 @@ class ArlowTextForSequenceClassification(GenericForSequenceClassification, Arlow
     """
 
     config: ArlowTextConfig
-    input_modalities = "text"
 
 
 @auto_docstring
@@ -2364,7 +2170,6 @@ class ArlowTextForQuestionAnswering(GenericForQuestionAnswering, ArlowTextPreTra
     """
 
     config: ArlowTextConfig
-    input_modalities = "text"
 
 
 @auto_docstring
@@ -2383,7 +2188,6 @@ class ArlowTextForTokenClassification(GenericForTokenClassification, ArlowTextPr
     """
 
     config: ArlowTextConfig
-    input_modalities = "text"
 
 
 __all__ = [
