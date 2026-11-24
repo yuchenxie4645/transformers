@@ -249,6 +249,10 @@ inputs = processor.apply_chat_template(
 
 This injects `<{time} seconds>` tokens before each frame for temporal grounding.
 
+### Classification and question answering heads
+
+[`ArlowForSequenceClassification`], [`ArlowForTokenClassification`] and [`ArlowForQuestionAnswering`] take an [`ArlowConfig`] and run the full [`ArlowModel`], vision encoder included, so they accept `pixel_values` and `image_grid_thw` like [`ArlowForConditionalGeneration`]. For a text-only backbone, use [`ArlowTextForSequenceClassification`], [`ArlowTextForTokenClassification`] or [`ArlowTextForQuestionAnswering`] with an [`ArlowTextConfig`].
+
 ## ArlowConfig
 
 [[autodoc]] ArlowConfig
@@ -303,6 +307,8 @@ This injects `<{time} seconds>` tokens before each frame for temporal grounding.
 
 [[autodoc]] ArlowModel
     - forward
+    - get_video_features
+    - get_image_features
 
 ## ArlowForCausalLM
 
@@ -313,6 +319,8 @@ This injects `<{time} seconds>` tokens before each frame for temporal grounding.
 
 [[autodoc]] ArlowForConditionalGeneration
     - forward
+    - get_video_features
+    - get_image_features
 
 ## ArlowForSequenceClassification
 
