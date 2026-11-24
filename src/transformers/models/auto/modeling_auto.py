@@ -673,7 +673,7 @@ MODEL_FOR_PRETRAINING_MAPPING_NAMES = OrderedDict(
     [
         # Model for pre-training mapping
         ("albert", "AlbertForPreTraining"),
-        ("arlow", "ArlowForCausalLM"),
+        ("arlow", "ArlowForConditionalGeneration"),
         ("arlow_text", "ArlowForCausalLM"),
         ("audioflamingo3", "AudioFlamingo3ForConditionalGeneration"),
         ("bart", "BartForConditionalGeneration"),
@@ -788,7 +788,7 @@ MODEL_FOR_CAUSAL_LM_MAPPING_NAMES = OrderedDict(
         ("apertus1p5_text", "Apertus1p5TextForCausalLM"),
         ("arcee", "ArceeForCausalLM"),
         ("aria_text", "AriaTextForCausalLM"),
-        ("arlow", "ArlowForCausalLM"),
+        ("arlow", "ArlowForConditionalGeneration"),
         ("arlow_text", "ArlowForCausalLM"),
         ("axk1", "AXK1ForCausalLM"),
         ("axk2", "AXK2ForCausalLM"),

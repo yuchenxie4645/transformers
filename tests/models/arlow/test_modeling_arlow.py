@@ -1,8 +1,9 @@
 """Testing suite for the PyTorch Arlow model."""
 
+import tempfile
 import unittest
 
-from transformers import is_torch_available
+from transformers import AutoModelForCausalLM, is_torch_available
 from transformers.testing_utils import require_torch, require_torch_bf16, slow, torch_device
 from transformers.utils import is_torchvision_available
 
@@ -151,6 +152,18 @@ class ArlowVision2TextModelTest(VLMModelTest, unittest.TestCase):
         if is_torch_available()
         else {}
     )
+
+    def test_automodelforcausallm(self):
+        """
+        `AutoModelForCausalLM` on a composite `arlow` checkpoint builds the full multimodal model, so the vision and
+        language model weights load. The text-only `arlow_text` type keeps `ArlowForCausalLM`.
+        """
+        config = self.model_tester.get_config()
+        model = ArlowForConditionalGeneration(config)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model.save_pretrained(tmp_dir)
+            for_causal_lm = AutoModelForCausalLM.from_pretrained(tmp_dir)
+            self.assertIsInstance(for_causal_lm, ArlowForConditionalGeneration)
 
     def test_config_multimodal_defaults(self):
         config = ArlowConfig()
