@@ -1352,11 +1352,9 @@ class ArlowTextModel(ArlowTextPreTrainedModel):
 
         hidden_states = inputs_embeds
 
-        # Use provided position_embeddings if available (from multimodal M-ROPE), otherwise compute standard RoPE
+        # The text row of packed 4D positions only serves the masks, RoPE uses the M-RoPE rows
         if position_embeddings is None:
-            # For text-only, prefer using text_position_ids (2D). Fall back to raw position_ids (e.g., multimodal M-ROPE).
-            rope_position_ids = text_position_ids if text_position_ids is not None else position_ids
-            position_embeddings = self.rotary_emb(hidden_states, rope_position_ids)
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         # Collect hidden states and attentions for output if requested
         output_hidden_states = kwargs.get("output_hidden_states", self.config.output_hidden_states)
@@ -1515,6 +1513,7 @@ class ArlowModel(ArlowPreTrainedModel):
             use_gated_cross_attention=config.use_gated_cross_attention,
             gated_cross_attention_start_layer=config.gated_cross_attention_start_layer,
         )
+        self.rope_deltas = None  # cache rope_deltas here
 
         self.post_init()
 
@@ -2304,49 +2303,47 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
             rope_deltas=outputs.rope_deltas,
         )
 
-    def prepare_inputs_for_generation(
-        self,
-        input_ids: torch.LongTensor,
-        next_sequence_length: int | None = None,
-        cache: Cache | None = None,
-        attention_mask: torch.Tensor | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
-        pixel_values: torch.Tensor | None = None,
-        pixel_values_videos: torch.FloatTensor | None = None,
-        image_grid_thw: torch.LongTensor | None = None,
-        video_grid_thw: torch.LongTensor | None = None,
-        rope_deltas: torch.LongTensor | None = None,
-        is_first_iteration: bool = False,
-        **kwargs,
-    ):
-        cache_length = cache.get_seq_length() if cache is not None else 0
-        # Vision inputs are only consumed by the prefill step
-        if not is_first_iteration and cache_length > 0:
-            pixel_values = pixel_values_videos = image_grid_thw = video_grid_thw = None
+    def _prepare_position_ids_for_generation(self, inputs_tensor, model_kwargs):
+        # Overwritten -- requires 3D position ids
 
-        model_inputs = super().prepare_inputs_for_generation(
-            input_ids,
-            next_sequence_length=next_sequence_length,
-            cache=cache,
-            attention_mask=attention_mask,
-            inputs_embeds=inputs_embeds,
-            pixel_values=pixel_values,
-            pixel_values_videos=pixel_values_videos,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
-            is_first_iteration=is_first_iteration,
-            **kwargs,
+        text_positions = super()._prepare_position_ids_for_generation(inputs_tensor, model_kwargs)
+
+        if "input_ids" in model_kwargs and model_kwargs["input_ids"].shape[1] > 0:
+            inputs_tensor = model_kwargs["input_ids"]
+        is_input_ids = len(inputs_tensor.shape) == 2 and inputs_tensor.dtype in [torch.int, torch.long]
+
+        # When continuing generation from past kv, the stored `rope_deltas` come from an earlier call, so the 3D
+        # positions only have to be recomputed if the uncached tokens hold new images or videos
+        past_length = 0
+        if (cache := model_kwargs.get("cache")) is not None:
+            past_length = cache.get_seq_length()
+        vision_token_ids = torch.tensor(
+            [self.config.image_token_id, self.config.video_token_id], device=inputs_tensor.device
+        )
+        has_new_vision_tokens = is_input_ids and bool(
+            torch.isin(inputs_tensor[:, past_length:], vision_token_ids).any()
         )
 
-        if (cache_length == 0 or rope_deltas is None) and model_inputs.get("input_ids") is not None:
-            _, rope_deltas = self.model.get_rope_index(
-                model_inputs["input_ids"],
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                attention_mask=attention_mask,
+        if past_length != 0 and self.model.rope_deltas is not None and not has_new_vision_tokens:
+            vision_positions = (text_positions + self.model.rope_deltas).unsqueeze(0).expand(3, -1, -1)
+        elif is_input_ids and (
+            model_kwargs.get("image_grid_thw") is not None or model_kwargs.get("video_grid_thw") is not None
+        ):
+            vision_positions, rope_deltas = self.model.get_rope_index(
+                inputs_tensor,
+                image_grid_thw=model_kwargs.get("image_grid_thw"),
+                video_grid_thw=model_kwargs.get("video_grid_thw"),
+                attention_mask=model_kwargs.get("attention_mask"),
             )
-        model_inputs["rope_deltas"] = rope_deltas
-        return model_inputs
+            self.model.rope_deltas = rope_deltas
+        else:
+            vision_positions = text_positions.unsqueeze(0).expand(3, -1, -1)
+            self.model.rope_deltas = torch.zeros(
+                inputs_tensor.shape[0], 1, dtype=torch.long, device=inputs_tensor.device
+            )
+
+        # Concatenate "text + vision" positions into [4, bs, seq-len]
+        return torch.cat([text_positions[None, ...], vision_positions.to(text_positions.device)], dim=0)
 
 
 @auto_docstring

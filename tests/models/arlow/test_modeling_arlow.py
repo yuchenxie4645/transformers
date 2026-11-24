@@ -988,6 +988,68 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
         self.assertEqual(generated.shape[0], 1)
         self.assertGreater(generated.shape[1], input_ids.shape[1])
 
+    def test_generate_matches_forward_with_images(self):
+        """Cached greedy decoding must use the same M-RoPE positions as a full forward pass over the sequence."""
+        from transformers import ArlowForConditionalGeneration, ArlowVisionConfig
+
+        config = ArlowConfig(
+            vocab_size=128,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=128,
+            image_token_id=10,
+            vision_start_token_id=11,
+            vision_end_token_id=12,
+            head_dim=16,
+            mrope_sections=[4, 6, 6],
+            vision_config=ArlowVisionConfig(
+                depth=2,
+                embed_dim=32,
+                hidden_size=64,
+                num_heads=4,
+                patch_size=14,
+                spatial_merge_size=2,
+                temporal_patch_size=2,
+            ),
+        )
+        model = ArlowForConditionalGeneration(config).to(torch_device).eval()
+
+        # A 4x4 patch grid merges into 2x2 image tokens, whose M-RoPE positions differ from 1D positions
+        image_grid_thw = torch.tensor([[1, 4, 4]], device=torch_device)
+        pixel_values = torch.randn(16, 3 * 2 * 14 * 14, device=torch_device)
+        image_tokens = _repeat_visual_token(
+            config.image_token_id, image_grid_thw, config.vision_config.spatial_merge_size
+        )
+        input_ids = torch.tensor(
+            [[1, config.vision_start_token_id, *image_tokens, config.vision_end_token_id, 20, 21, 22]],
+            device=torch_device,
+        )
+
+        max_new_tokens = 3
+        with torch.no_grad():
+            generated = model.generate(
+                input_ids=input_ids,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                suppress_tokens=[config.image_token_id, config.vision_start_token_id, config.vision_end_token_id],
+                output_logits=True,
+                return_dict_in_generate=True,
+            )
+            full_logits = model(
+                input_ids=generated.sequences, pixel_values=pixel_values, image_grid_thw=image_grid_thw
+            ).logits
+
+        self.assertEqual(len(generated.logits), max_new_tokens)
+        for step, step_logits in enumerate(generated.logits):
+            torch.testing.assert_close(
+                step_logits, full_logits[:, input_ids.shape[1] - 1 + step], rtol=1e-4, atol=1e-4
+            )
+
     def test_model_mrope_position_ids(self):
         """Test M-ROPE position IDs computation for multimodal inputs."""
         from transformers import ArlowModel, ArlowVisionConfig
