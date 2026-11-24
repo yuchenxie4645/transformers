@@ -47,7 +47,6 @@ from ...modeling_outputs import (
     CausalLMOutputWithPast,
     ModelOutput,
     QuestionAnsweringModelOutput,
-    SequenceClassifierOutputWithPast,
     TokenClassifierOutput,
 )
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
@@ -1500,39 +1499,8 @@ class ArlowForCausalLM(ArlowTextPreTrainedModel, GenerationMixin):
 class ArlowModel(ArlowPreTrainedModel):
     config: ArlowConfig
 
-    # Use a consistent base prefix so checkpoints saved from heads (which prefix with `model.`)
-    # can be loaded into the base model and vice versa with proper key remapping by HF loader.
     base_model_prefix = "model"
-    # Map checkpoints saved from task heads that prefix base weights with `model.` to the
-    # current base model layout where the text backbone lives under `language_model`.
-    # The loader will first apply this mapping, then strip the leading `model.` when
-    # loading a base model from a task-specific state dict, resulting in the correct
-    # `language_model.*` keys.
-    _checkpoint_conversion_mapping = {"^model": "model.language_model"}
     accepts_loss_kwargs = False
-
-    @staticmethod
-    def _fix_state_dict_key_on_load(key: str) -> tuple[str, bool]:
-        """
-        Align checkpoints saved from task heads (prefixed with `model.`) to the base architecture layout.
-
-        This ensures that loading a head checkpoint into the base model surfaces true shape mismatches
-        instead of silently reinitializing missing weights.
-        """
-        new_key, changed = PreTrainedModel._fix_state_dict_key_on_load(key)
-
-        # Head checkpoints save the text backbone under `model.*`. Strip that prefix and remap to
-        # the base model's `language_model.*` namespace while leaving vision weights untouched.
-        if new_key.startswith("model.language_model."):
-            return new_key, True
-
-        if new_key.startswith("model."):
-            suffix = new_key[len("model.") :]
-            # Only remap text-backbone weights; skip other modules like `visual`
-            if not suffix.startswith("visual."):
-                return f"model.language_model.{suffix}", True
-
-        return new_key, changed
 
     def __init__(self, config: ArlowConfig):
         super().__init__(config)
@@ -2382,95 +2350,15 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
 
 
 @auto_docstring
-class ArlowForSequenceClassification(ArlowPreTrainedModel):
+class ArlowForSequenceClassification(GenericForSequenceClassification, ArlowPreTrainedModel):
     """
-    Sequence classification head that always runs on the text-only `ArlowTextModel` backbone.
-
-    When initialized with an `ArlowConfig`, the text decoder is materialized via `_from_config` so that the unused
-    vision modules are never instantiated, mirroring the approach taken by other VLMs such as Gemma and Qwen.
+    Sequence classification head for `ArlowConfig`, built on the full [`ArlowModel`] backbone (vision encoder
+    included), matching `Gemma3ForSequenceClassification`. For a text-only backbone, use
+    [`ArlowTextForSequenceClassification`] with an [`ArlowTextConfig`].
     """
 
+    config: ArlowConfig
     input_modalities = "text"
-
-    def __init__(self, config: ArlowConfig | ArlowTextConfig):
-        super().__init__(config)
-        self.num_labels = config.num_labels
-        text_config = config.text_config if hasattr(config, "text_config") else config
-        self.model = ArlowTextModel._from_config(text_config)
-        self.score = nn.Linear(text_config.hidden_size, self.num_labels, bias=False)
-
-        if getattr(config, "gradient_checkpointing", False):
-            self.gradient_checkpointing_enable()
-
-        self.post_init()
-
-    def get_input_embeddings(self):
-        return self.model.get_input_embeddings()
-
-    def set_input_embeddings(self, value):
-        self.model.set_input_embeddings(value)
-
-    @deprecate_kwarg("past_key_values", "5.40.0", new_name="cache")
-    @can_return_tuple
-    @auto_docstring
-    def forward(
-        self,
-        input_ids: torch.LongTensor | None = None,
-        attention_mask: torch.Tensor | None = None,
-        position_ids: torch.LongTensor | None = None,
-        cache: Cache | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
-        labels: torch.LongTensor | None = None,
-        use_cache: bool | None = None,
-        **kwargs: Unpack[TransformersKwargs],
-    ) -> SequenceClassifierOutputWithPast:
-        transformer_outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            cache=cache,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            **kwargs,
-        )
-        hidden_states = transformer_outputs.last_hidden_state
-        logits = self.score(hidden_states)
-
-        if input_ids is not None:
-            batch_size = input_ids.shape[0]
-        elif inputs_embeds is not None:
-            batch_size = inputs_embeds.shape[0]
-        else:
-            raise ValueError("You must provide either `input_ids` or `inputs_embeds`.")
-
-        if self.config.pad_token_id is None and batch_size != 1:
-            raise ValueError("Cannot handle batch sizes > 1 if no padding token is defined.")
-        if self.config.pad_token_id is None:
-            last_non_pad_token = -1
-        elif input_ids is not None:
-            non_pad_mask = (input_ids != self.config.pad_token_id).to(logits.device, torch.int32)
-            token_indices = torch.arange(input_ids.shape[-1], device=logits.device, dtype=torch.int32)
-            last_non_pad_token = (token_indices * non_pad_mask).argmax(-1)
-        else:
-            last_non_pad_token = -1
-            logger.warning_once(
-                f"{self.__class__.__name__} will not detect padding tokens in `inputs_embeds`. Results may be "
-                "unexpected if using padding tokens in conjunction with `inputs_embeds.`"
-            )
-
-        pooled_logits = logits[torch.arange(batch_size, device=logits.device), last_non_pad_token]
-
-        loss = None
-        if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, pooled_logits=pooled_logits, config=self.config)
-
-        return SequenceClassifierOutputWithPast(
-            loss=loss,
-            logits=pooled_logits,
-            cache=transformer_outputs.cache,
-            hidden_states=transformer_outputs.hidden_states,
-            attentions=transformer_outputs.attentions,
-        )
 
 
 class ArlowTextForSequenceClassification(GenericForSequenceClassification, ArlowTextPreTrainedModel):
