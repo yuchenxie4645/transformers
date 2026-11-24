@@ -47,6 +47,9 @@ if is_torch_available():
         count = _merged_token_count(grid_thw, merge_size)
         return [token_id] * count
 
+    def _mm_token_type_ids(input_ids, config):
+        return (input_ids == config.image_token_id).long() + 2 * (input_ids == config.video_token_id).long()
+
 
 class ArlowTextModelTester(CausalLMModelTester):
     if is_torch_available():
@@ -116,7 +119,7 @@ class ArlowVision2TextModelTester(VLMModelTester):
         )
 
     def place_image_tokens(self, input_ids, config):
-        # `get_rope_index` locates each image through the token following `vision_start_token_id`
+        # The processor wraps every image in vision start/end tokens
         input_ids = input_ids.clone()
         input_ids[:, 0] = self.vision_start_token_id
         input_ids[:, 1 : 1 + self.num_image_tokens] = self.image_token_id
@@ -126,7 +129,12 @@ class ArlowVision2TextModelTester(VLMModelTester):
     def get_additional_inputs(self, config, input_ids, pixel_values, batch_size: int | None = None):
         batch_size = batch_size if batch_size is not None else self.batch_size
         grid_size = self.image_size // self.patch_size
-        return {"image_grid_thw": torch.tensor([[1, grid_size, grid_size]] * batch_size, device=torch_device)}
+        mm_token_type_ids = torch.zeros_like(input_ids)
+        mm_token_type_ids[input_ids == self.image_token_id] = 1
+        return {
+            "image_grid_thw": torch.tensor([[1, grid_size, grid_size]] * batch_size, device=torch_device),
+            "mm_token_type_ids": mm_token_type_ids,
+        }
 
 
 @require_torch
@@ -689,6 +697,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
                 input_ids=input_ids,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
+                mm_token_type_ids=_mm_token_type_ids(input_ids, config),
             )
 
         # Check output shapes
@@ -748,6 +757,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
                 input_ids=input_ids,
                 pixel_values_videos=pixel_values_videos,
                 video_grid_thw=video_grid_thw,
+                mm_token_type_ids=_mm_token_type_ids(input_ids, config),
             )
 
         self.assertIsNotNone(outputs.logits)
@@ -826,6 +836,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
                 pixel_values_videos=pixel_values_videos,
                 image_grid_thw=image_grid_thw,
                 video_grid_thw=video_grid_thw,
+                mm_token_type_ids=_mm_token_type_ids(input_ids, config),
             )
 
         self.assertIsNotNone(outputs.logits)
@@ -874,6 +885,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
             input_ids=input_ids,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
+            mm_token_type_ids=_mm_token_type_ids(input_ids, config),
             labels=labels,
         )
 
@@ -970,6 +982,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
                 input_ids=input_ids,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
+                mm_token_type_ids=_mm_token_type_ids(input_ids, config),
                 max_new_tokens=10,
                 do_sample=False,
             )
@@ -1024,6 +1037,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
                 input_ids=input_ids,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
+                mm_token_type_ids=_mm_token_type_ids(input_ids, config),
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
                 suppress_tokens=[config.image_token_id, config.vision_start_token_id, config.vision_end_token_id],
@@ -1031,7 +1045,10 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
                 return_dict_in_generate=True,
             )
             full_logits = model(
-                input_ids=generated.sequences, pixel_values=pixel_values, image_grid_thw=image_grid_thw
+                input_ids=generated.sequences,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+                mm_token_type_ids=_mm_token_type_ids(generated.sequences, config),
             ).logits
 
         self.assertEqual(len(generated.logits), max_new_tokens)
@@ -1076,6 +1093,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
 
         position_ids, rope_deltas = model.get_rope_index(
             input_ids=input_ids,
+            mm_token_type_ids=_mm_token_type_ids(input_ids, config),
             image_grid_thw=image_grid_thw,
         )
 
@@ -1083,6 +1101,68 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
         self.assertEqual(position_ids.shape[0], 3)  # [temporal, height, width]
         self.assertEqual(position_ids.shape[1], input_ids.shape[0])  # batch
         self.assertEqual(rope_deltas.shape[0], input_ids.shape[0])  # batch
+
+    def test_get_rope_index_from_mm_token_type_ids(self):
+        """Each image or video is one contiguous run in `mm_token_type_ids`, a whole video included."""
+        from transformers import ArlowModel, ArlowVisionConfig
+
+        config = ArlowConfig(
+            vocab_size=128,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            max_position_embeddings=128,
+            image_token_id=7,
+            video_token_id=8,
+            vision_start_token_id=11,
+            vision_end_token_id=12,
+            head_dim=16,
+            mrope_sections=[4, 6, 6],
+            vision_config=ArlowVisionConfig(depth=1, embed_dim=32, hidden_size=64, num_heads=4, spatial_merge_size=2),
+        )
+        model = ArlowModel(config).to(torch_device).eval()
+
+        # Row 0: text, a 2x2 image, text, a 2-frame 2x3 video, text. Row 1: a left-padded 1x2 image.
+        image_grid_thw = torch.tensor([[1, 4, 4], [1, 2, 4]], device=torch_device)
+        video_grid_thw = torch.tensor([[2, 4, 6]], device=torch_device)
+        row_0 = [1, 2, 11] + [7] * 4 + [12, 3, 11] + [8] * 12 + [12, 4, 5]
+        row_1 = [0] * 19 + [1, 11, 7, 7, 12, 6]
+        input_ids = torch.tensor([row_0, row_1], device=torch_device)
+        attention_mask = torch.tensor([[1] * 25, [0] * 19 + [1] * 6], device=torch_device)
+
+        position_ids, rope_deltas = model.get_rope_index(
+            input_ids,
+            mm_token_type_ids=_mm_token_type_ids(input_ids, config),
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            attention_mask=attention_mask,
+        )
+
+        padding = [1] * 19
+        expected_position_ids = torch.tensor(
+            [
+                [
+                    [0, 1, 2, 3, 3, 3, 3, 5, 6, 7, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 11, 12, 13],
+                    padding + [0, 1, 2, 2, 4, 5],
+                ],
+                [
+                    [0, 1, 2, 3, 3, 4, 4, 5, 6, 7, 8, 8, 8, 9, 9, 9, 8, 8, 8, 9, 9, 9, 11, 12, 13],
+                    padding + [0, 1, 2, 2, 4, 5],
+                ],
+                [
+                    [0, 1, 2, 3, 4, 3, 4, 5, 6, 7, 8, 9, 10, 8, 9, 10, 8, 9, 10, 8, 9, 10, 11, 12, 13],
+                    padding + [0, 1, 2, 3, 4, 5],
+                ],
+            ],
+            device=torch_device,
+        )
+        torch.testing.assert_close(position_ids, expected_position_ids)
+        torch.testing.assert_close(rope_deltas, torch.tensor([[-11], [-19]], device=torch_device))
+
+        with self.assertRaisesRegex(ValueError, "mm_token_type_ids"):
+            model.get_rope_index(input_ids, image_grid_thw=image_grid_thw, attention_mask=attention_mask)
 
     def test_text_model_accepts_4d_position_ids(self):
         """Ensure text model supports packed 4D position_ids [text; 3D mrope]."""
@@ -1191,6 +1271,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
                 input_ids=input_ids,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
+                mm_token_type_ids=_mm_token_type_ids(input_ids, config),
             )
 
     def test_vision_encoder_standalone(self):
@@ -1263,6 +1344,7 @@ class ArlowMultimodalIntegrationTest(unittest.TestCase):
             input_ids=input_ids,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
+            mm_token_type_ids=_mm_token_type_ids(input_ids, config),
             labels=labels,
         )
 

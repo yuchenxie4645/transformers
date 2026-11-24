@@ -302,20 +302,25 @@ class ArlowProcessorTest(unittest.TestCase):
             video_processor=self.video_processor,
         )
 
-        text = ["hello <image> world"]
+        text = ["hello <image> and <|vision_start|><video><|vision_end|> world"]
         images = [torch.randint(0, 255, (3, 224, 224), dtype=torch.uint8)]
+        videos = [torch.randint(0, 255, (8, 3, 112, 112), dtype=torch.uint8)]
+
+        # Returned by default, since the model needs them to compute M-RoPE positions
+        outputs = processor(images=images, videos=videos, text=text, return_tensors="pt")
+
+        self.assertIn("mm_token_type_ids", processor.model_input_names)
+        input_ids = outputs["input_ids"]
+        mm_token_type_ids = outputs["mm_token_type_ids"]
+        expected = (input_ids == processor.image_token_id).long() + 2 * (input_ids == processor.video_token_id).long()
+        torch.testing.assert_close(mm_token_type_ids, expected)
+        self.assertTrue((mm_token_type_ids == 1).any())
+        self.assertTrue((mm_token_type_ids == 2).any())
 
         outputs = processor(
-            images=images,
-            text=text,
-            return_tensors="pt",
-            return_mm_token_type_ids=True,
+            images=images, videos=videos, text=text, return_tensors="pt", return_mm_token_type_ids=False
         )
-
-        self.assertIn("mm_token_type_ids", outputs)
-        # Image tokens should have type_id=1
-        mm_token_type_ids = outputs["mm_token_type_ids"]
-        self.assertGreater(mm_token_type_ids.sum(), 0)
+        self.assertNotIn("mm_token_type_ids", outputs)
 
     def test_get_num_multimodal_tokens(self):
         """Test calculation of multimodal token counts."""

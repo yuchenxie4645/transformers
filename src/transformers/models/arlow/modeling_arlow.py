@@ -18,6 +18,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import itertools
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Optional
@@ -1608,6 +1609,7 @@ class ArlowModel(ArlowPreTrainedModel):
     def get_rope_index(
         self,
         input_ids: torch.LongTensor | None = None,
+        mm_token_type_ids: torch.IntTensor | None = None,
         image_grid_thw: torch.LongTensor | None = None,
         video_grid_thw: torch.LongTensor | None = None,
         attention_mask: torch.Tensor | None = None,
@@ -1639,9 +1641,15 @@ class ArlowModel(ArlowPreTrainedModel):
                 text width position_ids: [3, 4, 5, 6, 7]
                 Here we calculate the text start position_ids as the max vision position_ids plus 1.
 
+            Each contiguous run of image or video tokens in `mm_token_type_ids` is one image or video, and a whole
+            video is a single run.
+
         Args:
             input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
                 Indices of input sequence tokens in the vocabulary.
+            mm_token_type_ids (`torch.IntTensor` of shape `(batch_size, sequence_length)`, *optional*):
+                Token type ids matching each modality to a different value in the input sequence, i.e. text (0), image
+                (1), video (2). Required to compute the 3D positions of image and video tokens.
             image_grid_thw (`torch.LongTensor` of shape `(num_images, 3)`, *optional*):
                 The temporal, height and width of feature shape of each image in LLM.
             video_grid_thw (`torch.LongTensor` of shape `(num_videos, 3)`, *optional*):
@@ -1654,98 +1662,48 @@ class ArlowModel(ArlowPreTrainedModel):
             mrope_position_deltas (`torch.Tensor` of shape `(batch_size)`)
         """
         spatial_merge_size = self.config.vision_config.spatial_merge_size
-        image_token_id = self.config.image_token_id
-        video_token_id = self.config.video_token_id
-        vision_start_token_id = self.config.vision_start_token_id
-        mrope_position_deltas = []
+        has_multimodal = image_grid_thw is not None or video_grid_thw is not None
+        if input_ids is not None and has_multimodal and mm_token_type_ids is None:
+            raise ValueError(
+                "Multimodal data was passed (via `image_grid_thw` or `video_grid_thw`) but `mm_token_type_ids` is "
+                "missing. Please pass `mm_token_type_ids` to the model so that multimodal RoPE (M-RoPE) can be "
+                "computed correctly. `mm_token_type_ids` is returned by the processor alongside `input_ids`."
+            )
 
-        if input_ids is not None and (image_grid_thw is not None or video_grid_thw is not None):
-            total_input_ids = input_ids
+        if input_ids is not None and has_multimodal:
             if attention_mask is None:
-                attention_mask = torch.ones_like(total_input_ids)
+                attention_mask = torch.ones_like(input_ids)
             position_ids = torch.ones(
                 3, input_ids.shape[0], input_ids.shape[1], dtype=input_ids.dtype, device=input_ids.device
             )
-            image_index, video_index = 0, 0
-            for i, input_ids in enumerate(total_input_ids):
-                input_ids = input_ids[attention_mask[i].to(input_ids.device) == 1]
-                image_nums, video_nums = 0, 0
-                vision_start_indices = torch.argwhere(input_ids == vision_start_token_id).squeeze(1)
-                # Handle case when there are no vision tokens or only one
-                if vision_start_indices.numel() == 0:
-                    vision_tokens = torch.tensor([], dtype=input_ids.dtype, device=input_ids.device)
-                else:
-                    if vision_start_indices.dim() == 0:
-                        vision_start_indices = vision_start_indices.unsqueeze(0)
-                    vision_tokens = input_ids[vision_start_indices + 1]
+            grid_iters = {
+                1: iter(image_grid_thw) if image_grid_thw is not None else None,
+                2: iter(video_grid_thw) if video_grid_thw is not None else None,
+            }
+            mrope_position_deltas = []
+            for batch_idx in range(input_ids.shape[0]):
+                token_mask = attention_mask[batch_idx].to(input_ids.device) == 1
+                token_types = mm_token_type_ids[batch_idx].to(input_ids.device)[token_mask]
 
-                # Handle scalar case when vision_tokens is a single element
-                if vision_tokens.numel() == 0:
-                    image_nums = 0
-                    video_nums = 0
-                elif vision_tokens.numel() == 1:
-                    # Single token case - need to handle as tensor
-                    image_nums = 1 if vision_tokens.item() == image_token_id else 0
-                    video_nums = 1 if vision_tokens.item() == video_token_id else 0
-                else:
-                    image_nums = (vision_tokens == image_token_id).sum()
-                    video_nums = (vision_tokens == video_token_id).sum()
-
-                input_tokens = input_ids.tolist()
-                llm_pos_ids_list: list = []
-                st = 0
-                remain_images, remain_videos = image_nums, video_nums
-                for _ in range(image_nums + video_nums):
-                    if image_token_id in input_tokens and remain_images > 0:
-                        ed_image = input_tokens.index(image_token_id, st)
+                llm_pos_ids_list = []
+                current_pos = 0
+                for modality_type, group in itertools.groupby(token_types.tolist()):
+                    span_length = len(list(group))
+                    if modality_type == 0:
+                        span_positions = torch.arange(span_length).view(1, -1).expand(3, -1) + current_pos
                     else:
-                        ed_image = len(input_tokens) + 1
-                    if video_token_id in input_tokens and remain_videos > 0:
-                        ed_video = input_tokens.index(video_token_id, st)
-                    else:
-                        ed_video = len(input_tokens) + 1
-                    if ed_image < ed_video:
-                        t, h, w = (
-                            image_grid_thw[image_index][0],
-                            image_grid_thw[image_index][1],
-                            image_grid_thw[image_index][2],
-                        )
-                        image_index += 1
-                        remain_images -= 1
-                        ed = ed_image
-                    else:
-                        t, h, w = (
-                            video_grid_thw[video_index][0],
-                            video_grid_thw[video_index][1],
-                            video_grid_thw[video_index][2],
-                        )
-                        video_index += 1
-                        remain_videos -= 1
-                        ed = ed_video
-                    llm_grid_t, llm_grid_h, llm_grid_w = (
-                        t.item(),
-                        h.item() // spatial_merge_size,
-                        w.item() // spatial_merge_size,
-                    )
-                    text_len = ed - st
+                        grid_t, grid_h, grid_w = next(grid_iters[modality_type]).tolist()
+                        grid_h, grid_w = grid_h // spatial_merge_size, grid_w // spatial_merge_size
+                        t_index = torch.arange(grid_t).view(-1, 1).expand(-1, grid_h * grid_w).flatten()
+                        h_index = torch.arange(grid_h).view(1, -1, 1).expand(grid_t, -1, grid_w).flatten()
+                        w_index = torch.arange(grid_w).view(1, 1, -1).expand(grid_t, grid_h, -1).flatten()
+                        span_positions = torch.stack([t_index, h_index, w_index]) + current_pos
+                    llm_pos_ids_list.append(span_positions)
+                    current_pos = span_positions.max() + 1
 
-                    st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                    llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
-
-                    t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
-                    h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
-                    w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
-                    llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
-                    st = ed + llm_grid_t * llm_grid_h * llm_grid_w
-
-                if st < len(input_tokens):
-                    st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                    text_len = len(input_tokens) - st
-                    llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
-
-                llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-                position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(position_ids.device)
-                mrope_position_deltas.append(llm_positions.max() + 1 - len(total_input_ids[i]))
+                llm_positions = torch.cat(llm_pos_ids_list, dim=1)
+                position_ids[:, batch_idx, token_mask] = llm_positions.to(position_ids.device)
+                mrope_position_deltas.append(llm_positions.max() + 1 - input_ids.shape[1])
             mrope_position_deltas = torch.tensor(mrope_position_deltas, device=input_ids.device).unsqueeze(1)
             return position_ids, mrope_position_deltas
         else:
@@ -1778,11 +1736,13 @@ class ArlowModel(ArlowPreTrainedModel):
         video_grid_thw: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
         cache: Cache | None = None,
+        mm_token_type_ids: torch.IntTensor | None = None,
     ) -> torch.Tensor | None:
         cache_length = 0 if cache is None else cache.get_seq_length()
         if input_ids is not None and cache_length == 0:
             position_ids, rope_deltas = self.get_rope_index(
                 input_ids,
+                mm_token_type_ids=mm_token_type_ids,
                 image_grid_thw=image_grid_thw,
                 video_grid_thw=video_grid_thw,
                 attention_mask=attention_mask,
@@ -1814,6 +1774,7 @@ class ArlowModel(ArlowPreTrainedModel):
         pixel_values_videos: torch.FloatTensor | None = None,
         image_grid_thw: torch.LongTensor | None = None,
         video_grid_thw: torch.LongTensor | None = None,
+        mm_token_type_ids: torch.IntTensor | None = None,
         use_cache: bool | None = None,
         mm_encoder_outputs: dict[str, BaseModelOutputWithPooling] | None = None,
         **kwargs: Unpack[TransformersKwargs],
@@ -1905,6 +1866,7 @@ class ArlowModel(ArlowPreTrainedModel):
                 video_grid_thw=video_grid_thw,
                 attention_mask=attention_mask,
                 cache=cache,
+                mm_token_type_ids=mm_token_type_ids,
             )
 
         outputs = self.language_model(
@@ -2020,6 +1982,7 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         pixel_values_videos: torch.FloatTensor | None = None,
         image_grid_thw: torch.LongTensor | None = None,
         video_grid_thw: torch.LongTensor | None = None,
+        mm_token_type_ids: torch.IntTensor | None = None,
         use_cache: bool | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         mm_encoder_outputs: dict[str, BaseModelOutputWithPooling] | None = None,
@@ -2060,6 +2023,7 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
             pixel_values_videos=pixel_values_videos,
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
+            mm_token_type_ids=mm_token_type_ids,
             use_cache=use_cache,
             mm_encoder_outputs=mm_encoder_outputs,
             **kwargs,
@@ -2100,12 +2064,8 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         past_length = 0
         if (cache := model_kwargs.get("cache")) is not None:
             past_length = cache.get_seq_length()
-        vision_token_ids = torch.tensor(
-            [self.config.image_token_id, self.config.video_token_id], device=inputs_tensor.device
-        )
-        has_new_vision_tokens = is_input_ids and bool(
-            torch.isin(inputs_tensor[:, past_length:], vision_token_ids).any()
-        )
+        mm_token_type_ids = model_kwargs.get("mm_token_type_ids")
+        has_new_vision_tokens = mm_token_type_ids is not None and bool(mm_token_type_ids[:, past_length:].any())
 
         if past_length != 0 and self.model.rope_deltas is not None and not has_new_vision_tokens:
             vision_positions = (text_positions + self.model.rope_deltas).unsqueeze(0).expand(3, -1, -1)
@@ -2114,6 +2074,7 @@ class ArlowForConditionalGeneration(ArlowPreTrainedModel, GenerationMixin):
         ):
             vision_positions, rope_deltas = self.model.get_rope_index(
                 inputs_tensor,
+                mm_token_type_ids=mm_token_type_ids,
                 image_grid_thw=model_kwargs.get("image_grid_thw"),
                 video_grid_thw=model_kwargs.get("video_grid_thw"),
                 attention_mask=model_kwargs.get("attention_mask"),

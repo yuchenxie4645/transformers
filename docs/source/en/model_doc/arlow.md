@@ -179,6 +179,10 @@ processor = AutoProcessor.from_pretrained(
 
 This ensures each image uses 256-1024 tokens. The factor of 28 comes from the patch size (14) times the temporal patch size (2).
 
+### Multimodal position ids
+
+The processor returns `mm_token_type_ids` alongside `input_ids`, marking text tokens with 0, image tokens with 1 and video tokens with 2. The model uses it to compute the 3D M-RoPE positions of images and videos, so pass it whenever you pass `image_grid_thw` or `video_grid_thw`; the model raises an error if it is missing. Passing the processor output with `**inputs` handles this automatically. If you build `input_ids` yourself, build `mm_token_type_ids` from the image and video token ids.
+
 ### Flash Attention 2
 
 For faster inference, install Flash Attention 2:
